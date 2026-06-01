@@ -94,6 +94,18 @@ class Registry:
         )
         self._devices[hostname] = profile
         logger.info(f"Device registered: hostname={hostname}, base_url={base_url}")
+        # Immediately attempt to verify reachability and spawn a pod to avoid
+        # race conditions where the health loop has not yet run.
+        try:
+            reachable = await self.check_reachability(profile)
+            if reachable:
+                await self.fetch_spec(profile)
+                # Only spawn if we have a spec and no active pod yet
+                if profile.spec_data and not profile.pod_active:
+                    await self._spawn_pod(profile)
+        except Exception:
+            logger.exception(f"Error during immediate post-register processing for {hostname}")
+
         return profile
 
     def deregister_device(self, hostname: str) -> None:
