@@ -1,0 +1,70 @@
+# Device MCP Gateway Configuration
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  
+registry:
+  # How often to poll device reachability (seconds)
+  health_check_interval: 30
+  # How often to check for spec version updates
+  spec_poll_interval: 300
+  # Spec cache TTL in seconds
+  spec_cache_ttl: 3600
+  # Max pods to run concurrently
+  max_concurrent_pods: 50
+
+auth:
+  # Default auth type (api_key or oauth2)
+  type: "api_key"
+  
+  # API Key mode settings
+  api_key:
+    header_name: "X-API-Key"
+    
+  # OAuth2 mode settings  
+  oauth2:
+    token_refresh_before_expiry_seconds: 300
+    token_endpoint: ""
+    client_id: ""
+    client_secret: ""
+    scopes:
+      - "read"
+      - "write"
+      
+transport:
+  # Supported transports: sse, stdio, http
+  default: "sse"
+  
+  # Transport-specific settings
+  sse:
+    endpoint: "/events"
+    keep_alive_interval: 15
+  http:
+    endpoint: "/rpc"
+  stdio:
+    enabled: true
+
+discovery:
+  # Common OpenAPI spec paths to try when auto-discovering
+  spec_paths:
+    - "/openapi.json"
+    - "/openapi.yaml"
+    - "/swagger.json" 
+    - "/swagger.yaml"
+    - "/api-docs"
+    - "/docs/openapi.json"
+    - "/openapi/3.0.json"
+    - "/api/v1/openapi.json"
+  # Timeout for discovery requests (seconds)
+  timeout: 10
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  # Log file path
+  file: "logs/gateway.log"
+  # Max log file size in MB  
+  max_size: 50
+  # Max backup files
+  backup_count: 5
