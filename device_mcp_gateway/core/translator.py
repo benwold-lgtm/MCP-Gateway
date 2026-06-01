@@ -72,7 +72,7 @@ def _sanitize_name(raw: str) -> str:
 class SpecTranslator:
     """Translates OpenAPI specs into MCP manifests."""
 
-    def translate(self, spec: dict, hostname: str = "test-device") -> dict:
+    def translate(self, spec: dict, hostname: str = "test-device") -> McpManifest:
         """Main entry point: spec dict + hostname -> McpManifest."""
         try:
             _validate_openapi_spec(spec)

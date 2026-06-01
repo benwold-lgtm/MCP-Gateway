@@ -32,7 +32,7 @@ class SseTransport:
 
     def register_client(self, client_id: str) -> asyncio.Queue:
         """Register a new SSE client and return their message queue."""
-        q = asyncio.Queue(maxsize=1000)
+        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self._clients[client_id] = q
         logger.info(f"SSE client {client_id} registered for {self.hostname}")
         # Send an immediate connection acknowledgement so streaming clients

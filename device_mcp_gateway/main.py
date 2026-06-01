@@ -13,6 +13,7 @@ from sse_starlette import EventSourceResponse
 from device_mcp_gateway.cfg.settings import load_config
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
+from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
 from device_mcp_gateway.logging.setup import setup_logging
 from device_mcp_gateway.storage.sqlite_store import SqliteDeviceStore
@@ -68,7 +69,7 @@ async def register_device(request: Request):
     auth_type = (
         data.get("auth_type") or data.get("auth", {}).get("type") or config.get("auth", {}).get("type", "api_key")
     )
-    auth = None
+    auth: AbstractAuth | None = None
 
     if auth_type == "api_key":
         api_key = data.get("auth", {}).get("api_key") or data.get("api_key")
