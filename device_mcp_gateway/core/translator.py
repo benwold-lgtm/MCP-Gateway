@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
+from openapi_spec_validator import validate as _validate_openapi_spec
+from openapi_spec_validator.validation.exceptions import OpenAPISpecValidatorError
 
 
 @dataclass
@@ -67,6 +69,10 @@ class SpecTranslator:
 
     def translate(self, spec: dict, hostname: str = "test-device") -> dict:
         """Main entry point: spec dict + hostname -> McpManifest."""
+        try:
+            _validate_openapi_spec(spec)
+        except OpenAPISpecValidatorError as exc:
+            raise ValueError(f"Invalid OpenAPI spec: {exc}") from exc
         info = spec.get("info", {})
         manifest = McpManifest(
             server_name=f"mcp-{hostname}",
@@ -108,18 +114,18 @@ class SpecTranslator:
         op_id = op.get("operationId", "")
         name = _sanitize_name(op_id or f"{method}_{path}")
         description = op.get("summary") or op.get("description") or f"{method} {path}"
-        parameters = self._build_parameter_schema(op, schemas)
+        parameters, required = self._build_parameter_schema(op, schemas)
         tags = op.get("tags", [])
         return McpTool(
             name=name,
             description=description or f"{method} {path}",
-            schema={"type": "object", "properties": parameters, "required": []},
+            schema={"type": "object", "properties": parameters, "required": required},
             method=method.upper(),
             path=path,
             tags=tags,
         )
 
-    def _build_parameter_schema(self, op: dict, schemas: dict) -> dict[str, Any]:
+    def _build_parameter_schema(self, op: dict, schemas: dict) -> tuple[dict[str, Any], list[str]]:
         """Extract JSON-serializable parameter schema from an operation."""
         params = {}
         for param in op.get("parameters", []):
@@ -152,7 +158,7 @@ class SpecTranslator:
                         params[k] = {"type": v.get("type", "string"),
                                      "description": v.get("description", "")}
                     req += [k for k in cschema["schema"].get("required", [])]
-        return params
+        return params, req
 
     # ---- Resource Building ----
 

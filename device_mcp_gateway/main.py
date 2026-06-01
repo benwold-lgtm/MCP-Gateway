@@ -3,6 +3,7 @@ Device MCP Gateway FastAPI entrypoint.
 """
 
 import asyncio
+import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -14,18 +15,25 @@ from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
 from device_mcp_gateway.logging.setup import setup_logging
+from device_mcp_gateway.storage.sqlite_store import SqliteDeviceStore
 
 app = FastAPI(title="Device MCP Gateway", version="0.1.0")
 
 config = load_config()
 setup_logging(level=config.get("logging", {}).get("level", "INFO"))
 
-registry = Registry(config=config.get("registry", {}))
+_storage_cfg = config.get("storage", {})
+_db_path = _storage_cfg.get("db_path", "./devices.db")
+_store = SqliteDeviceStore(db_path=_db_path)
+
+registry = Registry(config=config.get("registry", {}), store=_store)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Device MCP Gateway starting up")
+    await _store.initialize()
+    await registry.load_persisted_devices()
     health_task = asyncio.create_task(registry.start_health_loop())
     try:
         yield
@@ -37,6 +45,15 @@ async def lifespan(app: FastAPI):
 
 
 app.router.lifespan_context = lifespan
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed = (time.perf_counter() - start) * 1000
+    logger.info(f"{request.method} {request.url.path} -> {response.status_code} ({elapsed:.1f}ms)")
+    return response
 
 
 @app.post("/devices")
@@ -139,7 +156,7 @@ async def device_sse_message(hostname: str, request: Request, client_id: str = Q
 
 @app.delete("/devices/{hostname}")
 async def unregister_device(hostname: str):
-    registry.deregister_device(hostname)
+    await registry.deregister_device(hostname)
     return {"status": "removed", "hostname": hostname}
 
 

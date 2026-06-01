@@ -60,7 +60,8 @@ class TestGetEndpointTranslation:
         schema = tool.schema
         assert "item_id" in schema["properties"]
         assert schema["properties"]["item_id"]["type"] == "integer"
-        # NOTE: translator currently hardcodes required=[] (bug)
+        assert "item_id" in schema["required"]
+        assert "fields" not in schema["required"]
 
     def test_get_with_no_parameters(self):
         spec = fresh_spec()
@@ -145,6 +146,8 @@ class TestPostEndpointTranslation:
         assert "name" in schema["properties"]
         assert schema["properties"]["name"]["type"] == "string"
         assert "age" in schema["properties"]
+        assert "name" in schema["required"]
+        assert "age" not in schema["required"]
 
     def test_post_with_path_and_body_params(self):
         spec = fresh_spec()
@@ -222,7 +225,7 @@ class TestPutAndDeleteEndpointTranslation:
 
         schema = manifest.tools[0].schema
         assert schema["properties"]["older_than"]["type"] == "string"
-        # NOTE: translator currently hardcodes required=[] (bug)
+        assert "older_than" in schema["required"]
 
 
 class TestNestedAndComponentSchemas:

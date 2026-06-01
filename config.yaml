@@ -59,12 +59,18 @@ discovery:
   # Timeout for discovery requests (seconds)
   timeout: 10
 
+storage:
+  # Persistence backend: sqlite
+  type: "sqlite"
+  # Path to the SQLite database file
+  db_path: "./devices.db"
+
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR
   level: "INFO"
   # Log file path
   file: "logs/gateway.log"
-  # Max log file size in MB  
+  # Max log file size in MB
   max_size: 50
   # Max backup files
   backup_count: 5

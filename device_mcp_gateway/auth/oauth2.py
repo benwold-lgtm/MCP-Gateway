@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -53,7 +54,24 @@ class OAuth2Auth(AbstractAuth):
                 logger.error(f"OAuth2 token fetch failed: {e}")
                 raise
 
-    def get_headers(self) -> dict[str, str]:
-        if not self._access_token:
-            raise RuntimeError("Token not initialized. Call ensure_token() first.")
+    async def get_headers(self) -> dict[str, str]:
+        await self.ensure_token()
         return {"Authorization": f"Bearer {self._access_token}"}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": "oauth2",
+            "token_endpoint": self.token_endpoint,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "scopes": self._scopes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OAuth2Auth":
+        return cls(
+            token_endpoint=data["token_endpoint"],
+            client_id=data["client_id"],
+            client_secret=data["client_secret"],
+            scopes=data.get("scopes", ["read"]),
+        )

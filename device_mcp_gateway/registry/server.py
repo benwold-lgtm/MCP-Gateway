@@ -17,6 +17,7 @@ from loguru import logger
 from device_mcp_gateway.core.translator import SpecTranslator
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.auth.base import AbstractAuth
+from device_mcp_gateway.storage.base import AbstractDeviceStore
 
 
 @dataclass
@@ -67,9 +68,10 @@ class SpecCache:
 class Registry:
     """Central orchestration for device discovery, spec management, pods."""
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], store: AbstractDeviceStore | None = None):
         self._config = config
         self._devices: dict[str, DeviceProfile] = {}
+        self._store = store
         self._spec_cache = SpecCache(
             ttl=config.get("spec_cache_ttl", 3600),
             max_entries=200,
@@ -93,6 +95,22 @@ class Registry:
             spec_cache_ttl=self._config.get("spec_cache_ttl", 3600),
         )
         self._devices[hostname] = profile
+
+        if self._store:
+            auth_type = None
+            auth_config = None
+            if auth is not None:
+                d = auth.to_dict()
+                auth_type = d.get("type")
+                auth_config = d
+            await self._store.save(hostname, {
+                "base_url": base_url,
+                "spec_url": spec_url,
+                "transport": transport,
+                "auth_type": auth_type,
+                "auth_config": auth_config,
+            })
+
         logger.info(f"Device registered: hostname={hostname}, base_url={base_url}")
         # Immediately attempt to verify reachability and spawn a pod to avoid
         # race conditions where the health loop has not yet run.
@@ -108,15 +126,45 @@ class Registry:
 
         return profile
 
-    def deregister_device(self, hostname: str) -> None:
+    async def deregister_device(self, hostname: str) -> None:
         profile = self._devices.pop(hostname, None)
         if profile and profile.pod_active and profile.pod:
             profile.pod.stop()
             profile.pod_active = False
+        if self._store:
+            await self._store.delete(hostname)
         logger.info(f"Device deregistered: {hostname}")
 
     def get_device(self, hostname: str) -> DeviceProfile | None:
         return self._devices.get(hostname)
+
+    async def load_persisted_devices(self) -> None:
+        """On startup, reload devices from the store and attempt to reconnect pods."""
+        if not self._store:
+            return
+        records = await self._store.load_all()
+        if not records:
+            return
+        logger.info(f"Loading {len(records)} persisted device(s) from store")
+        for record in records:
+            auth = _auth_from_record(record)
+            profile = DeviceProfile(
+                hostname=record["hostname"],
+                base_url=record["base_url"],
+                spec_url=record.get("spec_url"),
+                auth=auth,
+                transport=record.get("transport", "sse"),
+                spec_cache_ttl=self._config.get("spec_cache_ttl", 3600),
+            )
+            self._devices[record["hostname"]] = profile
+            try:
+                reachable = await self.check_reachability(profile)
+                if reachable:
+                    await self.fetch_spec(profile)
+                    if profile.spec_data and not profile.pod_active:
+                        await self._spawn_pod(profile)
+            except Exception:
+                logger.exception(f"Error reconnecting persisted device {record['hostname']}")
 
     async def fetch_spec(self, profile: DeviceProfile) -> dict[str, Any]:
         cache_key = profile.base_url
@@ -219,3 +267,19 @@ class Registry:
         for profile in self._devices.values():
             await self._kill_pod(profile)
         logger.info("Registry shutdown complete")
+
+
+def _auth_from_record(record: dict) -> AbstractAuth | None:
+    """Reconstruct an AbstractAuth instance from a persisted record."""
+    auth_config = record.get("auth_config")
+    if not auth_config:
+        return None
+    from device_mcp_gateway.auth.api_key import ApiKeyAuth
+    from device_mcp_gateway.auth.oauth2 import OAuth2Auth
+    auth_type = auth_config.get("type")
+    if auth_type == "api_key":
+        return ApiKeyAuth.from_dict(auth_config)
+    if auth_type == "oauth2":
+        return OAuth2Auth.from_dict(auth_config)
+    logger.warning(f"Unknown auth type in store: {auth_type}")
+    return None

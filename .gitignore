@@ -27,4 +27,4 @@ pip-delete-this-directory.txt
 /autonomy/project_manifest.json
 /autonomy/PROJECT_MANIFEST.md
 /autonomy/DEPENDENCY_GRAPH.json
-/autonomy/dependencies.json
+/autonomy/dependencies.json/devices.db

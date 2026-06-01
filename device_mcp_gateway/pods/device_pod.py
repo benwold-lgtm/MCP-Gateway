@@ -50,7 +50,7 @@ class DevicePod:
                 **kwargs: Any,
             ) -> Any:
                 url = f"{base_url}{tool.path}"
-                headers = auth.get_headers() if auth else {}
+                headers = await auth.get_headers() if auth else {}
                 try:
                     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
                         resp = await c.request(
