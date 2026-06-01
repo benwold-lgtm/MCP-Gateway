@@ -21,9 +21,14 @@ from device_mcp_gateway.core.translator import McpManifest, McpTool
 class DevicePod:
     """Manages a single per-hostname MCP server process."""
 
-    def __init__(self, hostname: str, manifest: McpManifest,
-                 transport: str = "sse", auth: AbstractAuth | None = None,
-                 base_url: str = ""):
+    def __init__(
+        self,
+        hostname: str,
+        manifest: McpManifest,
+        transport: str = "sse",
+        auth: AbstractAuth | None = None,
+        base_url: str = "",
+    ):
         self.hostname = hostname
         self.manifest = manifest
         self.transport = transport
@@ -116,9 +121,7 @@ class DevicePod:
             return {"result": result}
         except Exception as e:
             available = list(self._mcp._tool_manager._tools.keys())
-            logger.error(
-                f"SSE tool call failed for {tool_name}: {e}; available tools: {available}"
-            )
+            logger.error(f"SSE tool call failed for {tool_name}: {e}; available tools: {available}")
             return {"error": str(e)}
 
     async def start(self) -> None:

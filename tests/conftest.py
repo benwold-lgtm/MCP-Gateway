@@ -1,6 +1,7 @@
 """
 Pytest configuration for device-mcp-gateway integration tests.
 """
+
 import os
 import socket
 import time
@@ -12,7 +13,7 @@ from fastapi import FastAPI, Request
 import uvicorn
 
 # --- Mock Target API ---
-mock_target_app = FastAPI(title='Mock IoT Sensor API', version='1.0.0')
+mock_target_app = FastAPI(title="Mock IoT Sensor API", version="1.0.0")
 
 MOCK_OPENAPI_SPEC = {
     "openapi": "3.0.3",
@@ -23,7 +24,7 @@ MOCK_OPENAPI_SPEC = {
             "get": {
                 "summary": "Get device sensor status",
                 "operationId": "get_device_status",
-                "responses": {"200": {"description": "Successful response"}}
+                "responses": {"200": {"description": "Successful response"}},
             }
         },
         "/control/fan": {
@@ -35,40 +36,44 @@ MOCK_OPENAPI_SPEC = {
                         "application/json": {
                             "schema": {
                                 "type": "object",
-                                "properties": {
-                                    "speed": {"type": "integer", "minimum": 0, "maximum": 100}
-                                },
-                                "required": ["speed"]
+                                "properties": {"speed": {"type": "integer", "minimum": 0, "maximum": 100}},
+                                "required": ["speed"],
                             }
                         }
                     }
                 },
-                "responses": {"200": {"description": "Fan updated"}}
+                "responses": {"200": {"description": "Fan updated"}},
             }
-        }
-    }
+        },
+    },
 }
+
 
 @mock_target_app.get("/status")
 async def get_status():
     return {"status": "online", "temp": 24.5, "humidity": 45}
+
 
 @mock_target_app.post("/control/fan")
 async def control_fan(request: Request):
     data = await request.json()
     return {"fan_speed": data.get("speed"), "state": "running"}
 
+
 @mock_target_app.get("/openapi.json")
 async def serve_spec():
     return MOCK_OPENAPI_SPEC
+
 
 # Ensure FastAPI returns our static spec for the automatic openapi route
 def _static_openapi():
     return MOCK_OPENAPI_SPEC
 
+
 mock_target_app.openapi = _static_openapi
 
 # --- Test configuration helpers ---
+
 
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -115,6 +120,7 @@ def mock_target_url():
 def gateway_url():
     import importlib
     import device_mcp_gateway.main as main
+
     importlib.reload(main)
 
     port = _find_free_port()
@@ -127,10 +133,12 @@ def gateway_url():
     server.should_exit = True
     thread.join(timeout=3.0)
 
+
 @pytest.fixture(scope="module")
 def client(gateway_url):
     with httpx.Client(base_url=gateway_url, timeout=httpx.Timeout(10.0, read=30.0)) as client:
         yield client
+
 
 # Global registry for test results to avoid TestClient blocking issues across threads
 test_results = {}

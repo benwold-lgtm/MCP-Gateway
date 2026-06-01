@@ -23,6 +23,7 @@ from device_mcp_gateway.storage.base import AbstractDeviceStore
 @dataclass
 class DeviceProfile:
     """Registered device/API profile stored in the registry."""
+
     hostname: str
     base_url: str
     spec_url: str | None = None
@@ -82,10 +83,14 @@ class Registry:
         self._spec_poll_interval = config.get("spec_poll_interval", 300)
         self._max_pods = config.get("max_concurrent_pods", 50)
 
-    async def register_device(self, hostname: str, base_url: str,
-                              spec_url: str | None = None,
-                              auth: AbstractAuth | None = None,
-                              transport: str = "sse") -> DeviceProfile:
+    async def register_device(
+        self,
+        hostname: str,
+        base_url: str,
+        spec_url: str | None = None,
+        auth: AbstractAuth | None = None,
+        transport: str = "sse",
+    ) -> DeviceProfile:
         profile = DeviceProfile(
             hostname=hostname,
             base_url=base_url,
@@ -103,13 +108,16 @@ class Registry:
                 d = auth.to_dict()
                 auth_type = d.get("type")
                 auth_config = d
-            await self._store.save(hostname, {
-                "base_url": base_url,
-                "spec_url": spec_url,
-                "transport": transport,
-                "auth_type": auth_type,
-                "auth_config": auth_config,
-            })
+            await self._store.save(
+                hostname,
+                {
+                    "base_url": base_url,
+                    "spec_url": spec_url,
+                    "transport": transport,
+                    "auth_type": auth_type,
+                    "auth_config": auth_config,
+                },
+            )
 
         logger.info(f"Device registered: hostname={hostname}, base_url={base_url}")
         # Immediately attempt to verify reachability and spawn a pod to avoid
@@ -179,6 +187,7 @@ class Registry:
 
         if fetched:
             import hashlib
+
             h = hashlib.sha256(str(fetched).encode()).hexdigest()[:16]
             if h != profile.spec_hash:
                 logger.info(f"Spec updated for {profile.hostname}: hash={h}")
@@ -190,9 +199,14 @@ class Registry:
         return {}
 
     async def _discover_spec(self, base_url: str) -> dict[str, Any] | None:
-        paths = self._config.get("discovery", {}).get("spec_paths", [
-            "/openapi.json", "/swagger.json", "/api-docs",
-        ])
+        paths = self._config.get("discovery", {}).get(
+            "spec_paths",
+            [
+                "/openapi.json",
+                "/swagger.json",
+                "/api-docs",
+            ],
+        )
         async with httpx.AsyncClient(timeout=self._config.get("discovery", {}).get("timeout", 10)) as client:
             for path in paths:
                 try:
@@ -276,6 +290,7 @@ def _auth_from_record(record: dict) -> AbstractAuth | None:
         return None
     from device_mcp_gateway.auth.api_key import ApiKeyAuth
     from device_mcp_gateway.auth.oauth2 import OAuth2Auth
+
     auth_type = auth_config.get("type")
     if auth_type == "api_key":
         return ApiKeyAuth.from_dict(auth_config)

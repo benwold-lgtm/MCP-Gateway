@@ -74,12 +74,14 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     auth_config = json.loads(row["auth_config"])
                 except Exception:
                     logger.warning(f"Could not parse auth_config for {row['hostname']}")
-            result.append({
-                "hostname": row["hostname"],
-                "base_url": row["base_url"],
-                "spec_url": row["spec_url"],
-                "transport": row["transport"],
-                "auth_type": row["auth_type"],
-                "auth_config": auth_config,
-            })
+            result.append(
+                {
+                    "hostname": row["hostname"],
+                    "base_url": row["base_url"],
+                    "spec_url": row["spec_url"],
+                    "transport": row["transport"],
+                    "auth_type": row["auth_type"],
+                    "auth_config": auth_config,
+                }
+            )
         return result

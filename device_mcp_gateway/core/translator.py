@@ -18,10 +18,11 @@ from openapi_spec_validator.validation.exceptions import OpenAPISpecValidatorErr
 @dataclass
 class McpTool:
     """MCP tool representation."""
+
     name: str
     description: str
     schema: dict[str, Any]
-    method: str          # GET, POST, PUT, DELETE, PATCH
+    method: str  # GET, POST, PUT, DELETE, PATCH
     path: str
     tags: list[str] = field(default_factory=list)
 
@@ -29,6 +30,7 @@ class McpTool:
 @dataclass
 class McpResource:
     """MCP resource representation."""
+
     uri: str
     name: str
     description: str
@@ -38,6 +40,7 @@ class McpResource:
 @dataclass
 class McpPrompt:
     """MCP prompt template."""
+
     name: str
     description: str
     template: str
@@ -47,6 +50,7 @@ class McpPrompt:
 @dataclass
 class McpManifest:
     """Complete MCP server manifest for a single device/API."""
+
     server_name: str
     server_version: str
     hostname: str
@@ -59,6 +63,7 @@ class McpManifest:
 def _sanitize_name(raw: str) -> str:
     """Convert a path segment or operationId into a valid MCP tool name."""
     import re
+
     name = re.sub(r"[^a-zA-Z0-9_]", "_", raw.strip("/"))
     name = re.sub(r"_+", "_", name)
     return name.lower().strip("_")
@@ -101,15 +106,16 @@ class SpecTranslator:
                     if resource:
                         manifest.resources.append(resource)
         manifest.prompts = self._build_prompts(spec, manifest)
-        logger.info(f"Translated {len(manifest.tools)} tools, "
-                     f"{len(manifest.resources)} resources, "
-                     f"{len(manifest.prompts)} prompts for {hostname}")
+        logger.info(
+            f"Translated {len(manifest.tools)} tools, "
+            f"{len(manifest.resources)} resources, "
+            f"{len(manifest.prompts)} prompts for {hostname}"
+        )
         return manifest
 
     # ---- Tool Building ----
 
-    def _build_tool(self, method: str, path: str, op: dict,
-                    schemas: dict, hostname: str) -> McpTool | None:
+    def _build_tool(self, method: str, path: str, op: dict, schemas: dict, hostname: str) -> McpTool | None:
         """Convert a single OpenAPI operation into an MCP tool."""
         op_id = op.get("operationId", "")
         name = _sanitize_name(op_id or f"{method}_{path}")
@@ -155,8 +161,7 @@ class SpecTranslator:
                 if cschema and "schema" in cschema:
                     props = cschema["schema"].get("properties", {})
                     for k, v in props.items():
-                        params[k] = {"type": v.get("type", "string"),
-                                     "description": v.get("description", "")}
+                        params[k] = {"type": v.get("type", "string"), "description": v.get("description", "")}
                     req += [k for k in cschema["schema"].get("required", [])]
         return params, req
 
@@ -182,11 +187,13 @@ class SpecTranslator:
         title = manifest.metadata.get("title", manifest.hostname)
         desc = manifest.metadata.get("description", "")
         if desc:
-            prompts.append(McpPrompt(
-                name=f"what_is_{_sanitize_name(title)}",
-                description=f"Describe what {title} does",
-                template=f"You are given access to a device API called '{title}'. "
-                         f"Context: {desc}\n\n"
-                         f"Available tools: {[t.name for t in manifest.tools]}",
-            ))
+            prompts.append(
+                McpPrompt(
+                    name=f"what_is_{_sanitize_name(title)}",
+                    description=f"Describe what {title} does",
+                    template=f"You are given access to a device API called '{title}'. "
+                    f"Context: {desc}\n\n"
+                    f"Available tools: {[t.name for t in manifest.tools]}",
+                )
+            )
         return prompts

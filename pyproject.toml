@@ -51,6 +51,10 @@ device-mcp = "device_mcp_gateway.cli:main"
 [tool.setuptools.packages.find]
 include = ["device_mcp_gateway*"]
 
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"

@@ -10,6 +10,7 @@ from loguru import logger
 
 CONFIG_PATH = os.getenv("MCP_CONFIG", "config.yaml")
 
+
 def load_config(path: str = CONFIG_PATH) -> dict[str, Any]:
     """Load configuration from YAML file."""
     try:
@@ -19,6 +20,7 @@ def load_config(path: str = CONFIG_PATH) -> dict[str, Any]:
         logger.warning(f"Config file {path} not found, using defaults")
         return _defaults()
 
+
 def _defaults() -> dict:
     return {
         "server": {"host": "0.0.0.0", "port": 8000},
@@ -26,9 +28,9 @@ def _defaults() -> dict:
             "health_check_interval": 30,
             "spec_poll_interval": 300,
             "spec_cache_ttl": 3600,
-            "max_concurrent_pods": 50
+            "max_concurrent_pods": 50,
         },
         "auth": {"type": "api_key"},
         "transport": {"default": "sse"},
-        "logging": {"level": "INFO"}
+        "logging": {"level": "INFO"},
     }

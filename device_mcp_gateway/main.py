@@ -65,19 +65,27 @@ async def register_device(request: Request):
     if not hostname or not base_url:
         raise HTTPException(status_code=400, detail="hostname and base_url required")
 
-    auth_type = data.get("auth_type") or data.get("auth", {}).get("type") or config.get("auth", {}).get("type", "api_key")
+    auth_type = (
+        data.get("auth_type") or data.get("auth", {}).get("type") or config.get("auth", {}).get("type", "api_key")
+    )
     auth = None
 
     if auth_type == "api_key":
         api_key = data.get("auth", {}).get("api_key") or data.get("api_key")
-        header_name = data.get("auth", {}).get("header_name") or config.get("auth", {}).get("api_key", {}).get("header_name", "X-API-Key")
+        header_name = data.get("auth", {}).get("header_name") or config.get("auth", {}).get("api_key", {}).get(
+            "header_name", "X-API-Key"
+        )
         if api_key:
             auth = ApiKeyAuth(api_key=api_key, header_name=header_name)
     elif auth_type == "oauth2":
         auth_config = data.get("auth", {})
-        token_endpoint = auth_config.get("token_endpoint") or config.get("auth", {}).get("oauth2", {}).get("token_endpoint")
+        token_endpoint = auth_config.get("token_endpoint") or config.get("auth", {}).get("oauth2", {}).get(
+            "token_endpoint"
+        )
         client_id = auth_config.get("client_id") or config.get("auth", {}).get("oauth2", {}).get("client_id")
-        client_secret = auth_config.get("client_secret") or config.get("auth", {}).get("oauth2", {}).get("client_secret")
+        client_secret = auth_config.get("client_secret") or config.get("auth", {}).get("oauth2", {}).get(
+            "client_secret"
+        )
         scopes = auth_config.get("scopes") or config.get("auth", {}).get("oauth2", {}).get("scopes", ["read"])
         if not token_endpoint or not client_id or not client_secret:
             raise HTTPException(status_code=400, detail="oauth2 requires token_endpoint, client_id, and client_secret")
@@ -110,14 +118,16 @@ async def register_device(request: Request):
 async def list_devices():
     devices = []
     for profile in registry._devices.values():
-        devices.append({
-            "hostname": profile.hostname,
-            "base_url": profile.base_url,
-            "reachable": profile.reachable,
-            "pod_active": profile.pod_active,
-            "last_check": profile.last_reachable_check,
-            "transport": profile.transport,
-        })
+        devices.append(
+            {
+                "hostname": profile.hostname,
+                "base_url": profile.base_url,
+                "reachable": profile.reachable,
+                "pod_active": profile.pod_active,
+                "last_check": profile.last_reachable_check,
+                "transport": profile.transport,
+            }
+        )
     return {"devices": devices}
 
 

@@ -20,13 +20,16 @@ async def store(db_path):
 
 @pytest.mark.asyncio
 async def test_save_and_load(store):
-    await store.save("my-device", {
-        "base_url": "http://device.local",
-        "spec_url": None,
-        "transport": "sse",
-        "auth_type": "api_key",
-        "auth_config": {"type": "api_key", "api_key": "secret", "header_name": "X-API-Key"},
-    })
+    await store.save(
+        "my-device",
+        {
+            "base_url": "http://device.local",
+            "spec_url": None,
+            "transport": "sse",
+            "auth_type": "api_key",
+            "auth_config": {"type": "api_key", "api_key": "secret", "header_name": "X-API-Key"},
+        },
+    )
     records = await store.load_all()
     assert len(records) == 1
     r = records[0]
@@ -37,10 +40,8 @@ async def test_save_and_load(store):
 
 @pytest.mark.asyncio
 async def test_upsert_replaces_existing(store):
-    await store.save("dev", {"base_url": "http://a.local", "transport": "sse",
-                              "auth_type": None, "auth_config": None})
-    await store.save("dev", {"base_url": "http://b.local", "transport": "http",
-                              "auth_type": None, "auth_config": None})
+    await store.save("dev", {"base_url": "http://a.local", "transport": "sse", "auth_type": None, "auth_config": None})
+    await store.save("dev", {"base_url": "http://b.local", "transport": "http", "auth_type": None, "auth_config": None})
     records = await store.load_all()
     assert len(records) == 1
     assert records[0]["base_url"] == "http://b.local"
@@ -49,8 +50,7 @@ async def test_upsert_replaces_existing(store):
 
 @pytest.mark.asyncio
 async def test_delete_removes_record(store):
-    await store.save("dev", {"base_url": "http://x.local", "transport": "sse",
-                              "auth_type": None, "auth_config": None})
+    await store.save("dev", {"base_url": "http://x.local", "transport": "sse", "auth_type": None, "auth_config": None})
     await store.delete("dev")
     records = await store.load_all()
     assert records == []
@@ -65,8 +65,10 @@ async def test_load_empty_store(store):
 @pytest.mark.asyncio
 async def test_multiple_devices(store):
     for i in range(3):
-        await store.save(f"dev-{i}", {"base_url": f"http://dev-{i}.local",
-                                       "transport": "sse", "auth_type": None, "auth_config": None})
+        await store.save(
+            f"dev-{i}",
+            {"base_url": f"http://dev-{i}.local", "transport": "sse", "auth_type": None, "auth_config": None},
+        )
     records = await store.load_all()
     assert len(records) == 3
     hostnames = {r["hostname"] for r in records}

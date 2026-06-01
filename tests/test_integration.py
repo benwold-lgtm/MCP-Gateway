@@ -1,8 +1,10 @@
 """
 Integration Test: Register Mock OpenAPI Device -> Verify Gateway Health & Metrics
 """
+
 import json
 import time
+
 
 def test_register_and_metrics(client, mock_target_url):
     """
@@ -12,12 +14,7 @@ def test_register_and_metrics(client, mock_target_url):
     4. Verify GET /health returns healthy status.
     """
     # 1. Register device pointing to our mock API
-    reg_payload = {
-        "hostname": "mock-iot.local",
-        "base_url": mock_target_url,
-        "auth_type": "none",
-        "transport": "sse"
-    }
+    reg_payload = {"hostname": "mock-iot.local", "base_url": mock_target_url, "auth_type": "none", "transport": "sse"}
     reg_resp = client.post("/devices", json=reg_payload)
     assert reg_resp.status_code == 200, f"Registration failed: {reg_resp.json()}"
     print("[+] Device registered via /devices endpoint")
@@ -59,7 +56,7 @@ def test_register_and_metrics(client, mock_target_url):
     remaining = [d for d in devices2 if d["hostname"] == "mock-iot.local"]
     assert len(remaining) == 0, "Device should be removed from list"
     print("[+] Device removal verified")
-    
+
     print("[PASS] Full integration test passed.")
 
 
@@ -116,10 +113,10 @@ def test_sse_transport_client_flow(client, mock_target_url):
                 continue
 
             if line.startswith("event:"):
-                event_name = line[len("event:"):].strip()
+                event_name = line[len("event:") :].strip()
                 continue
             if line.startswith("data:"):
-                data_payload += line[len("data:"):].strip()
+                data_payload += line[len("data:") :].strip()
                 continue
 
         assert data_line is not None, "No SSE message event received"

@@ -3,12 +3,14 @@ Unit tests for OpenAPI-to-MCP translation logic.
 Validates schema mapping across different HTTP methods, parameter types,
 and nested structures.
 """
+
 import copy
 import pytest
 
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from device_mcp_gateway.core.translator import SpecTranslator
 
@@ -19,7 +21,7 @@ def fresh_spec(**overrides):
         "openapi": "3.0.3",
         "info": {"title": "Test API", "version": "1.0.0"},
         "paths": {},
-        "components": {"schemas": {}}
+        "components": {"schemas": {}},
     }
     for k, v in overrides.items():
         spec[k] = v
@@ -43,9 +45,9 @@ class TestGetEndpointTranslation:
                 "summary": "Retrieve a specific item",
                 "parameters": [
                     {"name": "item_id", "in": "path", "required": True, "schema": {"type": "integer"}},
-                    {"name": "fields", "in": "query", "required": False, "schema": {"type": "string"}}
+                    {"name": "fields", "in": "query", "required": False, "schema": {"type": "string"}},
                 ],
-                "responses": {"200": {"description": "Success"}}
+                "responses": {"200": {"description": "Success"}},
             }
         }
 
@@ -65,12 +67,7 @@ class TestGetEndpointTranslation:
 
     def test_get_with_no_parameters(self):
         spec = fresh_spec()
-        spec["paths"]["/health"] = {
-            "get": {
-                "operationId": "check_health",
-                "responses": {"200": {"description": "OK"}}
-            }
-        }
+        spec["paths"]["/health"] = {"get": {"operationId": "check_health", "responses": {"200": {"description": "OK"}}}}
 
         translator = SpecTranslator()
         manifest = translator.translate(spec)
@@ -88,16 +85,10 @@ class TestGetEndpointTranslation:
                     {
                         "name": "regions",
                         "in": "query",
-                        "schema": {
-                            "type": "array",
-                            "items": {
-                                "type": "string",
-                                "enum": ["US", "EU", "APAC"]
-                            }
-                        }
+                        "schema": {"type": "array", "items": {"type": "string", "enum": ["US", "EU", "APAC"]}},
                     }
                 ],
-                "responses": {"200": {"description": "Success"}}
+                "responses": {"200": {"description": "Success"}},
             }
         }
 
@@ -123,16 +114,13 @@ class TestPostEndpointTranslation:
                         "application/json": {
                             "schema": {
                                 "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "age": {"type": "integer"}
-                                },
-                                "required": ["name"]
+                                "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+                                "required": ["name"],
                             }
                         }
-                    }
+                    },
                 },
-                "responses": {"201": {"description": "Created"}}
+                "responses": {"201": {"description": "Created"}},
             }
         }
 
@@ -154,17 +142,13 @@ class TestPostEndpointTranslation:
         spec["paths"]["/items/{item_id}"] = {
             "post": {
                 "operationId": "update_item_action",
-                "parameters": [
-                    {"name": "item_id", "in": "path", "required": True, "schema": {"type": "string"}}
-                ],
+                "parameters": [{"name": "item_id", "in": "path", "required": True, "schema": {"type": "string"}}],
                 "requestBody": {
                     "content": {
-                        "application/json": {
-                            "schema": {"type": "object", "properties": {"action": {"type": "string"}}}
-                        }
+                        "application/json": {"schema": {"type": "object", "properties": {"action": {"type": "string"}}}}
                     }
                 },
-                "responses": {"200": {"description": "OK"}}
+                "responses": {"200": {"description": "OK"}},
             }
         }
 
@@ -191,14 +175,11 @@ class TestPutAndDeleteEndpointTranslation:
                     "required": True,
                     "content": {
                         "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "properties": {"timeout": {"type": "integer"}}
-                            }
+                            "schema": {"type": "object", "properties": {"timeout": {"type": "integer"}}}
                         }
-                    }
+                    },
                 },
-                "responses": {"200": {"description": "Updated"}}
+                "responses": {"200": {"description": "Updated"}},
             }
         }
 
@@ -214,9 +195,14 @@ class TestPutAndDeleteEndpointTranslation:
             "delete": {
                 "operationId": "purge_logs",
                 "parameters": [
-                    {"name": "older_than", "in": "query", "required": True, "schema": {"type": "string", "format": "date"}}
+                    {
+                        "name": "older_than",
+                        "in": "query",
+                        "required": True,
+                        "schema": {"type": "string", "format": "date"},
+                    }
                 ],
-                "responses": {"204": {"description": "Deleted"}}
+                "responses": {"204": {"description": "Deleted"}},
             }
         }
 
@@ -242,17 +228,14 @@ class TestNestedAndComponentSchemas:
                                 "properties": {
                                     "filters": {
                                         "type": "object",
-                                        "properties": {
-                                            "status": {"type": "string"},
-                                            "priority": {"type": "integer"}
-                                        }
+                                        "properties": {"status": {"type": "string"}, "priority": {"type": "integer"}},
                                     }
-                                }
+                                },
                             }
                         }
                     }
                 },
-                "responses": {"200": {"description": "Results"}}
+                "responses": {"200": {"description": "Results"}},
             }
         }
 
@@ -268,12 +251,16 @@ class TestNestedAndComponentSchemas:
     def test_mutable_state_isolation(self):
         """Ensure SpecTranslator instances don't leak state between translations."""
         t1 = SpecTranslator()
-        m1 = t1.translate(fresh_spec(paths={"/x": {"get": {"operationId": "x", "responses": {"200": {"description": "OK"}}}}}))
+        m1 = t1.translate(
+            fresh_spec(paths={"/x": {"get": {"operationId": "x", "responses": {"200": {"description": "OK"}}}}})
+        )
         assert len(m1.tools) == 1
         assert m1.tools[0].name == "x"
 
         t2 = SpecTranslator()
-        m2 = t2.translate(fresh_spec(paths={"/y": {"post": {"operationId": "y", "responses": {"200": {"description": "OK"}}}}}))
+        m2 = t2.translate(
+            fresh_spec(paths={"/y": {"post": {"operationId": "y", "responses": {"200": {"description": "OK"}}}}})
+        )
         assert len(m2.tools) == 1
         assert m2.tools[0].name == "y"
 
@@ -281,12 +268,7 @@ class TestNestedAndComponentSchemas:
 class TestEdgeCasesAndDefaults:
     def test_missing_operation_id_generates_one(self):
         spec = fresh_spec()
-        spec["paths"]["/data"] = {
-            "get": {
-                "summary": "Get some data",
-                "responses": {"200": {"description": "OK"}}
-            }
-        }
+        spec["paths"]["/data"] = {"get": {"summary": "Get some data", "responses": {"200": {"description": "OK"}}}}
 
         translator = SpecTranslator()
         manifest = translator.translate(spec)
@@ -301,10 +283,8 @@ class TestEdgeCasesAndDefaults:
         spec["paths"]["/toggle"] = {
             "post": {
                 "operationId": "toggle_feature",
-                "parameters": [
-                    {"name": "enabled", "in": "query", "schema": {"type": "boolean"}}
-                ],
-                "responses": {"200": {"description": "OK"}}
+                "parameters": [{"name": "enabled", "in": "query", "schema": {"type": "boolean"}}],
+                "responses": {"200": {"description": "OK"}},
             }
         }
 
@@ -329,18 +309,14 @@ class TestEdgeCasesAndDefaults:
         spec["paths"]["/items/{id}"] = {
             "get": {
                 "operationId": "get_item",
-                "parameters": [
-                    {"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}
-                ],
-                "responses": {"200": {"description": "OK"}}
+                "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "OK"}},
             },
             "delete": {
                 "operationId": "delete_item",
-                "parameters": [
-                    {"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}
-                ],
-                "responses": {"204": {"description": "Deleted"}}
-            }
+                "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "responses": {"204": {"description": "Deleted"}},
+            },
         }
 
         translator = SpecTranslator()
@@ -358,9 +334,9 @@ class TestEdgeCasesAndDefaults:
                 "operationId": "secure_call",
                 "parameters": [
                     {"name": "X-API-Key", "in": "header", "schema": {"type": "string"}},
-                    {"name": "session", "in": "cookie", "schema": {"type": "string"}}
+                    {"name": "session", "in": "cookie", "schema": {"type": "string"}},
                 ],
-                "responses": {"200": {"description": "OK"}}
+                "responses": {"200": {"description": "OK"}},
             }
         }
 
@@ -378,7 +354,7 @@ class TestEdgeCasesAndDefaults:
             "get": {
                 "operationId": "get_info",
                 "description": "Returns system information including uptime and version",
-                "responses": {"200": {"description": "OK"}}
+                "responses": {"200": {"description": "OK"}},
             }
         }
 
