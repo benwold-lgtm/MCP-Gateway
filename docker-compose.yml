@@ -1,0 +1,14 @@
+services:
+  gateway:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - gateway-data:/app/data
+    environment:
+      - MCP_CONFIG=/app/config.yaml
+    restart: unless-stopped
+
+volumes:
+  gateway-data:

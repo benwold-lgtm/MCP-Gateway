@@ -25,6 +25,7 @@ class McpTool:
     method: str  # GET, POST, PUT, DELETE, PATCH
     path: str
     tags: list[str] = field(default_factory=list)
+    param_locations: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -120,7 +121,7 @@ class SpecTranslator:
         op_id = op.get("operationId", "")
         name = _sanitize_name(op_id or f"{method}_{path}")
         description = op.get("summary") or op.get("description") or f"{method} {path}"
-        parameters, required = self._build_parameter_schema(op, schemas)
+        parameters, required, locations = self._build_parameter_schema(op, schemas)
         tags = op.get("tags", [])
         return McpTool(
             name=name,
@@ -129,41 +130,56 @@ class SpecTranslator:
             method=method.upper(),
             path=path,
             tags=tags,
+            param_locations=locations,
         )
 
-    def _build_parameter_schema(self, op: dict, schemas: dict) -> tuple[dict[str, Any], list[str]]:
-        """Extract JSON-serializable parameter schema from an operation."""
-        params = {}
+    def _resolve_ref(self, ref: str, schemas: dict) -> dict:
+        """Look up a $ref like '#/components/schemas/Foo' in the components dict."""
+        name = ref.split("/")[-1]
+        return schemas.get(name, {})
+
+    def _resolve_schema(self, schema: dict, schemas: dict, seen: set | None = None) -> dict:
+        """Recursively resolve $ref and nested object properties, guarding against cycles."""
+        seen = seen or set()
+        if "$ref" in schema:
+            ref = schema["$ref"]
+            if ref in seen:
+                return {"type": "object"}
+            seen.add(ref)
+            return self._resolve_schema(self._resolve_ref(ref, schemas), schemas, seen)
+        if schema.get("type") == "object" and "properties" in schema:
+            resolved_props = {}
+            for k, v in schema["properties"].items():
+                resolved_props[k] = self._resolve_schema(v, schemas, seen.copy())
+            return {**schema, "properties": resolved_props}
+        return schema
+
+    def _build_parameter_schema(self, op: dict, schemas: dict) -> tuple[dict[str, Any], list[str], dict[str, str]]:
+        """Extract JSON-serializable parameter schema and per-param locations from an operation."""
+        params: dict[str, Any] = {}
+        locations: dict[str, str] = {}
         for param in op.get("parameters", []):
             pname = param.get("name", "")
-            ptype = "string"
-            if param.get("in") == "body" or param.get("in") == "cookie":
+            pin = param.get("in", "query")
+            if pin == "body" or pin == "cookie":
                 continue
-            schema = param.get("schema", {})
-            stype = schema.get("type", "string")
-            if stype == "integer":
-                ptype = "integer"
-            elif stype == "number":
-                ptype = "number"
-            elif stype == "boolean":
-                ptype = "boolean"
-            elif stype == "array":
-                ptype = "array"
-            elif stype == "object":
-                ptype = "object"
-            param_desc = param.get("description", "")
-            params[pname] = {"type": ptype, "description": param_desc}
+            raw_schema = param.get("schema", {})
+            resolved = self._resolve_schema(raw_schema, schemas)
+            param_desc = param.get("description", resolved.get("description", ""))
+            params[pname] = {**resolved, "description": param_desc}
+            locations[pname] = pin
         req = [p.get("name") for p in op.get("parameters", []) if p.get("required")]
         body = op.get("requestBody", {})
         if body:
             content = body.get("content", {})
-            for ctype, cschema in content.items():
+            for _ctype, cschema in content.items():
                 if cschema and "schema" in cschema:
-                    props = cschema["schema"].get("properties", {})
-                    for k, v in props.items():
-                        params[k] = {"type": v.get("type", "string"), "description": v.get("description", "")}
-                    req += [k for k in cschema["schema"].get("required", [])]
-        return params, req
+                    body_schema = self._resolve_schema(cschema["schema"], schemas)
+                    for k, v in body_schema.get("properties", {}).items():
+                        params[k] = self._resolve_schema(v, schemas)
+                        locations[k] = "body"
+                    req += list(body_schema.get("required", []))
+        return params, req, locations
 
     # ---- Resource Building ----
 

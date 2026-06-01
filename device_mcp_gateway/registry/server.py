@@ -37,6 +37,7 @@ class DeviceProfile:
     last_reachable_check: float = 0.0
     pod: DevicePod | None = None
     pod_active: bool = False
+    spawn_error: str | None = None
 
 
 class SpecCache:
@@ -129,8 +130,9 @@ class Registry:
                 # Only spawn if we have a spec and no active pod yet
                 if profile.spec_data and not profile.pod_active:
                     await self._spawn_pod(profile)
-        except Exception:
+        except Exception as exc:
             logger.exception(f"Error during immediate post-register processing for {hostname}")
+            profile.spawn_error = str(exc)
 
         return profile
 
@@ -256,7 +258,9 @@ class Registry:
             return
         spec = profile.spec_data or await self.fetch_spec(profile)
         if not spec:
-            logger.warning(f"No spec available for {profile.hostname}, cannot spawn pod")
+            msg = f"No spec available for {profile.hostname}, cannot spawn pod"
+            logger.warning(msg)
+            profile.spawn_error = msg
             return
         mcp_manifest = self._translator.translate(spec, profile.hostname)
         pod = DevicePod(

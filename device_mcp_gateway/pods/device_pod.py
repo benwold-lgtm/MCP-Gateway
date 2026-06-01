@@ -54,7 +54,18 @@ class DevicePod:
                 base_url: str = self.base_url,
                 **kwargs: Any,
             ) -> Any:
-                url = f"{base_url}{tool.path}"
+                # Split kwargs by declared parameter location
+                path_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "path"}
+                body_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "body"}
+                query_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) in ("query", "header")}
+                # Params with no declared location fall back to method-appropriate defaults
+                unlocated = {k: v for k, v in kwargs.items() if k not in tool.param_locations}
+                if tool.method in ("POST", "PUT", "PATCH"):
+                    body_params.update(unlocated)
+                else:
+                    query_params.update(unlocated)
+
+                url = f"{base_url}{tool.path}".format_map(path_params)
                 headers = await auth.get_headers() if auth else {}
                 try:
                     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
@@ -62,8 +73,8 @@ class DevicePod:
                             method=tool.method,
                             url=url,
                             headers=headers,
-                            json=kwargs if tool.method in ("POST", "PUT", "PATCH") else None,
-                            params=kwargs if tool.method == "GET" else None,
+                            json=body_params if tool.method in ("POST", "PUT", "PATCH") else None,
+                            params=query_params or None,
                         )
                     resp.raise_for_status()
                     return {"status": resp.status_code, "body": resp.json()}

@@ -355,3 +355,153 @@ class TestEdgeCasesAndDefaults:
 
         tool = manifest.tools[0]
         assert "Returns system information" in tool.description or "uptime" in tool.description.lower()
+
+
+class TestParamLocations:
+    def test_path_and_query_locations(self):
+        spec = fresh_spec()
+        spec["paths"]["/items/{item_id}"] = {
+            "get": {
+                "operationId": "get_item",
+                "parameters": [
+                    {"name": "item_id", "in": "path", "required": True, "schema": {"type": "integer"}},
+                    {"name": "verbose", "in": "query", "schema": {"type": "boolean"}},
+                ],
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert tool.param_locations["item_id"] == "path"
+        assert tool.param_locations["verbose"] == "query"
+
+    def test_body_params_location(self):
+        spec = fresh_spec()
+        spec["paths"]["/users"] = {
+            "post": {
+                "operationId": "create_user",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+                            }
+                        }
+                    }
+                },
+                "responses": {"201": {"description": "Created"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert tool.param_locations["name"] == "body"
+        assert tool.param_locations["age"] == "body"
+
+    def test_mixed_path_and_body_locations(self):
+        spec = fresh_spec()
+        spec["paths"]["/items/{item_id}"] = {
+            "post": {
+                "operationId": "update_item",
+                "parameters": [{"name": "item_id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "requestBody": {
+                    "content": {
+                        "application/json": {"schema": {"type": "object", "properties": {"action": {"type": "string"}}}}
+                    }
+                },
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert tool.param_locations["item_id"] == "path"
+        assert tool.param_locations["action"] == "body"
+
+
+class TestRefAndNestedSchemas:
+    def test_ref_in_request_body_is_resolved(self):
+        spec = fresh_spec()
+        spec["components"]["schemas"]["CreateItem"] = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "price": {"type": "number"}},
+            "required": ["name"],
+        }
+        spec["paths"]["/items"] = {
+            "post": {
+                "operationId": "create_item",
+                "requestBody": {
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateItem"}}}
+                },
+                "responses": {"201": {"description": "Created"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert "name" in tool.schema["properties"]
+        assert "price" in tool.schema["properties"]
+        assert "name" in tool.schema["required"]
+
+    def test_nested_object_properties_are_preserved(self):
+        spec = fresh_spec()
+        spec["paths"]["/search"] = {
+            "post": {
+                "operationId": "search",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "filter": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {"type": "string"},
+                                            "limit": {"type": "integer"},
+                                        },
+                                    }
+                                },
+                            }
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        filter_schema = tool.schema["properties"]["filter"]
+        assert filter_schema["type"] == "object"
+        assert "status" in filter_schema["properties"]
+        assert "limit" in filter_schema["properties"]
+
+    def test_ref_in_parameter_schema_is_resolved(self):
+        spec = fresh_spec()
+        spec["components"]["schemas"]["SortOrder"] = {"type": "string", "enum": ["asc", "desc"]}
+        spec["paths"]["/items"] = {
+            "get": {
+                "operationId": "list_items",
+                "parameters": [
+                    {
+                        "name": "sort",
+                        "in": "query",
+                        "schema": {"$ref": "#/components/schemas/SortOrder"},
+                    }
+                ],
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert "sort" in tool.schema["properties"]
+        assert tool.schema["properties"]["sort"]["type"] == "string"
+
+    def test_cyclic_ref_does_not_loop(self):
+        spec = fresh_spec()
+        spec["components"]["schemas"]["Node"] = {
+            "type": "object",
+            "properties": {"child": {"$ref": "#/components/schemas/Node"}},
+        }
+        spec["paths"]["/tree"] = {
+            "post": {
+                "operationId": "create_node",
+                "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Node"}}}},
+                "responses": {"201": {"description": "Created"}},
+            }
+        }
+        # Must not raise RecursionError
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert "child" in tool.schema["properties"]

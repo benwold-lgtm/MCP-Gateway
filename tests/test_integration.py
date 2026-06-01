@@ -17,6 +17,11 @@ def test_register_and_metrics(client, mock_target_url):
     reg_payload = {"hostname": "mock-iot.local", "base_url": mock_target_url, "auth_type": "none", "transport": "sse"}
     reg_resp = client.post("/devices", json=reg_payload)
     assert reg_resp.status_code == 200, f"Registration failed: {reg_resp.json()}"
+    reg_data = reg_resp.json()
+    assert reg_data["hostname"] == "mock-iot.local"
+    assert "pod_active" in reg_data
+    assert "reachable" in reg_data
+    assert "spawn_error" in reg_data
     print("[+] Device registered via /devices endpoint")
 
     # 2. Verify device appears in the list and is reachable
@@ -129,3 +134,26 @@ def test_sse_transport_client_flow(client, mock_target_url):
     del_resp = client.delete(f"/devices/{hostname}")
     assert del_resp.status_code == 200
     print("[PASS] SSE transport client flow verified.")
+
+
+def test_register_unreachable_device_reports_failure(client):
+    """Registering an unreachable device should still return 200 but surface pod_active=False."""
+    hostname = "unreachable-device.local"
+    resp = client.post(
+        "/devices",
+        json={
+            "hostname": hostname,
+            "base_url": "http://192.0.2.1",  # TEST-NET, guaranteed unreachable
+            "auth_type": "none",
+            "transport": "sse",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["hostname"] == hostname
+    assert data["pod_active"] is False
+    assert data["reachable"] is False
+
+    # Clean up
+    client.delete(f"/devices/{hostname}")
+    print("[PASS] Unreachable device registration feedback verified.")

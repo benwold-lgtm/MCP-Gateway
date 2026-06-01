@@ -104,7 +104,7 @@ async def register_device(request: Request):
     transport = data.get("transport") or config.get("transport", {}).get("default", "sse")
     spec_url = data.get("spec_url")
 
-    await registry.register_device(
+    profile = await registry.register_device(
         hostname=hostname,
         base_url=base_url,
         spec_url=spec_url,
@@ -112,7 +112,13 @@ async def register_device(request: Request):
         transport=transport,
     )
 
-    return {"status": "registered", "hostname": hostname}
+    return {
+        "status": "registered",
+        "hostname": hostname,
+        "pod_active": profile.pod_active,
+        "reachable": profile.reachable,
+        "spawn_error": profile.spawn_error,
+    }
 
 
 @app.get("/devices")
