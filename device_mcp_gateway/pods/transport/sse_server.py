@@ -8,9 +8,7 @@ import json
 from collections import defaultdict
 from typing import Any, AsyncGenerator
 
-import httpx
 from loguru import logger
-from sse_starlette import EventSourceResponse
 
 
 class SseTransport:

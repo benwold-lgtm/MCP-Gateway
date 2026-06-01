@@ -4,14 +4,6 @@ Validates schema mapping across different HTTP methods, parameter types,
 and nested structures.
 """
 
-import copy
-import pytest
-
-import sys
-import os
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from device_mcp_gateway.core.translator import SpecTranslator
 
 

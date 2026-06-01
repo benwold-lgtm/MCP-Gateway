@@ -1,4 +1,3 @@
-import pytest
 from fastapi.testclient import TestClient
 from device_mcp_gateway.main import app
 

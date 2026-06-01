@@ -5,7 +5,7 @@ Loads and wraps the central config.yaml
 
 import os
 import yaml
-from typing import Any, Optional
+from typing import Any
 from loguru import logger
 
 CONFIG_PATH = os.getenv("MCP_CONFIG", "config.yaml")

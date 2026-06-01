@@ -1,3 +1,3 @@
 """Config package."""
 
-from .settings import load_config
+from .settings import load_config  # noqa: F401
