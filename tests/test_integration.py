@@ -125,11 +125,9 @@ def test_sse_transport_client_flow(client, mock_target_url):
                 continue
 
         assert data_line is not None, "No SSE message event received"
-        outer = json.loads(data_line)
-        assert outer.get("event") == "message"
-        inner = json.loads(outer["data"])
-        assert "result" in inner
-        assert inner["result"]["body"]["status"] == "online"
+        payload = json.loads(data_line)
+        assert "result" in payload, f"Expected 'result' key in SSE payload, got: {payload}"
+        assert payload["result"]["body"]["status"] == "online"
 
     del_resp = client.delete(f"/devices/{hostname}")
     assert del_resp.status_code == 200

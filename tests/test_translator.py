@@ -505,3 +505,115 @@ class TestRefAndNestedSchemas:
         # Must not raise RecursionError
         tool = SpecTranslator().translate(spec).tools[0]
         assert "child" in tool.schema["properties"]
+
+
+class TestComponentRefResolution:
+    def test_parameter_object_ref_is_resolved(self):
+        spec = fresh_spec()
+        spec["components"]["parameters"] = {
+            "PageSize": {"name": "page_size", "in": "query", "required": False, "schema": {"type": "integer"}}
+        }
+        spec["paths"]["/items"] = {
+            "get": {
+                "operationId": "list_items",
+                "parameters": [{"$ref": "#/components/parameters/PageSize"}],
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert "page_size" in tool.schema["properties"]
+        assert tool.schema["properties"]["page_size"]["type"] == "integer"
+        assert tool.param_locations["page_size"] == "query"
+
+    def test_request_body_ref_is_resolved(self):
+        spec = fresh_spec()
+        spec["components"]["requestBodies"] = {
+            "CreateUser": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {"username": {"type": "string"}, "role": {"type": "string"}},
+                            "required": ["username"],
+                        }
+                    }
+                }
+            }
+        }
+        spec["paths"]["/users"] = {
+            "post": {
+                "operationId": "create_user",
+                "requestBody": {"$ref": "#/components/requestBodies/CreateUser"},
+                "responses": {"201": {"description": "Created"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert "username" in tool.schema["properties"]
+        assert "role" in tool.schema["properties"]
+        assert "username" in tool.schema["required"]
+
+    def test_required_propagated_for_parameter_ref(self):
+        spec = fresh_spec()
+        spec["components"]["parameters"] = {
+            "DeviceId": {"name": "device_id", "in": "path", "required": True, "schema": {"type": "string"}}
+        }
+        spec["paths"]["/devices/{device_id}"] = {
+            "get": {
+                "operationId": "get_device",
+                "parameters": [{"$ref": "#/components/parameters/DeviceId"}],
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert "device_id" in tool.schema["required"]
+
+    def test_external_ref_does_not_crash(self):
+        spec = fresh_spec()
+        spec["paths"]["/items"] = {
+            "post": {
+                "operationId": "create_item",
+                "requestBody": {
+                    "content": {
+                        "application/json": {"schema": {"$ref": "./other.yaml#/components/schemas/Item"}}
+                    }
+                },
+                "responses": {"201": {"description": "Created"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert tool.name == "create_item"
+        # External ref produces empty properties, but must not raise
+        assert isinstance(tool.schema["properties"], dict)
+
+
+class TestToolNameCollisions:
+    def test_duplicate_sanitized_name_is_renamed(self):
+        spec = fresh_spec()
+        # /foo/bar and /foo-bar both sanitize to "get_foo_bar" (no operationId)
+        spec["paths"]["/foo/bar"] = {"get": {"summary": "First", "responses": {"200": {"description": "OK"}}}}
+        spec["paths"]["/foo-bar"] = {"get": {"summary": "Second", "responses": {"200": {"description": "OK"}}}}
+        manifest = SpecTranslator().translate(spec)
+        assert len(manifest.tools) == 2
+        names = {t.name for t in manifest.tools}
+        assert "get_foo_bar" in names
+        assert "get_foo_bar_2" in names
+
+    def test_three_way_collision_increments_suffix(self):
+        spec = fresh_spec()
+        spec["paths"]["/a/b"] = {"get": {"summary": "1", "responses": {"200": {"description": "OK"}}}}
+        spec["paths"]["/a-b"] = {"get": {"summary": "2", "responses": {"200": {"description": "OK"}}}}
+        spec["paths"]["/a_b"] = {"get": {"summary": "3", "responses": {"200": {"description": "OK"}}}}
+        manifest = SpecTranslator().translate(spec)
+        assert len(manifest.tools) == 3
+        names = {t.name for t in manifest.tools}
+        assert "get_a_b" in names
+        assert "get_a_b_2" in names
+        assert "get_a_b_3" in names
+
+    def test_unique_names_are_not_renamed(self):
+        spec = fresh_spec()
+        spec["paths"]["/foo"] = {"get": {"operationId": "get_foo", "responses": {"200": {"description": "OK"}}}}
+        spec["paths"]["/bar"] = {"get": {"operationId": "get_bar", "responses": {"200": {"description": "OK"}}}}
+        manifest = SpecTranslator().translate(spec)
+        assert len(manifest.tools) == 2
+        assert {t.name for t in manifest.tools} == {"get_foo", "get_bar"}

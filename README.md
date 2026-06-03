@@ -186,11 +186,11 @@ Omit the `auth_type` and `auth` fields, or pass `"auth_type": "none"`.
 
 Set `transport` in the device registration payload, or configure `transport.default` in `config.yaml`.
 
-| Transport | Description | When to use |
-|-----------|-------------|-------------|
-| `sse` | Server-Sent Events (default) | Most MCP clients; persistent streaming connection |
-| `http` | Streamable HTTP | Clients that don't maintain SSE connections |
-| `stdio` | stdin / stdout | Clients that spawn the gateway as a subprocess |
+| Transport | Status | Description |
+|-----------|--------|-------------|
+| `sse` | **Supported** | Server-Sent Events (default). Works with all MCP clients. |
+| `http` | Not yet supported | Returns `400` at registration. Planned for a future release. |
+| `stdio` | Not supported | Returns `400` at registration. stdio is not applicable in a networked gateway. |
 
 ## Configuration
 

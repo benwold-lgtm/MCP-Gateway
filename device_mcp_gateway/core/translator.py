@@ -73,12 +73,16 @@ def _sanitize_name(raw: str) -> str:
 class SpecTranslator:
     """Translates OpenAPI specs into MCP manifests."""
 
+    def __init__(self) -> None:
+        self._spec: dict[str, Any] = {}
+
     def translate(self, spec: dict, hostname: str = "test-device") -> McpManifest:
         """Main entry point: spec dict + hostname -> McpManifest."""
         try:
             _validate_openapi_spec(spec)
         except OpenAPISpecValidatorError as exc:
             raise ValueError(f"Invalid OpenAPI spec: {exc}") from exc
+        self._spec = spec  # stored so _resolve_ref can walk the full document
         info = spec.get("info", {})
         manifest = McpManifest(
             server_name=f"mcp-{hostname}",
@@ -91,16 +95,28 @@ class SpecTranslator:
             },
         )
         paths = spec.get("paths", {})
-        components = spec.get("components", {})
-        schemas = components.get("schemas", {})
+        _used_names: set[str] = set()
         for path, methods in paths.items():
             for method, op in methods.items():
                 if not isinstance(op, dict):
                     continue
                 if method.upper() not in ("GET", "POST", "PUT", "DELETE", "PATCH"):
                     continue
-                tool = self._build_tool(method, path, op, schemas, hostname)
+                tool = self._build_tool(method, path, op, hostname)
                 if tool:
+                    if tool.name in _used_names:
+                        base = tool.name
+                        n = 2
+                        while f"{base}_{n}" in _used_names:
+                            n += 1
+                        new_name = f"{base}_{n}"
+                        logger.warning(
+                            f"Tool name collision: '{tool.name}' "
+                            f"(operation: {op.get('operationId') or f'{method} {path}'})"
+                            f" renamed to '{new_name}'"
+                        )
+                        tool.name = new_name
+                    _used_names.add(tool.name)
                     manifest.tools.append(tool)
                 if method.upper() == "GET":
                     resource = self._build_resource(path, op, hostname)
@@ -116,12 +132,12 @@ class SpecTranslator:
 
     # ---- Tool Building ----
 
-    def _build_tool(self, method: str, path: str, op: dict, schemas: dict, hostname: str) -> McpTool | None:
+    def _build_tool(self, method: str, path: str, op: dict, hostname: str) -> McpTool | None:
         """Convert a single OpenAPI operation into an MCP tool."""
         op_id = op.get("operationId", "")
         name = _sanitize_name(op_id or f"{method}_{path}")
         description = op.get("summary") or op.get("description") or f"{method} {path}"
-        parameters, required, locations = self._build_parameter_schema(op, schemas)
+        parameters, required, locations = self._build_parameter_schema(op)
         tags = op.get("tags", [])
         return McpTool(
             name=name,
@@ -133,12 +149,29 @@ class SpecTranslator:
             param_locations=locations,
         )
 
-    def _resolve_ref(self, ref: str, schemas: dict) -> dict:
-        """Look up a $ref like '#/components/schemas/Foo' in the components dict."""
-        name = ref.split("/")[-1]
-        return schemas.get(name, {})
+    def _resolve_ref(self, ref: str) -> dict:
+        """Walk a JSON Pointer ($ref) from the spec root.
 
-    def _resolve_schema(self, schema: dict, schemas: dict, seen: set | None = None) -> dict:
+        Supports any internal ref (#/...) including components/schemas,
+        components/parameters, components/requestBodies, etc.
+        Logs a warning and returns {} for external file or URL refs.
+        """
+        if not ref.startswith("#/"):
+            logger.warning(f"External $ref '{ref}' is not supported — using empty schema")
+            return {}
+        parts = ref.lstrip("#/").split("/")
+        node: Any = self._spec
+        for part in parts:
+            if not isinstance(node, dict):
+                logger.warning(f"Could not resolve $ref '{ref}'")
+                return {}
+            node = node.get(part)
+            if node is None:
+                logger.warning(f"Could not resolve $ref '{ref}' — segment '{part}' not found in spec")
+                return {}
+        return node if isinstance(node, dict) else {}
+
+    def _resolve_schema(self, schema: dict, seen: set | None = None) -> dict:
         """Recursively resolve $ref and nested object properties, guarding against cycles."""
         seen = seen or set()
         if "$ref" in schema:
@@ -146,39 +179,53 @@ class SpecTranslator:
             if ref in seen:
                 return {"type": "object"}
             seen.add(ref)
-            return self._resolve_schema(self._resolve_ref(ref, schemas), schemas, seen)
+            return self._resolve_schema(self._resolve_ref(ref), seen)
         if schema.get("type") == "object" and "properties" in schema:
             resolved_props = {}
             for k, v in schema["properties"].items():
-                resolved_props[k] = self._resolve_schema(v, schemas, seen.copy())
+                resolved_props[k] = self._resolve_schema(v, seen.copy())
             return {**schema, "properties": resolved_props}
         return schema
 
-    def _build_parameter_schema(self, op: dict, schemas: dict) -> tuple[dict[str, Any], list[str], dict[str, str]]:
+    def _build_parameter_schema(self, op: dict) -> tuple[dict[str, Any], list[str], dict[str, str]]:
         """Extract JSON-serializable parameter schema and per-param locations from an operation."""
         params: dict[str, Any] = {}
         locations: dict[str, str] = {}
-        for param in op.get("parameters", []):
+        req: list[str] = []
+
+        for raw_param in op.get("parameters", []):
+            param = raw_param
+            if "$ref" in raw_param:
+                param = self._resolve_ref(raw_param["$ref"])
+                if not param:
+                    continue
             pname = param.get("name", "")
+            if not pname:
+                continue
             pin = param.get("in", "query")
-            if pin == "body" or pin == "cookie":
+            if pin in ("body", "cookie"):
                 continue
             raw_schema = param.get("schema", {})
-            resolved = self._resolve_schema(raw_schema, schemas)
+            resolved = self._resolve_schema(raw_schema)
             param_desc = param.get("description", resolved.get("description", ""))
             params[pname] = {**resolved, "description": param_desc}
             locations[pname] = pin
-        req = [p.get("name") for p in op.get("parameters", []) if p.get("required")]
+            if param.get("required"):
+                req.append(pname)
+
         body = op.get("requestBody", {})
+        if "$ref" in body:
+            body = self._resolve_ref(body["$ref"])
         if body:
             content = body.get("content", {})
             for _ctype, cschema in content.items():
                 if cschema and "schema" in cschema:
-                    body_schema = self._resolve_schema(cschema["schema"], schemas)
+                    body_schema = self._resolve_schema(cschema["schema"])
                     for k, v in body_schema.get("properties", {}).items():
-                        params[k] = self._resolve_schema(v, schemas)
+                        params[k] = self._resolve_schema(v)
                         locations[k] = "body"
                     req += list(body_schema.get("required", []))
+
         return params, req, locations
 
     # ---- Resource Building ----

@@ -6,6 +6,7 @@ Pods are spawned/teared by the Registry based on device health and spec availabi
 """
 
 import asyncio
+import base64
 from typing import Any
 import json
 
@@ -77,7 +78,17 @@ class DevicePod:
                             params=query_params or None,
                         )
                     resp.raise_for_status()
-                    return {"status": resp.status_code, "body": resp.json()}
+                    if resp.status_code == 204 or not resp.content:
+                        return {"status": resp.status_code, "body": None}
+                    ct = resp.headers.get("content-type", "")
+                    if "json" in ct:
+                        try:
+                            return {"status": resp.status_code, "body": resp.json()}
+                        except Exception:
+                            pass
+                    if ct.startswith("text/"):
+                        return {"status": resp.status_code, "body": resp.text}
+                    return {"status": resp.status_code, "body": base64.b64encode(resp.content).decode()}
                 except httpx.HTTPStatusError as e:
                     return {"error": str(e), "status_code": e.response.status_code}
                 except Exception as e:

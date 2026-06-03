@@ -170,6 +170,11 @@ async def register_device(request: Request):
         raise HTTPException(status_code=400, detail=f"Unsupported auth_type: {auth_type}")
 
     transport = data.get("transport") or config.get("transport", {}).get("default", "sse")
+    if transport != "sse":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Transport '{transport}' is not supported in gateway mode; use 'sse'",
+        )
     spec_url = data.get("spec_url")
 
     profile = await registry.register_device(

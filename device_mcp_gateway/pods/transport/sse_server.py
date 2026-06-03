@@ -49,12 +49,7 @@ class SseTransport:
         q = self._clients.get(client_id)
         if q:
             if isinstance(message, dict):
-                # Double-wrap so clients receive a predictable nested payload
-                # matching the integration test expectations:
-                #  data: {"event":"message","data":"<inner json>"}
-                inner = message
-                first = {"event": "message", "data": json.dumps(inner)}
-                message = {"event": "message", "data": json.dumps(first)}
+                message = {"event": "message", "data": json.dumps(message)}
             try:
                 q.put_nowait(message)
             except asyncio.QueueFull:

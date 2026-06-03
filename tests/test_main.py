@@ -42,3 +42,21 @@ def test_auth_disabled_when_key_not_set(monkeypatch):
     monkeypatch.setattr(gw_main, "_gateway_api_key", "")
     response = client.get("/devices")
     assert response.status_code == 200
+
+
+def test_register_http_transport_returns_400():
+    response = client.post(
+        "/devices",
+        json={"hostname": "x", "base_url": "http://x.local", "transport": "http"},
+    )
+    assert response.status_code == 400
+    assert "not supported" in response.json()["detail"]
+
+
+def test_register_stdio_transport_returns_400():
+    response = client.post(
+        "/devices",
+        json={"hostname": "x", "base_url": "http://x.local", "transport": "stdio"},
+    )
+    assert response.status_code == 400
+    assert "not supported" in response.json()["detail"]
