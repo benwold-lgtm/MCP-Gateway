@@ -22,10 +22,16 @@ venv.bak/
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Ignore temporary or machine-specific autonomy runtime state
-/autonomy/project_state.json
-/autonomy/project_manifest.json
-/autonomy/PROJECT_MANIFEST.md
-/autonomy/DEPENDENCY_GRAPH.json
-/autonomy/dependencies.json
+# Build / tool caches
+.mypy_cache/
+.pytest_cache/
+
+# IDE and local tooling
+.claude/
+
+# Hermes Agent automation (preserved at automation-scripts/hermeshome-hermes-agent)
+/autonomy/
+/AGENTS.md
+
+# Runtime data
 /devices.db

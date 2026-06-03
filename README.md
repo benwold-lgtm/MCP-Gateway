@@ -25,6 +25,10 @@ Target device API
 
 Registered devices are persisted in a local SQLite database (`devices.db`) and reconnected automatically on restart.
 
+## Requirements
+
+- Python ≥ 3.10 (3.12 recommended; used in the Docker image)
+
 ## Quick Start
 
 ```bash
@@ -35,7 +39,9 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # 3. Start the gateway
-uvicorn device_mcp_gateway.main:app --host 0.0.0.0 --port 8000
+device-mcp
+# Override host, port, or config file without editing config.yaml:
+# device-mcp --host 0.0.0.0 --port 8000 --config /path/to/config.yaml
 
 # 4. Register a device
 curl -X POST http://localhost:8000/devices \
@@ -46,9 +52,67 @@ curl -X POST http://localhost:8000/devices \
     "transport": "sse"
   }'
 
-# 5. Connect an MCP client
-# SSE stream:  GET http://localhost:8000/devices/my-sensor/sse
+# 5. Connect an MCP client (see MCP Client Integration below)
 ```
+
+## Docker
+
+```bash
+# Build and start
+docker compose up -d
+
+# Stop
+docker compose down
+```
+
+The compose file mounts a named volume at `/app/data`. Set `storage.db_path` in `config.yaml` to that path so device registrations survive container restarts:
+
+```yaml
+storage:
+  db_path: /app/data/devices.db
+```
+
+The default `./devices.db` path falls outside the volume and is lost on every restart.
+
+To point the container at a different config file, either edit the bind-mount in `docker-compose.yml` or set the `MCP_CONFIG` environment variable.
+
+## MCP Client Integration
+
+### Claude Desktop
+
+Add the device's SSE endpoint to your Claude Desktop config file:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "my-sensor": {
+      "type": "sse",
+      "url": "http://localhost:8000/devices/my-sensor/sse"
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving. The device's tools will appear in the tool picker.
+
+### Manual invocation (SSE transport)
+
+The SSE transport uses a two-step protocol:
+
+1. Open the event stream. Pass your own `client_id` or omit it to have one generated:
+   ```
+   GET /devices/my-sensor/sse?client_id=my-client
+   ```
+
+2. Send tool invocations on that session:
+   ```bash
+   curl -X POST "http://localhost:8000/devices/my-sensor/messages?client_id=my-client" \
+     -H "Content-Type: application/json" \
+     -d '{"tool": "get_readings", "arguments": {"sensor_id": 1}}'
+   ```
 
 ## API Reference
 
@@ -82,6 +146,10 @@ curl -X POST http://localhost:8000/devices \
 
 ## Authentication
 
+### No auth
+
+Omit the `auth_type` and `auth` fields, or pass `"auth_type": "none"`.
+
 ### API Key
 
 ```json
@@ -105,9 +173,19 @@ curl -X POST http://localhost:8000/devices \
 }
 ```
 
+## Transports
+
+Set `transport` in the device registration payload, or configure `transport.default` in `config.yaml`.
+
+| Transport | Description | When to use |
+|-----------|-------------|-------------|
+| `sse` | Server-Sent Events (default) | Most MCP clients; persistent streaming connection |
+| `http` | Streamable HTTP | Clients that don't maintain SSE connections |
+| `stdio` | stdin / stdout | Clients that spawn the gateway as a subprocess |
+
 ## Configuration
 
-Key settings in `config.yaml`:
+All settings live in `config.yaml`. Override the file location with the `MCP_CONFIG` environment variable.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -115,10 +193,17 @@ Key settings in `config.yaml`:
 | `server.port` | `8000` | Port |
 | `registry.health_check_interval` | `30` | Seconds between reachability checks |
 | `registry.spec_poll_interval` | `300` | Seconds between spec refresh checks |
+| `registry.spec_cache_ttl` | `3600` | Spec cache lifetime in seconds |
 | `registry.max_concurrent_pods` | `50` | Max simultaneous device pods |
-| `storage.db_path` | `./devices.db` | SQLite database path |
+| `auth.type` | `api_key` | Default auth type (`api_key`, `oauth2`, or `none`) |
+| `discovery.timeout` | `10` | Spec discovery request timeout in seconds |
+| `storage.db_path` | `./devices.db` | SQLite database path (use `/app/data/devices.db` in Docker) |
 | `transport.default` | `sse` | Default MCP transport |
-| `logging.level` | `INFO` | Log verbosity |
+| `transport.sse.keep_alive_interval` | `15` | Seconds between SSE keepalive pings |
+| `logging.level` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `logging.file` | `logs/gateway.log` | Log file path |
+
+`discovery.spec_paths` is a list of URL paths probed when auto-discovering a spec. See `config.yaml` for the full default list.
 
 ## Running Tests
 
