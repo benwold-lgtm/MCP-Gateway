@@ -36,6 +36,7 @@ class DeviceProfile:
     spec_updated_at: float = 0.0
     reachable: bool = True
     last_reachable_check: float = 0.0
+    rate_limit_rps: float | None = None
     pod: DevicePod | None = None
     pod_active: bool = False
     spawn_error: str | None = None
@@ -92,6 +93,7 @@ class Registry:
         spec_url: str | None = None,
         auth: AbstractAuth | None = None,
         transport: str = "sse",
+        rate_limit_rps: float | None = None,
     ) -> DeviceProfile:
         profile = DeviceProfile(
             hostname=hostname,
@@ -100,6 +102,7 @@ class Registry:
             auth=auth,
             transport=transport,
             spec_cache_ttl=self._config.get("spec_cache_ttl", 3600),
+            rate_limit_rps=rate_limit_rps,
         )
         self._devices[hostname] = profile
 
@@ -118,6 +121,7 @@ class Registry:
                     "transport": transport,
                     "auth_type": auth_type,
                     "auth_config": auth_config,
+                    "rate_limit_rps": rate_limit_rps,
                 },
             )
 
@@ -166,6 +170,7 @@ class Registry:
                 auth=auth,
                 transport=record.get("transport", "sse"),
                 spec_cache_ttl=self._config.get("spec_cache_ttl", 3600),
+                rate_limit_rps=record.get("rate_limit_rps"),
             )
             self._devices[record["hostname"]] = profile
             try:
@@ -288,6 +293,7 @@ class Registry:
             transport=profile.transport,
             auth=profile.auth,
             base_url=profile.base_url,
+            rate_limit_rps=profile.rate_limit_rps,
         )
         await pod.start()
         profile.pod = pod

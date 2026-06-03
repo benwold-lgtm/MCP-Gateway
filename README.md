@@ -128,14 +128,17 @@ The SSE transport uses a two-step protocol:
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/devices` | Register a device |
+| `PUT` | `/devices/{hostname}` | Update an existing device's config (replaces and restarts pod) |
 | `GET` | `/devices` | List all registered devices |
 | `DELETE` | `/devices/{hostname}` | Unregister a device |
 | `GET` | `/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
 | `POST` | `/devices/{hostname}/messages` | Send a tool invocation via SSE |
 | `GET` | `/health` | Gateway health + active pod count |
-| `GET` | `/metrics` | Reachability and cache stats |
+| `GET` | `/metrics` | Reachability, cache stats, and per-device rate-limit state |
 
-### Register device payload
+### Register / update device payload
+
+`POST /devices` and `PUT /devices/{hostname}` accept the same body:
 
 ```json
 {
@@ -147,11 +150,22 @@ The SSE transport uses a two-step protocol:
   "auth": {
     "api_key": "supersecret",
     "header_name": "X-API-Key"
-  }
+  },
+  "rate_limit_rps": 10.0
 }
 ```
 
-`spec_url` is optional — the gateway tries common paths (`/openapi.json`, `/swagger.json`, etc.) if omitted.
+| Field | Required | Description |
+|-------|----------|-------------|
+| `hostname` | Yes (POST) | Unique identifier for the device |
+| `base_url` | Yes (POST) | Root URL of the device API |
+| `spec_url` | No | Full URL to the OpenAPI spec; auto-discovered if omitted |
+| `transport` | No | Must be `"sse"` (default) |
+| `auth_type` | No | `"api_key"`, `"oauth2"`, or `"none"` |
+| `auth` | Conditional | Required for `api_key` and `oauth2` |
+| `rate_limit_rps` | No | Max requests per second to the downstream API. Omit for unlimited. |
+
+`PUT` treats all fields except `hostname` as optional — omitted fields keep their existing values.
 
 ## Authentication
 
@@ -215,6 +229,26 @@ All settings live in `config.yaml`. Override the file location with the `MCP_CON
 | `logging.file` | `logs/gateway.log` | Log file path |
 
 `discovery.spec_paths` is a list of URL paths probed when auto-discovering a spec. See `config.yaml` for the full default list.
+
+## Kubernetes Deployment
+
+Pre-built manifests live in [`deploy/kubernetes/`](deploy/kubernetes/). Apply with:
+
+```bash
+# Customise deploy/kubernetes/ingress.yaml (host) and deployment.yaml (image) first
+
+# Create secrets (do not store these in config.yaml or the ConfigMap)
+kubectl create namespace mcp-gateway
+kubectl create secret generic gateway-secrets \
+  --namespace=mcp-gateway \
+  --from-literal=api-key=$(openssl rand -hex 32) \
+  --from-literal=secret-key=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+
+# Deploy
+kubectl apply -k deploy/kubernetes/
+```
+
+See [`docs/kubernetes-architecture.md`](docs/kubernetes-architecture.md) for the full architecture diagram and message-flow walkthrough.
 
 ## Running Tests
 

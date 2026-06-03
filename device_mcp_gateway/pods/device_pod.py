@@ -7,6 +7,7 @@ Pods are spawned/teared by the Registry based on device health and spec availabi
 
 import asyncio
 import base64
+import time
 from typing import Any
 import json
 
@@ -19,6 +20,35 @@ from device_mcp_gateway.pods.transport import SseTransport
 from device_mcp_gateway.core.translator import McpManifest, McpTool
 
 
+class _TokenBucket:
+    """Asyncio token bucket for per-device downstream rate limiting."""
+
+    def __init__(self, rate: float) -> None:
+        self._rate = rate  # tokens per second (= max RPS)
+        self._tokens = float(rate)
+        self._last = time.monotonic()
+
+    @property
+    def rate(self) -> float:
+        return self._rate
+
+    @property
+    def tokens(self) -> float:
+        now = time.monotonic()
+        refilled = min(self._rate, self._tokens + (now - self._last) * self._rate)
+        return round(refilled, 3)
+
+    async def acquire(self) -> None:
+        while True:
+            now = time.monotonic()
+            self._tokens = min(self._rate, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return
+            await asyncio.sleep((1.0 - self._tokens) / self._rate)
+
+
 class DevicePod:
     """Manages a single per-hostname MCP server process."""
 
@@ -29,12 +59,14 @@ class DevicePod:
         transport: str = "sse",
         auth: AbstractAuth | None = None,
         base_url: str = "",
+        rate_limit_rps: float | None = None,
     ):
         self.hostname = hostname
         self.manifest = manifest
         self.transport = transport
         self.auth = auth
         self.base_url = base_url
+        self._rate_limiter = _TokenBucket(rate_limit_rps) if rate_limit_rps and rate_limit_rps > 0 else None
         self._mcp = FastMCP(
             name=f"mcp-{hostname}",
             instructions=f"{manifest.server_name} v{manifest.server_version}",
@@ -53,8 +85,12 @@ class DevicePod:
                 tool: McpTool = tool,
                 auth=None,
                 base_url: str = self.base_url,
+                rate_limiter=self._rate_limiter,
                 **kwargs: Any,
             ) -> Any:
+                if rate_limiter:
+                    await rate_limiter.acquire()
+
                 # Split kwargs by declared parameter location
                 path_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "path"}
                 body_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "body"}

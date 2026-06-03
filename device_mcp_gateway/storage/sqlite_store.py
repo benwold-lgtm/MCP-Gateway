@@ -12,12 +12,13 @@ from .base import AbstractDeviceStore
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS devices (
-    hostname    TEXT PRIMARY KEY,
-    base_url    TEXT NOT NULL,
-    spec_url    TEXT,
-    transport   TEXT NOT NULL DEFAULT 'sse',
-    auth_type   TEXT,
-    auth_config TEXT
+    hostname       TEXT PRIMARY KEY,
+    base_url       TEXT NOT NULL,
+    spec_url       TEXT,
+    transport      TEXT NOT NULL DEFAULT 'sse',
+    auth_type      TEXT,
+    auth_config    TEXT,
+    rate_limit_rps REAL
 )
 """
 
@@ -49,6 +50,11 @@ class SqliteDeviceStore(AbstractDeviceStore):
     async def initialize(self) -> None:
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(_CREATE_TABLE)
+            # Migration: add rate_limit_rps column for databases created before this version.
+            try:
+                await db.execute("ALTER TABLE devices ADD COLUMN rate_limit_rps REAL")
+            except Exception:
+                pass  # column already exists
             await db.commit()
         logger.info(f"SQLite device store initialised at {self._db_path}")
 
@@ -58,8 +64,8 @@ class SqliteDeviceStore(AbstractDeviceStore):
             await db.execute(
                 """
                 INSERT OR REPLACE INTO devices
-                    (hostname, base_url, spec_url, transport, auth_type, auth_config)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (hostname, base_url, spec_url, transport, auth_type, auth_config, rate_limit_rps)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     hostname,
@@ -68,6 +74,7 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     record.get("transport", "sse"),
                     record.get("auth_type"),
                     self._encrypt(json.dumps(auth_config)) if auth_config else None,
+                    record.get("rate_limit_rps"),
                 ),
             )
             await db.commit()
@@ -81,7 +88,7 @@ class SqliteDeviceStore(AbstractDeviceStore):
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT hostname, base_url, spec_url, transport, auth_type, auth_config FROM devices"
+                "SELECT hostname, base_url, spec_url, transport, auth_type, auth_config, rate_limit_rps FROM devices"
             ) as cursor:
                 rows = await cursor.fetchall()
         result = []
@@ -100,6 +107,7 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     "transport": row["transport"],
                     "auth_type": row["auth_type"],
                     "auth_config": auth_config,
+                    "rate_limit_rps": row["rate_limit_rps"],
                 }
             )
         return result

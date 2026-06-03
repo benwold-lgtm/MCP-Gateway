@@ -212,3 +212,56 @@ GET https://mcp-gateway.example.com/devices/actuator-api/sse
 ```
 
 Both devices will be automatically reconnected if the gateway pod is restarted, as long as the `gateway-data` PVC is intact.
+
+---
+
+## Deploying with the Provided Manifests
+
+All Kubernetes resources are in [`deploy/kubernetes/`](../deploy/kubernetes/). The directory is structured as a [Kustomize](https://kustomize.io/) base so you can overlay environment-specific values without editing the base files.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `namespace.yaml` | Creates the `mcp-gateway` namespace |
+| `configmap.yaml` | Supplies `config.yaml` to the container (non-secret settings only) |
+| `pvc.yaml` | 10 Gi `ReadWriteOnce` volume for `devices.db` |
+| `deployment.yaml` | Single-replica gateway pod; liveness + readiness on `/health` |
+| `service.yaml` | ClusterIP on port 8000 |
+| `ingress.yaml` | NGINX ingress with TLS stub (update host and secretName) |
+| `kustomization.yaml` | Kustomize root — applies all of the above |
+
+### Quick Start
+
+```bash
+# 1. Edit deploy/kubernetes/ingress.yaml — replace mcp-gateway.example.com with your domain
+# 2. Edit deploy/kubernetes/deployment.yaml — replace device-mcp-gateway:latest with your image
+
+# 3. Create the namespace and secrets
+kubectl apply -f deploy/kubernetes/namespace.yaml
+kubectl create secret generic gateway-secrets \
+  --namespace=mcp-gateway \
+  --from-literal=api-key=$(openssl rand -hex 32) \
+  --from-literal=secret-key=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+
+# 4. Deploy everything
+kubectl apply -k deploy/kubernetes/
+
+# 5. Watch rollout
+kubectl rollout status deployment/device-mcp-gateway -n mcp-gateway
+```
+
+### Overlays (optional)
+
+Create environment-specific overlays under `deploy/kubernetes/overlays/<env>/` to patch the image tag, resource limits, or replica count without modifying the base:
+
+```
+deploy/
+  kubernetes/
+    base/        ← rename current files here when using overlays
+    overlays/
+      staging/
+        kustomization.yaml   # patches image tag, sets lower limits
+      production/
+        kustomization.yaml   # patches image tag, sets production limits
+```

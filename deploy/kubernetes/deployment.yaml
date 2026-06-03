@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: device-mcp-gateway
+  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+spec:
+  # Single replica — device pods are in-process. Scale requires an external
+  # registry backend (not yet implemented). See architecture doc for details.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: device-mcp-gateway
+  template:
+    metadata:
+      labels:
+        app: device-mcp-gateway
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: gateway
+          image: device-mcp-gateway:latest   # replace with your registry/image:tag
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: MCP_CONFIG
+              value: /app/config.yaml
+            - name: MCP_GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: api-key
+                  optional: true
+            - name: MCP_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: secret-key
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: gateway-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: gateway-data

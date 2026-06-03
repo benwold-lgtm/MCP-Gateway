@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: device-mcp-gateway
+  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+  annotations:
+    # Extend timeouts for long-lived SSE connections
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - mcp-gateway.example.com   # replace with your domain
+      secretName: mcp-gateway-tls   # create with cert-manager or kubectl create secret tls
+  rules:
+    - host: mcp-gateway.example.com  # replace with your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: device-mcp-gateway
+                port:
+                  number: 8000

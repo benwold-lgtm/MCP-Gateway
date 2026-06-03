@@ -85,6 +85,7 @@ def _find_free_port() -> int:
 def test_config(tmp_path_factory):
     """Use a fast test config during integration tests."""
     config_path = tmp_path_factory.mktemp("config") / "test_config.yaml"
+    db_path = str(tmp_path_factory.mktemp("db") / "test_devices.db")
     config_data = {
         "server": {"host": "127.0.0.1", "port": 8000},
         "registry": {
@@ -96,6 +97,7 @@ def test_config(tmp_path_factory):
         "auth": {"type": "api_key"},
         "transport": {"default": "sse"},
         "logging": {"level": "INFO"},
+        "storage": {"db_path": db_path},
     }
     config_path.write_text(yaml.safe_dump(config_data))
     os.environ["MCP_CONFIG"] = str(config_path)

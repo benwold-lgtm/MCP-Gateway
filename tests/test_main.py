@@ -60,3 +60,46 @@ def test_register_stdio_transport_returns_400():
     )
     assert response.status_code == 400
     assert "not supported" in response.json()["detail"]
+
+
+def test_put_unknown_device_returns_404():
+    response = client.put(
+        "/devices/does-not-exist",
+        json={"base_url": "http://new.local", "auth_type": "none"},
+    )
+    assert response.status_code == 404
+
+
+def test_put_unsupported_transport_with_existing_device():
+    # Register a device first (will fail to reach, but registers in the map)
+    client.post("/devices", json={"hostname": "put-test", "base_url": "http://192.0.2.99", "auth_type": "none"})
+    response = client.put(
+        "/devices/put-test",
+        json={"base_url": "http://192.0.2.99", "auth_type": "none", "transport": "stdio"},
+    )
+    assert response.status_code == 400
+    assert "not supported" in response.json()["detail"]
+    client.delete("/devices/put-test")
+
+
+def test_register_with_rate_limit_rps():
+    response = client.post(
+        "/devices",
+        json={"hostname": "rate-test", "base_url": "http://192.0.2.99", "auth_type": "none", "rate_limit_rps": 5.0},
+    )
+    assert response.status_code == 200
+
+    metrics = client.get("/metrics").json()
+    assert "rate-test" in metrics.get("device_rate_limits", {})
+    assert metrics["device_rate_limits"]["rate-test"]["rate_limit_rps"] == 5.0
+
+    client.delete("/devices/rate-test")
+
+
+def test_register_with_invalid_rate_limit_returns_400():
+    response = client.post(
+        "/devices",
+        json={"hostname": "x", "base_url": "http://x.local", "auth_type": "none", "rate_limit_rps": -1},
+    )
+    assert response.status_code == 400
+    assert "rate_limit_rps" in response.json()["detail"]

@@ -72,6 +72,63 @@ async def require_auth(
         )
 
 
+# --- Shared helpers ---
+
+
+def _parse_auth(data: dict) -> AbstractAuth | None:
+    """Build an AbstractAuth from a registration payload. Raises HTTPException on bad input."""
+    auth_type = (
+        data.get("auth_type") or data.get("auth", {}).get("type") or config.get("auth", {}).get("type", "api_key")
+    )
+    if auth_type == "api_key":
+        api_key = data.get("auth", {}).get("api_key") or data.get("api_key")
+        header_name = data.get("auth", {}).get("header_name") or config.get("auth", {}).get("api_key", {}).get(
+            "header_name", "X-API-Key"
+        )
+        return ApiKeyAuth(api_key=api_key, header_name=header_name) if api_key else None
+    if auth_type == "oauth2":
+        auth_cfg = data.get("auth", {})
+        token_endpoint = auth_cfg.get("token_endpoint") or config.get("auth", {}).get("oauth2", {}).get(
+            "token_endpoint"
+        )
+        client_id = auth_cfg.get("client_id") or config.get("auth", {}).get("oauth2", {}).get("client_id")
+        client_secret = auth_cfg.get("client_secret") or config.get("auth", {}).get("oauth2", {}).get("client_secret")
+        scopes = auth_cfg.get("scopes") or config.get("auth", {}).get("oauth2", {}).get("scopes", ["read"])
+        if not token_endpoint or not client_id or not client_secret:
+            raise HTTPException(status_code=400, detail="oauth2 requires token_endpoint, client_id, and client_secret")
+        return OAuth2Auth(
+            token_endpoint=token_endpoint,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=scopes,
+        )
+    if auth_type == "none":
+        return None
+    raise HTTPException(status_code=400, detail=f"Unsupported auth_type: {auth_type}")
+
+
+def _parse_rate_limit(data: dict) -> float | None:
+    """Extract and validate rate_limit_rps from a payload dict."""
+    rps = data.get("rate_limit_rps")
+    if rps is None:
+        return None
+    try:
+        rps = float(rps)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="rate_limit_rps must be a positive number")
+    if rps <= 0:
+        raise HTTPException(status_code=400, detail="rate_limit_rps must be a positive number")
+    return rps
+
+
+def _validate_transport(transport: str) -> None:
+    if transport != "sse":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Transport '{transport}' is not supported in gateway mode; use 'sse'",
+        )
+
+
 # --- Lifespan ---
 
 
@@ -134,48 +191,11 @@ async def register_device(request: Request):
     if not hostname or not base_url:
         raise HTTPException(status_code=400, detail="hostname and base_url required")
 
-    auth_type = (
-        data.get("auth_type") or data.get("auth", {}).get("type") or config.get("auth", {}).get("type", "api_key")
-    )
-    auth: AbstractAuth | None = None
-
-    if auth_type == "api_key":
-        api_key = data.get("auth", {}).get("api_key") or data.get("api_key")
-        header_name = data.get("auth", {}).get("header_name") or config.get("auth", {}).get("api_key", {}).get(
-            "header_name", "X-API-Key"
-        )
-        if api_key:
-            auth = ApiKeyAuth(api_key=api_key, header_name=header_name)
-    elif auth_type == "oauth2":
-        auth_config = data.get("auth", {})
-        token_endpoint = auth_config.get("token_endpoint") or config.get("auth", {}).get("oauth2", {}).get(
-            "token_endpoint"
-        )
-        client_id = auth_config.get("client_id") or config.get("auth", {}).get("oauth2", {}).get("client_id")
-        client_secret = auth_config.get("client_secret") or config.get("auth", {}).get("oauth2", {}).get(
-            "client_secret"
-        )
-        scopes = auth_config.get("scopes") or config.get("auth", {}).get("oauth2", {}).get("scopes", ["read"])
-        if not token_endpoint or not client_id or not client_secret:
-            raise HTTPException(status_code=400, detail="oauth2 requires token_endpoint, client_id, and client_secret")
-        auth = OAuth2Auth(
-            token_endpoint=token_endpoint,
-            client_id=client_id,
-            client_secret=client_secret,
-            scopes=scopes,
-        )
-    elif auth_type == "none":
-        auth = None
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported auth_type: {auth_type}")
-
+    auth = _parse_auth(data)
     transport = data.get("transport") or config.get("transport", {}).get("default", "sse")
-    if transport != "sse":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Transport '{transport}' is not supported in gateway mode; use 'sse'",
-        )
+    _validate_transport(transport)
     spec_url = data.get("spec_url")
+    rate_limit_rps = _parse_rate_limit(data)
 
     profile = await registry.register_device(
         hostname=hostname,
@@ -183,10 +203,51 @@ async def register_device(request: Request):
         spec_url=spec_url,
         auth=auth,
         transport=transport,
+        rate_limit_rps=rate_limit_rps,
     )
 
     return {
         "status": "registered",
+        "hostname": hostname,
+        "pod_active": profile.pod_active,
+        "reachable": profile.reachable,
+        "spawn_error": profile.spawn_error,
+    }
+
+
+@protected.put("/devices/{hostname}")
+async def update_device(hostname: str, request: Request):
+    """Replace a device's configuration. Stops the running pod and restarts it with the new settings."""
+    existing = registry.get_device(hostname)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Device '{hostname}' not found")
+
+    data = await request.json()
+    base_url = data.get("base_url") or existing.base_url
+    spec_url = data.get("spec_url", existing.spec_url)
+
+    auth = _parse_auth(data)
+    transport = data.get("transport") or existing.transport
+    _validate_transport(transport)
+    rate_limit_rps = _parse_rate_limit(data)
+
+    # Kill the existing pod before overwriting the profile so the background
+    # task is cancelled and doesn't become an orphan.
+    await registry._kill_pod(existing)
+    # Invalidate the spec cache so the new config triggers a fresh fetch.
+    registry._spec_cache._store.pop(existing.base_url, None)
+
+    profile = await registry.register_device(
+        hostname=hostname,
+        base_url=base_url,
+        spec_url=spec_url,
+        auth=auth,
+        transport=transport,
+        rate_limit_rps=rate_limit_rps,
+    )
+
+    return {
+        "status": "updated",
         "hostname": hostname,
         "pod_active": profile.pod_active,
         "reachable": profile.reachable,
@@ -206,6 +267,7 @@ async def list_devices():
                 "pod_active": profile.pod_active,
                 "last_check": profile.last_reachable_check,
                 "transport": profile.transport,
+                "rate_limit_rps": profile.rate_limit_rps,
             }
         )
     return {"devices": devices}
@@ -254,12 +316,25 @@ async def unregister_device(hostname: str):
 async def get_metrics():
     reachable_count = sum(1 for profile in registry._devices.values() if profile.reachable)
     unreachable_count = len(registry._devices) - reachable_count
+
+    device_rate_limits = {}
+    for hostname, profile in registry._devices.items():
+        # rate_limit_rps is always known from the profile; live token count is
+        # only available while the pod is running.
+        limiter = profile.pod._rate_limiter if profile.pod else None
+        rl: dict = {
+            "rate_limit_rps": profile.rate_limit_rps,
+            "rate_limit_tokens": limiter.tokens if limiter else None,
+        }
+        device_rate_limits[hostname] = rl
+
     return {
         "active_pods": sum(1 for profile in registry._devices.values() if profile.pod_active),
         "reachable_devices": reachable_count,
         "unreachable_devices": unreachable_count,
         "total_registered": len(registry._devices),
         "spec_cache_size": len(registry._spec_cache._store),
+        "device_rate_limits": device_rate_limits,
     }
 
 

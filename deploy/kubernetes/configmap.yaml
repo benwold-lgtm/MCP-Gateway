@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+data:
+  config.yaml: |
+    # Device MCP Gateway Configuration
+    # Secrets (api_key, secret_key) are injected via the gateway-secrets Secret;
+    # do not store them here.
+
+    gateway:
+      api_key: ""      # set via MCP_GATEWAY_API_KEY env var
+      secret_key: ""   # set via MCP_SECRET_KEY env var
+
+    server:
+      host: "0.0.0.0"
+      port: 8000
+
+    registry:
+      health_check_interval: 30
+      spec_poll_interval: 300
+      spec_cache_ttl: 3600
+      max_concurrent_pods: 50
+
+    auth:
+      type: "api_key"
+      api_key:
+        header_name: "X-API-Key"
+      oauth2:
+        token_refresh_before_expiry_seconds: 300
+        token_endpoint: ""
+        client_id: ""
+        client_secret: ""
+        scopes:
+          - "read"
+          - "write"
+
+    transport:
+      default: "sse"
+      sse:
+        keep_alive_interval: 15
+
+    discovery:
+      spec_paths:
+        - "/openapi.json"
+        - "/openapi.yaml"
+        - "/swagger.json"
+        - "/swagger.yaml"
+        - "/api-docs"
+        - "/docs/openapi.json"
+        - "/openapi/3.0.json"
+        - "/api/v1/openapi.json"
+      timeout: 10
+
+    storage:
+      type: "sqlite"
+      db_path: "/app/data/devices.db"
+
+    logging:
+      level: "INFO"
+      file: "logs/gateway.log"
+      max_size: 50
+      backup_count: 5
