@@ -4,6 +4,9 @@ Integration Test: Register Mock OpenAPI Device -> Verify Gateway Health & Metric
 
 import json
 import time
+from unittest.mock import AsyncMock
+
+import pytest
 
 
 def test_register_and_metrics(client, mock_target_url):
@@ -132,6 +135,52 @@ def test_sse_transport_client_flow(client, mock_target_url):
     del_resp = client.delete(f"/devices/{hostname}")
     assert del_resp.status_code == 200
     print("[PASS] SSE transport client flow verified.")
+
+
+@pytest.mark.asyncio
+async def test_spec_change_replaces_pod():
+    """When a device's OpenAPI spec hash changes, the running pod is torn down and replaced."""
+    from device_mcp_gateway.registry.server import Registry
+
+    spec_v1 = {
+        "openapi": "3.0.3",
+        "info": {"title": "Sensor API", "version": "1.0.0"},
+        "paths": {
+            "/status": {"get": {"operationId": "get_status", "responses": {"200": {"description": "OK"}}}}
+        },
+    }
+    spec_v2 = {
+        "openapi": "3.0.3",
+        "info": {"title": "Sensor API", "version": "2.0.0"},
+        "paths": {
+            "/status": {"get": {"operationId": "get_status", "responses": {"200": {"description": "OK"}}}},
+            "/health": {"get": {"operationId": "check_health", "responses": {"200": {"description": "OK"}}}},
+        },
+    }
+
+    registry = Registry(config={"spec_cache_ttl": 10, "health_check_interval": 10, "max_concurrent_pods": 10})
+    registry.check_reachability = AsyncMock(return_value=True)
+    registry._discover_spec = AsyncMock(return_value=spec_v1)
+
+    profile = await registry.register_device(hostname="spec-change-test", base_url="http://test.local")
+    assert profile.pod_active, "Pod should be active after initial registration"
+    initial_pod = profile.pod
+    assert len(profile.pod.manifest.tools) == 1, "Initial pod should have 1 tool"
+
+    # Simulate upstream spec update
+    registry._discover_spec = AsyncMock(return_value=spec_v2)
+    registry._spec_cache._store.clear()
+    profile.last_spec_check = 0.0
+
+    await registry.fetch_spec(profile)
+
+    assert profile.pod_active, "Pod should still be active after spec change"
+    assert profile.pod is not initial_pod, "A new pod should have been spawned"
+    assert len(profile.pod.manifest.tools) == 2, "New pod should expose 2 tools from spec v2"
+    assert profile.spec_updated_at > 0.0, "spec_updated_at should be set"
+
+    await registry.shutdown()
+    print("[PASS] Spec change pod replacement verified.")
 
 
 def test_register_unreachable_device_reports_failure(client):

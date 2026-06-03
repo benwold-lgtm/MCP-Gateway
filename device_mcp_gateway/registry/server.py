@@ -33,6 +33,7 @@ class DeviceProfile:
     spec_data: dict[str, Any] | None = None
     spec_hash: str | None = None
     last_spec_check: float = 0.0
+    spec_updated_at: float = 0.0
     reachable: bool = True
     last_reachable_check: float = 0.0
     pod: DevicePod | None = None
@@ -191,12 +192,22 @@ class Registry:
             import hashlib
 
             h = hashlib.sha256(str(fetched).encode()).hexdigest()[:16]
-            if h != profile.spec_hash:
-                logger.info(f"Spec updated for {profile.hostname}: hash={h}")
+            old_hash = profile.spec_hash
             profile.spec_hash = h
             profile.spec_data = fetched
             profile.last_spec_check = time.time()
             self._spec_cache.put(cache_key, fetched)
+
+            if old_hash is not None and h != old_hash:
+                logger.info(f"Spec changed for {profile.hostname}: {old_hash} → {h}")
+                profile.spec_updated_at = time.time()
+                if profile.pod_active:
+                    logger.info(f"Replacing pod for {profile.hostname} due to spec change")
+                    await self._kill_pod(profile)
+                    await self._spawn_pod(profile)
+            else:
+                logger.debug(f"Spec fetched for {profile.hostname}: hash={h}")
+
             return fetched
         return {}
 
@@ -240,16 +251,24 @@ class Registry:
             profile.last_reachable_check = time.time()
         return profile.reachable
 
+    async def _health_check_one(self, profile: DeviceProfile) -> None:
+        """Check reachability, refresh spec if needed, and manage pod lifecycle for one device."""
+        try:
+            reachable = await self.check_reachability(profile)
+            if reachable:
+                await self.fetch_spec(profile)
+            if profile.reachable and not profile.pod_active:
+                await self._spawn_pod(profile)
+            elif not profile.reachable and profile.pod_active:
+                await self._kill_pod(profile)
+        except Exception:
+            logger.exception(f"Health check error for {profile.hostname}")
+
     async def start_health_loop(self) -> None:
         while True:
-            for hostname, profile in list(self._devices.items()):
-                reachable = await self.check_reachability(profile)
-                if reachable:
-                    await self.fetch_spec(profile)
-                if profile.reachable and not profile.pod_active:
-                    await self._spawn_pod(profile)
-                elif not profile.reachable and profile.pod_active:
-                    await self._kill_pod(profile)
+            profiles = list(self._devices.values())
+            if profiles:
+                await asyncio.gather(*[self._health_check_one(p) for p in profiles])
             await asyncio.sleep(self._health_interval)
 
     async def _spawn_pod(self, profile: DeviceProfile) -> None:

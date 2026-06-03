@@ -56,16 +56,25 @@ class SseTransport:
                 logger.warning(f"SSE queue full for client {client_id}, dropping message")
 
     async def event_stream(self, client_id: str) -> AsyncGenerator[Any, None]:
-        """Yield SSE events from the client's queue."""
+        """Yield SSE events from the client's queue.
+
+        The try/finally guarantees the client entry is removed from _clients
+        whether the connection ends normally, the client disconnects (GeneratorExit
+        thrown by EventSourceResponse.aclose()), or the task is cancelled.
+        """
         q = self._clients.get(client_id)
         if not q:
             return
-        while self._running:
-            try:
-                msg = await asyncio.wait_for(q.get(), timeout=30.0)
-                yield msg
-            except asyncio.TimeoutError:
-                yield {"event": "keep-alive", "data": ""}
+        try:
+            while self._running:
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=30.0)
+                    yield msg
+                except asyncio.TimeoutError:
+                    yield {"event": "keep-alive", "data": ""}
+        finally:
+            self._clients.pop(client_id, None)
+            logger.info(f"SSE client {client_id} disconnected from {self.hostname}")
 
     async def handle_message(self, client_id: str, params: dict) -> dict | None:
         """Pass incoming MCP request to the handler, return response if needed."""
