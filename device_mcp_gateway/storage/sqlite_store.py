@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Optional
 
 import aiosqlite
 from loguru import logger
@@ -25,8 +25,26 @@ CREATE TABLE IF NOT EXISTS devices (
 class SqliteDeviceStore(AbstractDeviceStore):
     """Persists device registrations in a local SQLite database."""
 
-    def __init__(self, db_path: str = "./devices.db"):
+    def __init__(self, db_path: str = "./devices.db", fernet: Optional[Any] = None) -> None:
         self._db_path = db_path
+        self._fernet = fernet  # cryptography.fernet.Fernet instance, or None
+
+    def _encrypt(self, plaintext: str) -> str:
+        if self._fernet:
+            return self._fernet.encrypt(plaintext.encode()).decode()
+        return plaintext
+
+    def _decrypt(self, stored: str) -> str:
+        if self._fernet:
+            try:
+                return self._fernet.decrypt(stored.encode()).decode()
+            except Exception:
+                logger.warning(
+                    "auth_config decryption failed — record may be unencrypted plaintext; "
+                    "re-register the device to encrypt it"
+                )
+                return stored
+        return stored
 
     async def initialize(self) -> None:
         async with aiosqlite.connect(self._db_path) as db:
@@ -49,7 +67,7 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     record.get("spec_url"),
                     record.get("transport", "sse"),
                     record.get("auth_type"),
-                    json.dumps(auth_config) if auth_config else None,
+                    self._encrypt(json.dumps(auth_config)) if auth_config else None,
                 ),
             )
             await db.commit()
@@ -71,7 +89,7 @@ class SqliteDeviceStore(AbstractDeviceStore):
             auth_config = None
             if row["auth_config"]:
                 try:
-                    auth_config = json.loads(row["auth_config"])
+                    auth_config = json.loads(self._decrypt(row["auth_config"]))
                 except Exception:
                     logger.warning(f"Could not parse auth_config for {row['hostname']}")
             result.append(

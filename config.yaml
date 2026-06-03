@@ -1,5 +1,15 @@
 # Device MCP Gateway Configuration
 
+gateway:
+  # Require Authorization: Bearer <token> on all API routes (leave empty to disable).
+  # Override with MCP_GATEWAY_API_KEY environment variable.
+  api_key: ""
+  # Fernet key for encrypting device credentials in SQLite.
+  # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  # Override with MCP_SECRET_KEY environment variable.
+  # Leave empty to store credentials as plaintext (not recommended for production).
+  secret_key: ""
+
 server:
   host: "0.0.0.0"
   port: 8000

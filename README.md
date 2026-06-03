@@ -74,6 +74,14 @@ storage:
 
 The default `./devices.db` path falls outside the volume and is lost on every restart.
 
+Pass secrets as environment variables rather than storing them in `config.yaml`:
+
+```bash
+MCP_GATEWAY_API_KEY=<random-token> MCP_SECRET_KEY=<fernet-key> docker compose up -d
+```
+
+Generate a Fernet key: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+
 To point the container at a different config file, either edit the bind-mount in `docker-compose.yml` or set the `MCP_CONFIG` environment variable.
 
 ## MCP Client Integration
@@ -111,6 +119,7 @@ The SSE transport uses a two-step protocol:
    ```bash
    curl -X POST "http://localhost:8000/devices/my-sensor/messages?client_id=my-client" \
      -H "Content-Type: application/json" \
+     -H "Authorization: Bearer <your-api-key>" \
      -d '{"tool": "get_readings", "arguments": {"sensor_id": 1}}'
    ```
 
@@ -189,6 +198,8 @@ All settings live in `config.yaml`. Override the file location with the `MCP_CON
 
 | Key | Default | Description |
 |-----|---------|-------------|
+| `gateway.api_key` | `""` | Bearer token required on all API routes. Empty = no auth. Override with `MCP_GATEWAY_API_KEY` |
+| `gateway.secret_key` | `""` | Fernet key for encrypting device credentials in SQLite. Override with `MCP_SECRET_KEY` |
 | `server.host` | `0.0.0.0` | Bind address |
 | `server.port` | `8000` | Port |
 | `registry.health_check_interval` | `30` | Seconds between reachability checks |

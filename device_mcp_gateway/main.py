@@ -3,10 +3,14 @@ Device MCP Gateway FastAPI entrypoint.
 """
 
 import asyncio
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
-from fastapi import FastAPI, HTTPException, Query, Request
+from typing import Optional
+
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 from sse_starlette import EventSourceResponse
 
@@ -23,11 +27,52 @@ app = FastAPI(title="Device MCP Gateway", version="0.1.0")
 config = load_config()
 setup_logging(level=config.get("logging", {}).get("level", "INFO"))
 
+# --- Gateway-level security setup ---
+
+_gateway_cfg = config.get("gateway", {})
+_gateway_api_key: str = os.getenv("MCP_GATEWAY_API_KEY") or _gateway_cfg.get("api_key") or ""
+_secret_key_raw: str = os.getenv("MCP_SECRET_KEY") or _gateway_cfg.get("secret_key") or ""
+
+_fernet: Optional[object] = None
+if _secret_key_raw:
+    try:
+        from cryptography.fernet import Fernet
+
+        _fernet = Fernet(_secret_key_raw.encode() if isinstance(_secret_key_raw, str) else _secret_key_raw)
+        logger.info("Credential encryption enabled")
+    except Exception as exc:
+        logger.error(f"Invalid secret_key — credentials will be stored as plaintext: {exc}")
+else:
+    logger.warning("gateway.secret_key is not set — device credentials stored as plaintext")
+
+# --- Storage and registry ---
+
 _storage_cfg = config.get("storage", {})
 _db_path = _storage_cfg.get("db_path", "./devices.db")
-_store = SqliteDeviceStore(db_path=_db_path)
+_store = SqliteDeviceStore(db_path=_db_path, fernet=_fernet)
 
 registry = Registry(config=config.get("registry", {}), store=_store)
+
+# --- Auth dependency ---
+
+_http_bearer = HTTPBearer(auto_error=False)
+
+
+async def require_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(_http_bearer),
+) -> None:
+    """Validates Bearer token when gateway.api_key is configured. No-op when unset."""
+    if not _gateway_api_key:
+        return
+    if credentials is None or credentials.credentials != _gateway_api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+# --- Lifespan ---
 
 
 @asynccontextmanager
@@ -48,6 +93,9 @@ async def lifespan(app: FastAPI):
 app.router.lifespan_context = lifespan
 
 
+# --- Middleware ---
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start = time.perf_counter()
@@ -57,7 +105,27 @@ async def log_requests(request: Request, call_next):
     return response
 
 
-@app.post("/devices")
+# --- Unauthenticated routes ---
+
+
+@app.get("/health")
+async def health_check():
+    active_pods = sum(1 for profile in registry._devices.values() if profile.pod_active)
+    total_devices = len(registry._devices)
+    return {
+        "status": "healthy",
+        "active_pods": active_pods,
+        "registered_devices": total_devices,
+        "version": config.get("server", {}).get("version", "0.1.0"),
+    }
+
+
+# --- Protected routes (require Bearer token when gateway.api_key is set) ---
+
+protected = APIRouter(dependencies=[Depends(require_auth)])
+
+
+@protected.post("/devices")
 async def register_device(request: Request):
     data = await request.json()
     hostname = data.get("hostname")
@@ -121,7 +189,7 @@ async def register_device(request: Request):
     }
 
 
-@app.get("/devices")
+@protected.get("/devices")
 async def list_devices():
     devices = []
     for profile in registry._devices.values():
@@ -138,7 +206,7 @@ async def list_devices():
     return {"devices": devices}
 
 
-@app.get("/devices/{hostname}/sse")
+@protected.get("/devices/{hostname}/sse")
 async def device_sse_stream(hostname: str, client_id: str | None = Query(None)):
     profile = registry.get_device(hostname)
     if not profile or not profile.pod or not profile.pod_active:
@@ -154,7 +222,7 @@ async def device_sse_stream(hostname: str, client_id: str | None = Query(None)):
     return EventSourceResponse(transport.event_stream(client_id))
 
 
-@app.post("/devices/{hostname}/messages")
+@protected.post("/devices/{hostname}/messages")
 async def device_sse_message(hostname: str, request: Request, client_id: str = Query(...)):
     profile = registry.get_device(hostname)
     if not profile or not profile.pod or not profile.pod_active:
@@ -171,25 +239,13 @@ async def device_sse_message(hostname: str, request: Request, client_id: str = Q
     return response
 
 
-@app.delete("/devices/{hostname}")
+@protected.delete("/devices/{hostname}")
 async def unregister_device(hostname: str):
     await registry.deregister_device(hostname)
     return {"status": "removed", "hostname": hostname}
 
 
-@app.get("/health")
-async def health_check():
-    active_pods = sum(1 for profile in registry._devices.values() if profile.pod_active)
-    total_devices = len(registry._devices)
-    return {
-        "status": "healthy",
-        "active_pods": active_pods,
-        "registered_devices": total_devices,
-        "version": config.get("server", {}).get("version", "0.1.0"),
-    }
-
-
-@app.get("/metrics")
+@protected.get("/metrics")
 async def get_metrics():
     reachable_count = sum(1 for profile in registry._devices.values() if profile.reachable)
     unreachable_count = len(registry._devices) - reachable_count
@@ -200,6 +256,9 @@ async def get_metrics():
         "total_registered": len(registry._devices),
         "spec_cache_size": len(registry._spec_cache._store),
     }
+
+
+app.include_router(protected)
 
 
 if __name__ == "__main__":
