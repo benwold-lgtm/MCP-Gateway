@@ -9,7 +9,6 @@ import asyncio
 import base64
 import time
 from typing import Any
-import json
 
 import httpx
 from loguru import logger
@@ -79,11 +78,13 @@ class DevicePod:
 
     def _register_tools(self) -> None:
         """Register all MCP tools from the manifest as async callables."""
+        self._tool_dispatch: dict[str, Any] = {}
         for tool in self.manifest.tools:
-            # Build a callable closure per tool
+            # Build a callable closure per tool. All closure variables are bound
+            # via default-argument so each iteration captures its own snapshot.
             async def call_api(
                 tool: McpTool = tool,
-                auth=None,
+                auth=self.auth,
                 base_url: str = self.base_url,
                 rate_limiter=self._rate_limiter,
                 **kwargs: Any,
@@ -130,6 +131,10 @@ class DevicePod:
                 except Exception as e:
                     return {"error": str(e)}
 
+            # Store in local dispatch dict; FastMCP's **kwargs handling would
+            # require a 'kwargs' key in arguments, so we bypass call_tool() and
+            # invoke closures directly via _tool_dispatch.
+            self._tool_dispatch[tool.name] = call_api
             self._mcp.tool(name=tool.name, description=tool.description)(call_api)
         logger.info(f"Registered {len(self.manifest.tools)} tools for pod {self.hostname}")
 
@@ -144,60 +149,28 @@ class DevicePod:
         if not tool_name:
             return {"error": "tool is required"}
 
+        handler = self._tool_dispatch.get(tool_name)
+        if not handler:
+            available = list(self._tool_dispatch.keys())
+            logger.error(f"Unknown tool: {tool_name}; available: {available}")
+            return {"error": f"Unknown tool: {tool_name}"}
+
         try:
-            result = await self._mcp.call_tool(tool_name, {"kwargs": arguments})
-
-            # Normalize FastMCP ContentBlock results (e.g., TextContent) into
-            # JSON-serializable structures. Many MCP tools return a sequence of
-            # content blocks; prefer extracting text and parsing JSON when
-            # possible so clients receive a predictable dict payload.
-            try:
-                if isinstance(result, list):
-                    texts = []
-                    for item in result:
-                        text = getattr(item, "text", None)
-                        if text is None:
-                            texts.append(str(item))
-                        else:
-                            texts.append(text)
-                    if len(texts) == 1:
-                        try:
-                            parsed = json.loads(texts[0])
-                            # If the tool returned an envelope like {status: X, body: {...}},
-                            # prefer returning the inner body to match client expectations.
-                            if isinstance(parsed, dict) and "body" in parsed and "status" in parsed:
-                                parsed = parsed["body"]
-                            result = {"body": parsed}
-                        except Exception:
-                            result = {"body": texts[0]}
-                    else:
-                        result = {"body": texts}
-            except Exception:
-                # If normalization fails, fall back to the raw result
-                pass
-
+            result = await handler(**arguments)
             return {"result": result}
         except Exception as e:
-            available = list(self._mcp._tool_manager._tools.keys())
-            logger.error(f"SSE tool call failed for {tool_name}: {e}; available tools: {available}")
+            logger.error(f"SSE tool call failed for {tool_name}: {e}")
             return {"error": str(e)}
 
     async def start(self) -> None:
-        """Start the MCP server on the configured transport."""
+        """Start the MCP server."""
         if self._running:
             return
+        if self.transport != "sse":
+            raise ValueError(f"Unsupported transport: {self.transport}")
         self._running = True
         self._stop_event = asyncio.Event()
-        if self.transport == "sse":
-            self._task = asyncio.create_task(self._run_sse())
-        elif self.transport == "stdio":
-            self._task = asyncio.create_task(self._run_stdio())
-        elif self.transport == "http":
-            self._task = asyncio.create_task(self._run_http())
-        else:
-            msg = f"Unsupported transport: {self.transport}"
-            logger.error(msg)
-            raise ValueError(msg)
+        self._task = asyncio.create_task(self._run_sse())
         logger.info(f"Pod started for {self.hostname} via {self.transport}")
 
     async def _run_sse(self) -> None:
@@ -209,12 +182,6 @@ class DevicePod:
             pass
         finally:
             await transport.stop()
-
-    async def _run_stdio(self) -> None:
-        await self._mcp.run_stdio_async()
-
-    async def _run_http(self) -> None:
-        await self._mcp.run_streamable_http_async()
 
     def stop(self) -> None:
         """Gracefully stop the pod."""

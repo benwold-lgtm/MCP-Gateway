@@ -17,6 +17,9 @@ spec:
       labels:
         app: device-mcp-gateway
     spec:
+      # Give SSE streams time to drain before the pod is forcibly killed.
+      # Adjust upward if clients hold very long-lived connections.
+      terminationGracePeriodSeconds: 120
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

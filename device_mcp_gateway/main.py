@@ -3,6 +3,7 @@ Device MCP Gateway FastAPI entrypoint.
 """
 
 import asyncio
+import hmac
 import os
 import time
 import uuid
@@ -25,7 +26,13 @@ from device_mcp_gateway.storage.sqlite_store import SqliteDeviceStore
 app = FastAPI(title="Device MCP Gateway", version="0.1.0")
 
 config = load_config()
-setup_logging(level=config.get("logging", {}).get("level", "INFO"))
+_log_cfg = config.get("logging", {})
+setup_logging(
+    level=_log_cfg.get("level", "INFO"),
+    log_file=_log_cfg.get("file", "logs/gateway.log"),
+    max_size_mb=_log_cfg.get("max_size", 50),
+    backup_count=_log_cfg.get("backup_count", 5),
+)
 
 # --- Gateway-level security setup ---
 
@@ -51,7 +58,8 @@ _storage_cfg = config.get("storage", {})
 _db_path = _storage_cfg.get("db_path", "./devices.db")
 _store = SqliteDeviceStore(db_path=_db_path, fernet=_fernet)
 
-registry = Registry(config=config.get("registry", {}), store=_store)
+_registry_cfg = {**config.get("registry", {}), "discovery": config.get("discovery", {})}
+registry = Registry(config=_registry_cfg, store=_store)
 
 # --- Auth dependency ---
 
@@ -64,7 +72,7 @@ async def require_auth(
     """Validates Bearer token when gateway.api_key is configured. No-op when unset."""
     if not _gateway_api_key:
         return
-    if credentials is None or credentials.credentials != _gateway_api_key:
+    if credentials is None or not hmac.compare_digest(credentials.credentials, _gateway_api_key):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized",
@@ -191,6 +199,9 @@ async def register_device(request: Request):
     if not hostname or not base_url:
         raise HTTPException(status_code=400, detail="hostname and base_url required")
 
+    if registry.get_device(hostname):
+        raise HTTPException(status_code=409, detail=f"Device '{hostname}' already registered; use PUT to update")
+
     auth = _parse_auth(data)
     transport = data.get("transport") or config.get("transport", {}).get("default", "sse")
     _validate_transport(transport)
@@ -226,7 +237,8 @@ async def update_device(hostname: str, request: Request):
     base_url = data.get("base_url") or existing.base_url
     spec_url = data.get("spec_url", existing.spec_url)
 
-    auth = _parse_auth(data)
+    _AUTH_KEYS = {"auth_type", "auth", "api_key"}
+    auth = _parse_auth(data) if _AUTH_KEYS & data.keys() else existing.auth
     transport = data.get("transport") or existing.transport
     _validate_transport(transport)
     rate_limit_rps = _parse_rate_limit(data)

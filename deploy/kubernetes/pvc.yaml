@@ -8,6 +8,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
+  # storageClassName: standard  # uncomment and set if your cluster has no default StorageClass
   resources:
     requests:
       storage: 10Gi

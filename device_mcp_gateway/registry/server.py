@@ -80,7 +80,6 @@ class Registry:
             ttl=config.get("spec_cache_ttl", 3600),
             max_entries=200,
         )
-        self._translator = SpecTranslator()
         self._health_task: asyncio.Task | None = None
         self._health_interval = config.get("health_check_interval", 30)
         self._spec_poll_interval = config.get("spec_poll_interval", 300)
@@ -185,7 +184,7 @@ class Registry:
     async def fetch_spec(self, profile: DeviceProfile) -> dict[str, Any]:
         cache_key = profile.base_url
         cached = self._spec_cache.get(cache_key)
-        if cached and (time.time() - profile.last_spec_check) < profile.spec_cache_ttl:
+        if cached and (time.time() - profile.last_spec_check) < self._spec_poll_interval:
             return cached
 
         if profile.spec_url:
@@ -286,7 +285,7 @@ class Registry:
             logger.warning(msg)
             profile.spawn_error = msg
             return
-        mcp_manifest = self._translator.translate(spec, profile.hostname)
+        mcp_manifest = SpecTranslator().translate(spec, profile.hostname)
         pod = DevicePod(
             hostname=profile.hostname,
             manifest=mcp_manifest,

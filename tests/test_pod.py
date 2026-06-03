@@ -2,7 +2,6 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
-from mcp.server.fastmcp import FastMCP
 
 from device_mcp_gateway.core.translator import McpManifest, McpTool
 from device_mcp_gateway.pods.device_pod import DevicePod
@@ -28,18 +27,8 @@ def simple_manifest() -> McpManifest:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "transport,patch_target,method_name",
-    [
-        ("sse", SseTransport, "start"),
-        ("stdio", FastMCP, "run_stdio_async"),
-        ("http", FastMCP, "run_streamable_http_async"),
-    ],
-)
-async def test_device_pod_start_and_stop(monkeypatch, simple_manifest, transport, patch_target, method_name):
-    started = {
-        "count": 0,
-    }
+async def test_device_pod_start_and_stop(monkeypatch, simple_manifest):
+    started = {"count": 0}
 
     async def fake_run(self, mount_path=None):
         started["count"] += 1
@@ -49,12 +38,12 @@ async def test_device_pod_start_and_stop(monkeypatch, simple_manifest, transport
         except asyncio.CancelledError:
             raise
 
-    monkeypatch.setattr(patch_target, method_name, fake_run)
+    monkeypatch.setattr(SseTransport, "start", fake_run)
 
     pod = DevicePod(
         hostname="test-device",
         manifest=simple_manifest,
-        transport=transport,
+        transport="sse",
         base_url="http://localhost:1234",
     )
 

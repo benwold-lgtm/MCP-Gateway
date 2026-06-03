@@ -7,7 +7,12 @@ import sys
 from loguru import logger
 
 
-def setup_logging(level: str = "INFO", log_file: str = "logs/gateway.log"):
+def setup_logging(
+    level: str = "INFO",
+    log_file: str = "logs/gateway.log",
+    max_size_mb: int = 50,
+    backup_count: int = 5,
+):
     """Configure loguru with rotation and structured output."""
     logger.remove()
     logger.add(
@@ -18,6 +23,8 @@ def setup_logging(level: str = "INFO", log_file: str = "logs/gateway.log"):
             "<cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>"
         ),
     )
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
-    logger.add(log_file, rotation="50 MB", retention="5 days", level=level)
+    log_dir = os.path.dirname(log_file)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    logger.add(log_file, rotation=f"{max_size_mb} MB", retention=backup_count, level=level)
     logger.info("Logging initialized")
