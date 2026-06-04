@@ -78,7 +78,7 @@ storage:
   # Persistence backend: sqlite
   type: "sqlite"
   # Path to the SQLite database file
-  db_path: "./devices.db"
+  db_path: "./data/devices.db"
 
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR

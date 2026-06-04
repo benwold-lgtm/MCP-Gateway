@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Optional
 
 import aiosqlite
@@ -26,9 +27,22 @@ CREATE TABLE IF NOT EXISTS devices (
 class SqliteDeviceStore(AbstractDeviceStore):
     """Persists device registrations in a local SQLite database."""
 
-    def __init__(self, db_path: str = "./devices.db", fernet: Optional[Any] = None) -> None:
+    def __init__(self, db_path: str = "./data/devices.db", fernet: Optional[Any] = None) -> None:
         self._db_path = db_path
         self._fernet = fernet  # cryptography.fernet.Fernet instance, or None
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        # Bootstrap schema synchronously so the table exists before the async
+        # lifespan runs (required for bare TestClient usage and cold starts).
+        import sqlite3
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(_CREATE_TABLE)
+            try:
+                conn.execute("ALTER TABLE devices ADD COLUMN rate_limit_rps REAL")
+            except Exception:
+                pass  # column already exists
 
     def _encrypt(self, plaintext: str) -> str:
         if self._fernet:

@@ -39,7 +39,7 @@ def main() -> None:
 
     try:
         import uvicorn
-        from device_mcp_gateway.cfg.settings import load_config
+        from device_mcp_gateway.cfg import load_config
 
         cfg = load_config(args.config)
         host = args.host or cfg.get("server", {}).get("host", "0.0.0.0")
@@ -84,11 +84,11 @@ def worker_main() -> None:
     os.environ["MCP_CONFIG"] = args.config
 
     try:
-        from device_mcp_gateway.cfg.settings import load_config
+        from device_mcp_gateway.cfg import load_config
         from device_mcp_gateway.shared.redis_client import create_redis
         from device_mcp_gateway.shared.registry_backend import RedisRegistryBackend
         from device_mcp_gateway.worker.runner import DeviceWorker
-        from device_mcp_gateway.logging.setup import setup_logging
+        from device_mcp_gateway.logging_setup import setup_logging
 
         cfg = load_config(args.config)
         log_cfg = cfg.get("logging", {})

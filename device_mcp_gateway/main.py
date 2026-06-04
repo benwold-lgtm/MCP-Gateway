@@ -28,11 +28,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 from sse_starlette import EventSourceResponse
 
-from device_mcp_gateway.cfg.settings import load_config
+from device_mcp_gateway.cfg import load_config
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
-from device_mcp_gateway.logging.setup import setup_logging
+from device_mcp_gateway.logging_setup import setup_logging
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.shared.registry_backend import (
     MemoryRegistryBackend,

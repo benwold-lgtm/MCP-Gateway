@@ -8,7 +8,6 @@ Pods are spawned/teared by the Registry based on device health and spec availabi
 import asyncio
 import base64
 import json
-import time
 from typing import Any
 
 import httpx
@@ -16,37 +15,9 @@ from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
 from device_mcp_gateway.auth.base import AbstractAuth
-from device_mcp_gateway.pods.transport import SseTransport
+from device_mcp_gateway.pods.sse_server import SseTransport
+from device_mcp_gateway.pods.rate_limiter import TokenBucket
 from device_mcp_gateway.core.translator import McpManifest, McpTool
-
-
-class _TokenBucket:
-    """Asyncio token bucket for per-device downstream rate limiting."""
-
-    def __init__(self, rate: float) -> None:
-        self._rate = rate  # tokens per second (= max RPS)
-        self._tokens = float(rate)
-        self._last = time.monotonic()
-
-    @property
-    def rate(self) -> float:
-        return self._rate
-
-    @property
-    def tokens(self) -> float:
-        now = time.monotonic()
-        refilled = min(self._rate, self._tokens + (now - self._last) * self._rate)
-        return round(refilled, 3)
-
-    async def acquire(self) -> None:
-        while True:
-            now = time.monotonic()
-            self._tokens = min(self._rate, self._tokens + (now - self._last) * self._rate)
-            self._last = now
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return
-            await asyncio.sleep((1.0 - self._tokens) / self._rate)
 
 
 class DevicePod:
@@ -73,7 +44,7 @@ class DevicePod:
         self.auth = auth
         self.base_url = base_url
         self._keep_alive_interval = keep_alive_interval
-        self._rate_limiter = _TokenBucket(rate_limit_rps) if rate_limit_rps and rate_limit_rps > 0 else None
+        self._rate_limiter = TokenBucket(rate_limit_rps) if rate_limit_rps and rate_limit_rps > 0 else None
         self._mcp = FastMCP(
             name=f"mcp-{hostname}",
             instructions=f"{manifest.server_name} v{manifest.server_version}",

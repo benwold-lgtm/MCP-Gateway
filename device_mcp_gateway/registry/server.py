@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import heapq
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -111,11 +112,16 @@ class DeviceProfile:
 
 
 class SpecCache:
-    """TTL-based in-memory cache for raw OpenAPI spec dicts."""
+    """TTL-based in-memory cache for raw OpenAPI spec dicts.
+
+    Eviction is O(log n) via a min-heap ordered by insertion timestamp.
+    Stale heap entries (from updates to existing keys) are cleaned up lazily.
+    """
 
     def __init__(self, ttl: int = 3600, max_entries: int = 200):
         self._store: dict[str, dict[str, Any]] = {}
         self._timestamps: dict[str, float] = {}
+        self._heap: list[tuple[float, str]] = []  # (inserted_at, key)
         self._ttl = ttl
         self._max = max_entries
 
@@ -129,16 +135,29 @@ class SpecCache:
         return self._store[key]
 
     def put(self, key: str, value: dict[str, Any]) -> None:
-        if len(self._store) >= self._max:
-            oldest = min(self._timestamps, key=lambda k: self._timestamps[k])
-            del self._store[oldest]
-            del self._timestamps[oldest]
+        if len(self._store) >= self._max and key not in self._store:
+            self._evict_oldest()
+        ts = time.time()
         self._store[key] = value
-        self._timestamps[key] = time.time()
+        self._timestamps[key] = ts
+        heapq.heappush(self._heap, (ts, key))
 
     def invalidate(self, key: str) -> None:
         self._store.pop(key, None)
         self._timestamps.pop(key, None)
+        # Heap entry becomes stale; cleaned up lazily on next eviction.
+
+    def _evict_oldest(self) -> None:
+        while self._heap:
+            ts, key = self._heap[0]
+            # Skip stale entries (key updated or invalidated since this was pushed).
+            if key not in self._timestamps or self._timestamps[key] != ts:
+                heapq.heappop(self._heap)
+                continue
+            heapq.heappop(self._heap)
+            del self._store[key]
+            del self._timestamps[key]
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -207,9 +226,14 @@ class Registry:
     ) -> DeviceConfig:
         """POST semantics: create a new device."""
         if self._mode == "distributed":
-            return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
+            return await self._register_distributed(
+                hostname, base_url, spec_url, auth, transport, rate_limit_rps
+            )
         async with self._lock_for(hostname):
-            return (await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)).config
+            profile = await self._setup_device_nolock(
+                hostname, base_url, spec_url, auth, transport, rate_limit_rps
+            )
+            return profile.config
 
     async def replace_device(
         self,
@@ -223,13 +247,18 @@ class Registry:
         """PUT semantics: kill existing pod and re-register atomically."""
         if self._mode == "distributed":
             await self._backend.publish_assignment("unassign", hostname)
-            return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
+            return await self._register_distributed(
+                hostname, base_url, spec_url, auth, transport, rate_limit_rps
+            )
         async with self._lock_for(hostname):
             existing = self._profiles.get(hostname)
             if existing:
                 await self._kill_pod(existing)
                 self._spec_cache.invalidate(existing.base_url)
-            return (await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)).config
+            profile = await self._setup_device_nolock(
+                hostname, base_url, spec_url, auth, transport, rate_limit_rps
+            )
+            return profile.config
 
     async def deregister_device(self, hostname: str) -> None:
         if self._mode == "distributed":

@@ -6,7 +6,7 @@ import pytest
 
 from device_mcp_gateway.core.translator import McpManifest, McpResource, McpTool
 from device_mcp_gateway.pods.device_pod import DevicePod
-from device_mcp_gateway.pods.transport.sse_server import SseTransport
+from device_mcp_gateway.pods.sse_server import SseTransport
 
 
 @pytest.fixture
@@ -178,7 +178,12 @@ async def test_resources_list_returns_manifest_resources():
     pod = DevicePod(hostname="test-device", manifest=_resource_manifest(), transport="sse", base_url="http://d.local")
     response = await pod._handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {}})
     assert response["result"]["resources"] == [
-        {"uri": "device://test-device/status", "name": "status", "description": "Device status", "mimeType": "application/json"}
+        {
+            "uri": "device://test-device/status",
+            "name": "status",
+            "description": "Device status",
+            "mimeType": "application/json",
+        }
     ]
 
 
@@ -233,7 +238,7 @@ async def test_initialize_advertises_resources_capability():
 @pytest.mark.anyio
 async def test_sse_stop_pushes_sentinel_even_when_queue_is_full():
     """stop() must unblock event_stream even when the client queue is at maxsize."""
-    from device_mcp_gateway.pods.transport.sse_server import SseTransport
+    from device_mcp_gateway.pods.sse_server import SseTransport
 
     async def noop_handler(msg):
         return None

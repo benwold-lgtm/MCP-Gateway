@@ -716,7 +716,11 @@ class TestCompositionKeywords:
                         "application/json": {
                             "schema": {
                                 "oneOf": [
-                                    {"type": "object", "properties": {"mode": {"type": "string"}}, "required": ["mode"]},
+                                    {
+                                        "type": "object",
+                                        "properties": {"mode": {"type": "string"}},
+                                        "required": ["mode"],
+                                    },
                                     {"type": "object", "properties": {"level": {"type": "integer"}}},
                                 ]
                             }

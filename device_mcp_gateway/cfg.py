@@ -1,11 +1,9 @@
-"""
-Configuration Loader
-Loads and wraps the central config.yaml
-"""
+"""Configuration loader — reads and returns the central config.yaml."""
 
 import os
-import yaml
 from typing import Any
+
+import yaml
 from loguru import logger
 
 CONFIG_PATH = os.getenv("MCP_CONFIG", "config.yaml")

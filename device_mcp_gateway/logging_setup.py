@@ -1,9 +1,8 @@
-"""
-Structured logging setup for the gateway.
-"""
+"""Structured logging setup for the gateway."""
 
 import os
 import sys
+
 from loguru import logger
 
 
@@ -12,7 +11,7 @@ def setup_logging(
     log_file: str = "logs/gateway.log",
     max_size_mb: int = 50,
     backup_count: int = 5,
-):
+) -> None:
     """Configure loguru with rotation and structured output."""
     logger.remove()
     logger.add(

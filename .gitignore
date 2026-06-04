@@ -33,5 +33,6 @@ pip-delete-this-directory.txt
 /autonomy/
 /AGENTS.md
 
-# Runtime data
+# Runtime data — generated files, not source
 /devices.db
+/data/
