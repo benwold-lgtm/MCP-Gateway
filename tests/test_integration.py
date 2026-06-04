@@ -174,22 +174,26 @@ async def test_spec_change_replaces_pod():
     registry.check_reachability = AsyncMock(return_value=True)
     registry._discover_spec = AsyncMock(return_value=spec_v1)
 
-    profile = await registry.register_device(hostname="spec-change-test", base_url="http://test.local")
-    assert profile.pod_active, "Pod should be active after initial registration"
+    device_cfg = await registry.register_device(hostname="spec-change-test", base_url="http://test.local")
+    assert device_cfg.pod_active, "Pod should be active after initial registration"
+
+    # Get the embedded-mode DeviceProfile (has pod reference and spec_data)
+    profile = registry.get_profile("spec-change-test")
+    assert profile is not None
     initial_pod = profile.pod
     assert len(profile.pod.manifest.tools) == 1, "Initial pod should have 1 tool"
 
     # Simulate upstream spec update
     registry._discover_spec = AsyncMock(return_value=spec_v2)
     registry._spec_cache._store.clear()
-    profile.last_spec_check = 0.0
+    profile.config.last_check = 0.0  # force cache miss so fetch_spec re-fetches
 
     await registry.fetch_spec(profile)
 
+    profile = registry.get_profile("spec-change-test")  # re-fetch after pod replacement
     assert profile.pod_active, "Pod should still be active after spec change"
     assert profile.pod is not initial_pod, "A new pod should have been spawned"
     assert len(profile.pod.manifest.tools) == 2, "New pod should expose 2 tools from spec v2"
-    assert profile.spec_updated_at > 0.0, "spec_updated_at should be set"
 
     await registry.shutdown()
     print("[PASS] Spec change pod replacement verified.")

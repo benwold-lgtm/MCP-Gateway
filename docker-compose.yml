@@ -1,14 +1,58 @@
 services:
+  # ---------------------------------------------------------------------------
+  # Redis — shared state for distributed mode
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Gateway — stateless HTTP/SSE API server (scale freely)
+  # ---------------------------------------------------------------------------
   gateway:
     build: .
     ports:
       - "8000:8000"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - gateway-data:/app/data
     environment:
       - MCP_CONFIG=/app/config.yaml
+      - MCP_GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY:-}
+      - MCP_SECRET_KEY=${MCP_SECRET_KEY:-}
+      - MCP_REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Worker — hosts DevicePods, executes tool calls (scale independently)
+  # ---------------------------------------------------------------------------
+  worker:
+    build: .
+    command: ["device-mcp-worker", "--config", "/app/config.yaml"]
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - MCP_CONFIG=/app/config.yaml
+      - MCP_GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY:-}
+      - MCP_SECRET_KEY=${MCP_SECRET_KEY:-}
+      - MCP_REDIS_URL=redis://redis:6379/0
+      - WORKER_ID=${WORKER_ID:-worker-1}
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  gateway-data:
+  redis-data:

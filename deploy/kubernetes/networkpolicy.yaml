@@ -1,3 +1,5 @@
+---
+# Gateway NetworkPolicy — restricts ingress and egress for gateway pods.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -12,20 +14,21 @@ spec:
     - Egress
 
   ingress:
-    # Accept MCP client connections on the gateway API port only.
     - ports:
         - port: 8000
           protocol: TCP
 
   egress:
-    # DNS resolution (required for device hostname lookups).
     - ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
-    # HTTP/HTTPS to downstream device APIs. Add entries here for devices
-    # that run on non-standard ports (e.g. 8080, 8443, 9000).
+    # Redis (shared state)
+    - ports:
+        - port: 6379
+          protocol: TCP
+    # Downstream device APIs
     - ports:
         - port: 80
           protocol: TCP
@@ -34,4 +37,68 @@ spec:
         - port: 8080
           protocol: TCP
         - port: 8443
+          protocol: TCP
+
+---
+# Worker NetworkPolicy — workers need Redis + downstream device API access.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: device-mcp-worker
+  namespace: mcp-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: device-mcp-worker
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress: []  # Workers accept no inbound connections
+
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Redis (shared state + tool call streams)
+    - ports:
+        - port: 6379
+          protocol: TCP
+    # Downstream device APIs
+    - ports:
+        - port: 80
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+        - port: 8443
+          protocol: TCP
+
+---
+# Redis NetworkPolicy — Redis only accepts connections from gateway/worker pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis
+  namespace: mcp-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: device-mcp-gateway
+        - podSelector:
+            matchLabels:
+              app: device-mcp-worker
+      ports:
+        - port: 6379
           protocol: TCP

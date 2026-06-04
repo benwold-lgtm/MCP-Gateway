@@ -58,5 +58,77 @@ def main() -> None:
         sys.exit(1)
 
 
+def worker_main() -> None:
+    """Entry point for the device-mcp-worker process (distributed mode)."""
+    import asyncio
+    import os
+    import socket
+
+    parser = argparse.ArgumentParser(
+        prog="device-mcp-worker",
+        description="Device MCP Worker — runs DevicePods for distributed mode",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        default=os.getenv("MCP_CONFIG", "config.yaml"),
+        help="Path to config.yaml (default: $MCP_CONFIG or ./config.yaml)",
+    )
+    parser.add_argument(
+        "--worker-id",
+        metavar="ID",
+        default=os.getenv("WORKER_ID", socket.gethostname()),
+        help="Unique worker identifier (default: $WORKER_ID or hostname)",
+    )
+    args = parser.parse_args()
+    os.environ["MCP_CONFIG"] = args.config
+
+    try:
+        from device_mcp_gateway.cfg.settings import load_config
+        from device_mcp_gateway.shared.redis_client import create_redis
+        from device_mcp_gateway.shared.registry_backend import RedisRegistryBackend
+        from device_mcp_gateway.worker.runner import DeviceWorker
+        from device_mcp_gateway.logging.setup import setup_logging
+
+        cfg = load_config(args.config)
+        log_cfg = cfg.get("logging", {})
+        setup_logging(
+            level=log_cfg.get("level", "INFO"),
+            log_file=log_cfg.get("file", "logs/worker.log"),
+            max_size_mb=log_cfg.get("max_size", 50),
+            backup_count=log_cfg.get("backup_count", 5),
+        )
+
+        secret_raw: str = os.getenv("MCP_SECRET_KEY") or cfg.get("gateway", {}).get("secret_key") or ""
+        fernet = None
+        if secret_raw:
+            try:
+                from cryptography.fernet import Fernet
+
+                fernet = Fernet(secret_raw.encode() if isinstance(secret_raw, str) else secret_raw)
+            except Exception as exc:
+                import sys
+
+                print(f"Warning: invalid MCP_SECRET_KEY — credentials will not be decryptable: {exc}", file=sys.stderr)
+
+        async def _run() -> None:
+            redis_client = await create_redis(cfg)
+            backend = RedisRegistryBackend(redis_client)
+            worker = DeviceWorker(
+                worker_id=args.worker_id,
+                config=cfg,
+                redis_client=redis_client,
+                fernet=fernet,
+            )
+            await worker.run(backend)
+
+        asyncio.run(_run())
+    except ImportError as exc:
+        import sys
+
+        print(f"Error: missing dependency — {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()

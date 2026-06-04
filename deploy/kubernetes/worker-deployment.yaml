@@ -1,0 +1,66 @@
+---
+# Worker Deployment — hosts DevicePods and executes tool calls.
+# Scale independently of the gateway. Each replica gets a unique WORKER_ID
+# via the pod name (injected via the Downward API).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: device-mcp-worker
+  namespace: mcp-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: device-mcp-worker
+  template:
+    metadata:
+      labels:
+        app: device-mcp-worker
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: worker
+          # Pin to an immutable digest or semantic tag in production — never ship :latest
+          image: device-mcp-gateway:latest
+          command: ["device-mcp-worker"]
+          env:
+            - name: MCP_CONFIG
+              value: /app/config.yaml
+            - name: MCP_GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: api-key
+                  optional: true
+            - name: MCP_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: secret-key
+                  optional: true
+            - name: MCP_REDIS_URL
+              value: redis://redis:6379/0
+            # Use the pod name as WORKER_ID for uniqueness across replicas
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+      volumes:
+        - name: config
+          configMap:
+            name: gateway-config

@@ -50,7 +50,12 @@ class _TokenBucket:
 
 
 class DevicePod:
-    """Manages a single per-hostname MCP server process."""
+    """Manages a single per-hostname MCP server instance.
+
+    In embedded mode the pod also owns an SseTransport.
+    In distributed mode the worker calls call_tool() directly and results
+    are routed through Redis pub/sub — no SseTransport is created.
+    """
 
     def __init__(
         self,
@@ -98,7 +103,8 @@ class DevicePod:
                 # Split kwargs by declared parameter location
                 path_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "path"}
                 body_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "body"}
-                query_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) in ("query", "header")}
+                query_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "query"}
+                extra_headers = {k: str(v) for k, v in kwargs.items() if tool.param_locations.get(k) == "header"}
                 # Params with no declared location fall back to method-appropriate defaults
                 unlocated = {k: v for k, v in kwargs.items() if k not in tool.param_locations}
                 if tool.method in ("POST", "PUT", "PATCH"):
@@ -108,6 +114,7 @@ class DevicePod:
 
                 url = f"{base_url}{tool.path}".format_map(path_params)
                 headers = await auth.get_headers() if auth else {}
+                headers.update(extra_headers)
                 try:
                     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
                         resp = await c.request(
@@ -255,16 +262,31 @@ class DevicePod:
             }
         return None
 
-    async def start(self) -> None:
-        """Start the MCP server."""
+    async def call_tool(self, message: dict) -> dict | None:
+        """Public entry-point for the worker to dispatch an MCP JSON-RPC message.
+
+        Returns the JSON-RPC response dict, or None for notifications.
+        """
+        return await self._handle_mcp_message(message)
+
+    async def start(self, with_sse: bool = True) -> None:
+        """Start the pod.
+
+        Args:
+            with_sse: If True (default, embedded mode), start the SSE transport
+                      task so the pod accepts connections on its in-process queue.
+                      Pass False in distributed mode — the worker calls call_tool()
+                      directly and SSE routing goes through Redis.
+        """
         if self._running:
             return
-        if self.transport != "sse":
+        if with_sse and self.transport != "sse":
             raise ValueError(f"Unsupported transport: {self.transport}")
         self._running = True
         self._stop_event = asyncio.Event()
-        self._task = asyncio.create_task(self._run_sse())
-        logger.info(f"Pod started for {self.hostname} via {self.transport}")
+        if with_sse:
+            self._task = asyncio.create_task(self._run_sse())
+        logger.info(f"Pod started for {self.hostname}")
 
     async def _run_sse(self) -> None:
         transport = self._ensure_sse_transport()

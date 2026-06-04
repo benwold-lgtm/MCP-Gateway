@@ -17,14 +17,24 @@ server:
   port: 8000
   
 registry:
+  # "embedded": in-process pods, SQLite, no Redis required (default, local dev)
+  # "distributed": Redis-backed registry + separate worker processes (production)
+  mode: "embedded"
   # How often to poll device reachability (seconds)
   health_check_interval: 30
   # How often to check for spec version updates
   spec_poll_interval: 300
   # Spec cache TTL in seconds
   spec_cache_ttl: 3600
-  # Max pods to run concurrently
+  # Max pods to run concurrently (embedded mode only)
   max_concurrent_pods: 50
+
+redis:
+  # Redis connection URL. Used when registry.mode = "distributed".
+  # Override with MCP_REDIS_URL environment variable.
+  url: "redis://localhost:6379/0"
+  socket_timeout: 5
+  max_connections: 20
 
 auth:
   # Default auth type (api_key or oauth2)

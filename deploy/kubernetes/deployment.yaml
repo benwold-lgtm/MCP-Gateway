@@ -6,8 +6,9 @@ metadata:
   labels:
     app.kubernetes.io/name: device-mcp-gateway
 spec:
-  # Single replica — device pods are in-process. Scale requires an external
-  # registry backend (not yet implemented). See architecture doc for details.
+  # Gateway is stateless in distributed mode — scale freely.
+  # Set registry.mode = "distributed" in configmap.yaml to enable.
+  # In embedded mode keep replicas: 1 (in-process pods, no shared state).
   replicas: 1
   selector:
     matchLabels:
@@ -48,13 +49,17 @@ spec:
                   name: gateway-secrets
                   key: secret-key
                   optional: true
+            - name: MCP_REDIS_URL
+              value: redis://redis:6379/0
+            - name: GATEWAY_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
-            - name: data
-              mountPath: /app/data
           resources:
             requests:
               cpu: 100m
@@ -82,6 +87,3 @@ spec:
         - name: config
           configMap:
             name: gateway-config
-        - name: data
-          persistentVolumeClaim:
-            claimName: gateway-data
