@@ -25,7 +25,9 @@ spec:
         runAsUser: 1000
       containers:
         - name: gateway
-          image: device-mcp-gateway:latest   # replace with your registry/image:tag
+          # Pin to an immutable digest or semantic tag in production — never ship :latest.
+          # Example: ghcr.io/your-org/device-mcp-gateway:1.2.3
+          image: device-mcp-gateway:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

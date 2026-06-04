@@ -120,13 +120,18 @@ def mock_target_url():
 
 @pytest.fixture(scope="module")
 def gateway_url():
-    import importlib
-    import device_mcp_gateway.main as main
+    from device_mcp_gateway.main import create_app
 
-    importlib.reload(main)
+    config_path = os.environ.get("MCP_CONFIG", "config.yaml")
+    try:
+        with open(config_path) as f:
+            test_cfg = yaml.safe_load(f)
+    except FileNotFoundError:
+        test_cfg = None
 
+    test_app = create_app(override_config=test_cfg)
     port = _find_free_port()
-    config = uvicorn.Config(main.app, host="127.0.0.1", port=port, log_level="error")
+    config = uvicorn.Config(test_app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()

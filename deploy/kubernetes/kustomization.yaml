@@ -5,6 +5,7 @@ namespace: mcp-gateway
 
 resources:
   - namespace.yaml
+  - networkpolicy.yaml
   - configmap.yaml
   - pvc.yaml
   - deployment.yaml

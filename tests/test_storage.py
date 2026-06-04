@@ -73,3 +73,63 @@ async def test_multiple_devices(store):
     assert len(records) == 3
     hostnames = {r["hostname"] for r in records}
     assert hostnames == {"dev-0", "dev-1", "dev-2"}
+
+
+@pytest.mark.asyncio
+async def test_encrypted_auth_config_roundtrip(db_path):
+    from cryptography.fernet import Fernet
+
+    key = Fernet.generate_key()
+    fernet = Fernet(key)
+    store = SqliteDeviceStore(db_path=db_path, fernet=fernet)
+    await store.initialize()
+
+    await store.save(
+        "enc-device",
+        {
+            "base_url": "http://enc.local",
+            "transport": "sse",
+            "auth_type": "api_key",
+            "auth_config": {"type": "api_key", "api_key": "s3cr3t", "header_name": "X-API-Key"},
+        },
+    )
+    records = await store.load_all()
+    assert records[0]["auth_config"]["api_key"] == "s3cr3t"
+
+
+@pytest.mark.asyncio
+async def test_key_rotation_loads_device_without_credentials(db_path):
+    """Encrypted record + different key at load time: device loads with auth_config=None, not corrupt data."""
+    from cryptography.fernet import Fernet
+
+    key_old = Fernet.generate_key()
+    store_old = SqliteDeviceStore(db_path=db_path, fernet=Fernet(key_old))
+    await store_old.initialize()
+    await store_old.save(
+        "rotated-device",
+        {
+            "base_url": "http://rotated.local",
+            "transport": "sse",
+            "auth_type": "api_key",
+            "auth_config": {"type": "api_key", "api_key": "secret"},
+        },
+    )
+
+    key_new = Fernet.generate_key()
+    store_new = SqliteDeviceStore(db_path=db_path, fernet=Fernet(key_new))
+    records = await store_new.load_all()
+    assert len(records) == 1
+    assert records[0]["hostname"] == "rotated-device"
+    assert records[0]["auth_config"] is None  # credential lost, not corrupt
+
+
+@pytest.mark.asyncio
+async def test_decrypt_raises_on_invalid_token(db_path):
+    """_decrypt raises rather than silently returning ciphertext as plaintext."""
+    from cryptography.fernet import Fernet
+
+    store = SqliteDeviceStore(db_path=db_path, fernet=Fernet(Fernet.generate_key()))
+    import pytest
+
+    with pytest.raises(Exception):
+        store._decrypt("this-is-not-valid-fernet-ciphertext")

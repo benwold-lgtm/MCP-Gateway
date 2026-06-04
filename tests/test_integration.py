@@ -91,17 +91,24 @@ def test_sse_transport_client_flow(client, mock_target_url):
     else:
         raise AssertionError("SSE device pod did not become active")
 
-    client_id = "test-sse-client"
-    with client.stream("GET", f"/devices/{hostname}/sse?client_id={client_id}") as event_resp:
+    session_id = "test-sse-client"
+    with client.stream("GET", f"/devices/{hostname}/sse?session_id={session_id}") as event_resp:
         assert event_resp.status_code == 200
 
+        # MCP JSON-RPC 2.0 tools/call request
         send_resp = client.post(
-            f"/devices/{hostname}/messages?client_id={client_id}",
-            json={"tool": "get_device_status", "arguments": {}},
+            f"/devices/{hostname}/messages?session_id={session_id}",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "get_device_status", "arguments": {}},
+            },
         )
         assert send_resp.status_code == 200
-        assert send_resp.json().get("status") == "sent"
+        assert send_resp.json().get("status") == "accepted"
 
+        # Read SSE events; skip the 'endpoint' event, wait for 'message'
         data_line = None
         event_name = None
         data_payload = ""
@@ -116,21 +123,26 @@ def test_sse_transport_client_flow(client, mock_target_url):
                 if event_name == "message" and data_payload:
                     data_line = data_payload
                     break
+                # Reset for the next event (handles 'endpoint' and 'keep-alive' events)
                 event_name = None
                 data_payload = ""
                 continue
-
             if line.startswith("event:"):
-                event_name = line[len("event:") :].strip()
+                event_name = line[len("event:"):].strip()
                 continue
             if line.startswith("data:"):
-                data_payload += line[len("data:") :].strip()
+                data_payload += line[len("data:"):].strip()
                 continue
 
         assert data_line is not None, "No SSE message event received"
-        payload = json.loads(data_line)
-        assert "result" in payload, f"Expected 'result' key in SSE payload, got: {payload}"
-        assert payload["result"]["body"]["status"] == "online"
+        rpc_response = json.loads(data_line)
+        assert "result" in rpc_response, f"Expected JSON-RPC result in SSE payload, got: {rpc_response}"
+        assert rpc_response["jsonrpc"] == "2.0"
+        assert rpc_response["id"] == 1
+        content = rpc_response["result"]["content"]
+        assert len(content) > 0, "Expected non-empty content in tools/call result"
+        tool_result = json.loads(content[0]["text"])
+        assert tool_result["body"]["status"] == "online"
 
     del_resp = client.delete(f"/devices/{hostname}")
     assert del_resp.status_code == 200

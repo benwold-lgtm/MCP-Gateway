@@ -9,6 +9,8 @@ gateway:
   # Override with MCP_SECRET_KEY environment variable.
   # Leave empty to store credentials as plaintext (not recommended for production).
   secret_key: ""
+  # Maximum POST/PUT request body size in bytes (default 1 MB). Requests exceeding this return 413.
+  max_body_bytes: 1048576
 
 server:
   host: "0.0.0.0"
@@ -32,9 +34,8 @@ auth:
   api_key:
     header_name: "X-API-Key"
     
-  # OAuth2 mode settings  
+  # OAuth2 mode settings
   oauth2:
-    token_refresh_before_expiry_seconds: 300
     token_endpoint: ""
     client_id: ""
     client_secret: ""
@@ -43,17 +44,11 @@ auth:
       - "write"
       
 transport:
-  # Supported transports: sse, stdio, http
+  # SSE is the only supported gateway transport.
   default: "sse"
-  
-  # Transport-specific settings
   sse:
-    endpoint: "/events"
+    # Seconds between keep-alive pings when the SSE queue is idle.
     keep_alive_interval: 15
-  http:
-    endpoint: "/rpc"
-  stdio:
-    enabled: true
 
 discovery:
   # Common OpenAPI spec paths to try when auto-discovering

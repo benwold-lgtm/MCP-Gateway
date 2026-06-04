@@ -617,3 +617,142 @@ class TestToolNameCollisions:
         manifest = SpecTranslator().translate(spec)
         assert len(manifest.tools) == 2
         assert {t.name for t in manifest.tools} == {"get_foo", "get_bar"}
+
+
+class TestCompositionKeywords:
+    def test_allof_with_component_refs_merges_properties(self):
+        spec = fresh_spec()
+        spec["components"]["schemas"]["Base"] = {
+            "type": "object",
+            "properties": {"id": {"type": "integer"}, "name": {"type": "string"}},
+            "required": ["id"],
+        }
+        spec["paths"]["/items"] = {
+            "post": {
+                "operationId": "create_item",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "allOf": [
+                                    {"$ref": "#/components/schemas/Base"},
+                                    {
+                                        "type": "object",
+                                        "properties": {"extra": {"type": "string"}},
+                                        "required": ["extra"],
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                },
+                "responses": {"201": {"description": "Created"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        props = tool.schema["properties"]
+        assert "id" in props
+        assert "name" in props
+        assert "extra" in props
+        assert props["id"]["type"] == "integer"
+        assert "id" in tool.schema["required"]
+        assert "extra" in tool.schema["required"]
+
+    def test_allof_single_ref_is_equivalent_to_direct_ref(self):
+        spec = fresh_spec()
+        spec["components"]["schemas"]["Body"] = {
+            "type": "object",
+            "properties": {"value": {"type": "number"}},
+        }
+        spec["paths"]["/data"] = {
+            "post": {
+                "operationId": "post_data",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {"allOf": [{"$ref": "#/components/schemas/Body"}]}
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert "value" in tool.schema["properties"]
+
+    def test_anyof_unions_properties_from_all_branches(self):
+        spec = fresh_spec()
+        spec["paths"]["/cmd"] = {
+            "post": {
+                "operationId": "send_cmd",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "anyOf": [
+                                    {"type": "object", "properties": {"fan_speed": {"type": "integer"}}},
+                                    {"type": "object", "properties": {"temperature": {"type": "number"}}},
+                                ]
+                            }
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        props = tool.schema["properties"]
+        assert "fan_speed" in props
+        assert "temperature" in props
+        assert "required" not in tool.schema or not tool.schema["required"]
+
+    def test_oneof_unions_properties_from_all_branches(self):
+        spec = fresh_spec()
+        spec["paths"]["/update"] = {
+            "put": {
+                "operationId": "update_state",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "oneOf": [
+                                    {"type": "object", "properties": {"mode": {"type": "string"}}, "required": ["mode"]},
+                                    {"type": "object", "properties": {"level": {"type": "integer"}}},
+                                ]
+                            }
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        props = tool.schema["properties"]
+        assert "mode" in props
+        assert "level" in props
+        assert "required" not in tool.schema or not tool.schema["required"]
+
+    def test_allof_with_description_sibling_preserved(self):
+        spec = fresh_spec()
+        spec["components"]["schemas"]["Payload"] = {
+            "type": "object",
+            "properties": {"x": {"type": "integer"}},
+        }
+        spec["paths"]["/x"] = {
+            "post": {
+                "operationId": "do_x",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "description": "The payload",
+                                "allOf": [{"$ref": "#/components/schemas/Payload"}],
+                            }
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+        tool = SpecTranslator().translate(spec).tools[0]
+        assert "x" in tool.schema["properties"]

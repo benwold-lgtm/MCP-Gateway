@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -19,7 +20,7 @@ class OAuth2Auth(AbstractAuth):
     token_endpoint: str
     client_id: str
     client_secret: str
-    scopes: list[str] = None
+    scopes: list[str] | None = None
     refresh_before_expiry: int = 300
 
     def __post_init__(self):
@@ -27,11 +28,13 @@ class OAuth2Auth(AbstractAuth):
         self._refresh_token: str | None = None
         self._token_expiry: float = 0.0
         self._scopes = self.scopes or ["read"]
+        self._lock: asyncio.Lock = asyncio.Lock()
 
     async def ensure_token(self) -> None:
-        if self._access_token and time.time() < self._token_expiry - self.refresh_before_expiry:
-            return
-        await self._fetch_token()
+        async with self._lock:
+            if self._access_token and time.time() < self._token_expiry - self.refresh_before_expiry:
+                return
+            await self._fetch_token()
 
     async def _fetch_token(self) -> None:
         async with httpx.AsyncClient(timeout=10) as client:

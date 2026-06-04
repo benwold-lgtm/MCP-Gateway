@@ -1,3 +1,5 @@
+import pytest
+
 import device_mcp_gateway.main as gw_main
 from fastapi.testclient import TestClient
 
@@ -15,31 +17,31 @@ def test_health_check():
 
 
 def test_health_does_not_require_auth(monkeypatch):
-    monkeypatch.setattr(gw_main, "_gateway_api_key", "test-secret")
+    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "test-secret")
     response = client.get("/health")
     assert response.status_code == 200
 
 
 def test_auth_rejects_missing_token(monkeypatch):
-    monkeypatch.setattr(gw_main, "_gateway_api_key", "test-secret")
+    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "test-secret")
     response = client.get("/devices")
     assert response.status_code == 401
 
 
 def test_auth_rejects_wrong_token(monkeypatch):
-    monkeypatch.setattr(gw_main, "_gateway_api_key", "test-secret")
+    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "test-secret")
     response = client.get("/devices", headers={"Authorization": "Bearer wrong-token"})
     assert response.status_code == 401
 
 
 def test_auth_accepts_correct_token(monkeypatch):
-    monkeypatch.setattr(gw_main, "_gateway_api_key", "test-secret")
+    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "test-secret")
     response = client.get("/devices", headers={"Authorization": "Bearer test-secret"})
     assert response.status_code == 200
 
 
 def test_auth_disabled_when_key_not_set(monkeypatch):
-    monkeypatch.setattr(gw_main, "_gateway_api_key", "")
+    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "")
     response = client.get("/devices")
     assert response.status_code == 200
 
@@ -103,3 +105,76 @@ def test_register_with_invalid_rate_limit_returns_400():
     )
     assert response.status_code == 400
     assert "rate_limit_rps" in response.json()["detail"]
+
+
+def test_get_device_returns_404_for_unknown():
+    response = client.get("/devices/no-such-device")
+    assert response.status_code == 404
+
+
+def test_get_device_returns_device_data():
+    client.post("/devices", json={"hostname": "getone-test", "base_url": "http://192.0.2.99", "auth_type": "none"})
+    response = client.get("/devices/getone-test")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["hostname"] == "getone-test"
+    assert data["base_url"] == "http://192.0.2.99"
+    assert "reachable" in data
+    assert "pod_active" in data
+    assert "spawn_error" in data
+    client.delete("/devices/getone-test")
+
+
+def test_get_device_tools_returns_404_for_unknown():
+    response = client.get("/devices/no-such-device/tools")
+    assert response.status_code == 404
+
+
+def test_get_device_tools_returns_409_when_pod_inactive():
+    client.post("/devices", json={"hostname": "tools-inactive", "base_url": "http://192.0.2.99", "auth_type": "none"})
+    response = client.get("/devices/tools-inactive/tools")
+    assert response.status_code == 409
+    assert "no active pod" in response.json()["detail"]
+    client.delete("/devices/tools-inactive")
+
+
+def test_large_body_returns_413():
+    response = client.post(
+        "/devices",
+        content=b"x" * (1_048_576 + 1),
+        headers={"Content-Type": "application/json", "Content-Length": str(1_048_576 + 1)},
+    )
+    assert response.status_code == 413
+
+
+@pytest.mark.parametrize(
+    "bad_hostname",
+    [
+        "-starts-with-dash",
+        "ends-with-dash-",
+        ".starts-with-dot",
+        "has space",
+        "has/slash",
+        "a" * 254,
+        "",
+    ],
+)
+def test_invalid_hostname_returns_400(bad_hostname):
+    response = client.post(
+        "/devices",
+        json={"hostname": bad_hostname, "base_url": "http://192.0.2.99", "auth_type": "none"},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "good_hostname",
+    ["device1", "my-device.local", "a", "sensor.lab.internal"],
+)
+def test_valid_hostname_accepted(good_hostname):
+    response = client.post(
+        "/devices",
+        json={"hostname": good_hostname, "base_url": "http://192.0.2.99", "auth_type": "none"},
+    )
+    assert response.status_code == 200
+    client.delete(f"/devices/{good_hostname}")

@@ -7,6 +7,7 @@ Pods are spawned/teared by the Registry based on device health and spec availabi
 
 import asyncio
 import base64
+import json
 import time
 from typing import Any
 
@@ -59,12 +60,14 @@ class DevicePod:
         auth: AbstractAuth | None = None,
         base_url: str = "",
         rate_limit_rps: float | None = None,
+        keep_alive_interval: int = 30,
     ):
         self.hostname = hostname
         self.manifest = manifest
         self.transport = transport
         self.auth = auth
         self.base_url = base_url
+        self._keep_alive_interval = keep_alive_interval
         self._rate_limiter = _TokenBucket(rate_limit_rps) if rate_limit_rps and rate_limit_rps > 0 else None
         self._mcp = FastMCP(
             name=f"mcp-{hostname}",
@@ -140,27 +143,117 @@ class DevicePod:
 
     def _ensure_sse_transport(self) -> SseTransport:
         if not self.sse_transport:
-            self.sse_transport = SseTransport(self.hostname, self._handle_sse_message)
+            self.sse_transport = SseTransport(
+                self.hostname,
+                self._handle_mcp_message,
+                keep_alive_interval=self._keep_alive_interval,
+            )
         return self.sse_transport
 
-    async def _handle_sse_message(self, params: dict) -> dict[str, Any]:
-        tool_name = params.get("tool")
-        arguments = params.get("arguments", {})
-        if not tool_name:
-            return {"error": "tool is required"}
+    async def _handle_mcp_message(self, message: dict) -> dict[str, Any] | None:
+        """Handle an MCP JSON-RPC 2.0 message and return the response, or None for notifications."""
+        msg_id = message.get("id")
+        method = message.get("method", "")
+        params = message.get("params") or {}
 
-        handler = self._tool_dispatch.get(tool_name)
-        if not handler:
-            available = list(self._tool_dispatch.keys())
-            logger.error(f"Unknown tool: {tool_name}; available: {available}")
-            return {"error": f"Unknown tool: {tool_name}"}
+        if method == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {"listChanged": False},
+                        "resources": {"listChanged": False, "subscribe": False},
+                    },
+                    "serverInfo": {
+                        "name": self.manifest.server_name,
+                        "version": self.manifest.server_version,
+                    },
+                },
+            }
 
-        try:
-            result = await handler(**arguments)
-            return {"result": result}
-        except Exception as e:
-            logger.error(f"SSE tool call failed for {tool_name}: {e}")
-            return {"error": str(e)}
+        if method.startswith("notifications/"):
+            return None  # notifications require no response
+
+        if method == "ping":
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {}}
+
+        if method == "tools/list":
+            tools = [
+                {"name": t.name, "description": t.description, "inputSchema": t.schema}
+                for t in self.manifest.tools
+            ]
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}}
+
+        if method == "tools/call":
+            tool_name: str = params.get("name") or ""
+            arguments = params.get("arguments") or {}
+            handler = self._tool_dispatch.get(tool_name)
+            if not handler:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32601, "message": f"Tool not found: {tool_name}"},
+                }
+            try:
+                result = await handler(**arguments)
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {"content": [{"type": "text", "text": json.dumps(result)}]},
+                }
+            except Exception as e:
+                logger.error(f"Tool call failed for {tool_name}: {e}")
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32000, "message": str(e)},
+                }
+
+        if method == "resources/list":
+            resources = [
+                {"uri": r.uri, "name": r.name, "description": r.description, "mimeType": r.mime_type}
+                for r in self.manifest.resources
+            ]
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {"resources": resources}}
+
+        if method == "resources/read":
+            uri: str = params.get("uri") or ""
+            prefix = f"device://{self.hostname}"
+            if not uri.startswith(prefix):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32602, "message": f"Unknown resource URI: {uri}"},
+                }
+            path = uri[len(prefix):]
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
+            headers = await self.auth.get_headers() if self.auth else {}
+            try:
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+                    resp = await c.get(f"{self.base_url}{path}", headers=headers)
+                resp.raise_for_status()
+                ct = resp.headers.get("content-type", "")
+                text = json.dumps(resp.json()) if "json" in ct else resp.text
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {"contents": [{"uri": uri, "mimeType": ct or "application/json", "text": text}]},
+                }
+            except Exception as e:
+                logger.error(f"Resource read failed for {uri}: {e}")
+                return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32000, "message": str(e)}}
+
+        # Unknown method — only send an error if this was a request (has an id)
+        if msg_id is not None:
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32601, "message": f"Method not found: {method}"},
+            }
+        return None
 
     async def start(self) -> None:
         """Start the MCP server."""

@@ -172,20 +172,66 @@ class SpecTranslator:
         return node if isinstance(node, dict) else {}
 
     def _resolve_schema(self, schema: dict, seen: set | None = None) -> dict:
-        """Recursively resolve $ref and nested object properties, guarding against cycles."""
-        seen = seen or set()
+        """Recursively resolve $ref, allOf/anyOf/oneOf, and nested object properties."""
+        if seen is None:
+            seen = set()
+
         if "$ref" in schema:
             ref = schema["$ref"]
             if ref in seen:
                 return {"type": "object"}
-            seen.add(ref)
-            return self._resolve_schema(self._resolve_ref(ref), seen)
+            child_seen = seen | {ref}
+            base = self._resolve_ref(ref)
+            extra = {k: v for k, v in schema.items() if k != "$ref"}
+            return self._resolve_schema({**base, **extra}, child_seen)
+
+        if "allOf" in schema:
+            result = self._merge_schemas(schema["allOf"], seen, require_all=True)
+            for k, v in schema.items():
+                if k != "allOf" and k not in result:
+                    result[k] = v
+            return result
+
+        for combiner in ("anyOf", "oneOf"):
+            if combiner in schema:
+                result = self._merge_schemas(schema[combiner], seen, require_all=False)
+                for k, v in schema.items():
+                    if k != combiner and k not in result:
+                        result[k] = v
+                return result
+
         if schema.get("type") == "object" and "properties" in schema:
-            resolved_props = {}
-            for k, v in schema["properties"].items():
-                resolved_props[k] = self._resolve_schema(v, seen.copy())
-            return {**schema, "properties": resolved_props}
+            return {
+                **schema,
+                "properties": {k: self._resolve_schema(v, seen) for k, v in schema["properties"].items()},
+            }
+
         return schema
+
+    def _merge_schemas(self, schemas: list[dict], seen: set, require_all: bool) -> dict:
+        """Merge a list of sub-schemas.
+
+        require_all=True (allOf): every schema applies — union properties, union required.
+        require_all=False (anyOf/oneOf): alternatives — union properties, no required.
+        """
+        props: dict[str, Any] = {}
+        req: list[str] = []
+        base: dict[str, Any] = {}
+        for sub in schemas:
+            resolved = self._resolve_schema(sub, seen)
+            props.update(resolved.get("properties", {}))
+            if require_all:
+                req.extend(resolved.get("required", []))
+            for k in ("type", "description", "title"):
+                if k in resolved and k not in base:
+                    base[k] = resolved[k]
+        result = dict(base)
+        if props:
+            result.setdefault("type", "object")
+            result["properties"] = props
+        if req:
+            result["required"] = list(dict.fromkeys(req))
+        return result
 
     def _build_parameter_schema(self, op: dict) -> tuple[dict[str, Any], list[str], dict[str, str]]:
         """Extract JSON-serializable parameter schema and per-param locations from an operation."""

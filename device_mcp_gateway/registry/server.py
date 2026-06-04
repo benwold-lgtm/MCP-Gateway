@@ -62,11 +62,15 @@ class SpecCache:
 
     def put(self, key: str, value: dict[str, Any]) -> None:
         if len(self._store) >= self._max:
-            oldest = min(self._timestamps, key=self._timestamps.get)
+            oldest = min(self._timestamps, key=lambda k: self._timestamps[k])
             del self._store[oldest]
             del self._timestamps[oldest]
         self._store[key] = value
         self._timestamps[key] = time.time()
+
+    def invalidate(self, key: str) -> None:
+        self._store.pop(key, None)
+        self._timestamps.pop(key, None)
 
 
 class Registry:
@@ -75,6 +79,7 @@ class Registry:
     def __init__(self, config: dict[str, Any], store: AbstractDeviceStore | None = None):
         self._config = config
         self._devices: dict[str, DeviceProfile] = {}
+        self._device_locks: dict[str, asyncio.Lock] = {}
         self._store = store
         self._spec_cache = SpecCache(
             ttl=config.get("spec_cache_ttl", 3600),
@@ -84,6 +89,24 @@ class Registry:
         self._health_interval = config.get("health_check_interval", 30)
         self._spec_poll_interval = config.get("spec_poll_interval", 300)
         self._max_pods = config.get("max_concurrent_pods", 50)
+        self._http_client: httpx.AsyncClient | None = None
+        self._health_semaphore = asyncio.Semaphore(config.get("max_concurrent_health_checks", 10))
+
+    def _lock_for(self, hostname: str) -> asyncio.Lock:
+        """Return the per-device lock, creating it if necessary.
+
+        Safe without an outer lock: asyncio is single-threaded so there is no
+        await between the membership check and the assignment.
+        """
+        if hostname not in self._device_locks:
+            self._device_locks[hostname] = asyncio.Lock()
+        return self._device_locks[hostname]
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return the shared HTTP client, creating it on first call."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(follow_redirects=True)
+        return self._http_client
 
     async def register_device(
         self,
@@ -94,6 +117,37 @@ class Registry:
         transport: str = "sse",
         rate_limit_rps: float | None = None,
     ) -> DeviceProfile:
+        """POST semantics: create a new device. Acquires the per-device lock."""
+        async with self._lock_for(hostname):
+            return await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
+
+    async def replace_device(
+        self,
+        hostname: str,
+        base_url: str,
+        spec_url: str | None = None,
+        auth: AbstractAuth | None = None,
+        transport: str = "sse",
+        rate_limit_rps: float | None = None,
+    ) -> DeviceProfile:
+        """PUT semantics: kill any existing pod and re-register atomically."""
+        async with self._lock_for(hostname):
+            existing = self._devices.get(hostname)
+            if existing:
+                await self._kill_pod(existing)
+                self._spec_cache.invalidate(existing.base_url)
+            return await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
+
+    async def _setup_device_nolock(
+        self,
+        hostname: str,
+        base_url: str,
+        spec_url: str | None,
+        auth: AbstractAuth | None,
+        transport: str,
+        rate_limit_rps: float | None,
+    ) -> DeviceProfile:
+        """Core registration logic. Caller must hold _lock_for(hostname)."""
         profile = DeviceProfile(
             hostname=hostname,
             base_url=base_url,
@@ -125,13 +179,10 @@ class Registry:
             )
 
         logger.info(f"Device registered: hostname={hostname}, base_url={base_url}")
-        # Immediately attempt to verify reachability and spawn a pod to avoid
-        # race conditions where the health loop has not yet run.
         try:
             reachable = await self.check_reachability(profile)
             if reachable:
                 await self.fetch_spec(profile)
-                # Only spawn if we have a spec and no active pod yet
                 if profile.spec_data and not profile.pod_active:
                     await self._spawn_pod(profile)
         except Exception as exc:
@@ -141,10 +192,11 @@ class Registry:
         return profile
 
     async def deregister_device(self, hostname: str) -> None:
-        profile = self._devices.pop(hostname, None)
-        if profile and profile.pod_active and profile.pod:
-            profile.pod.stop()
-            profile.pod_active = False
+        async with self._lock_for(hostname):
+            profile = self._devices.pop(hostname, None)
+            if profile and profile.pod_active and profile.pod:
+                await self._kill_pod(profile)
+        self._device_locks.pop(hostname, None)
         if self._store:
             await self._store.delete(hostname)
         logger.info(f"Device deregistered: {hostname}")
@@ -224,49 +276,53 @@ class Registry:
                 "/api-docs",
             ],
         )
-        async with httpx.AsyncClient(timeout=self._config.get("discovery", {}).get("timeout", 10)) as client:
-            for path in paths:
-                try:
-                    url = base_url.rstrip("/") + path
-                    resp = await client.get(url)
-                    if resp.status_code == 200:
-                        return resp.json()
-                except Exception:
-                    continue
-        return None
-
-    async def _http_get(self, url: str) -> dict[str, Any] | None:
-        async with httpx.AsyncClient(timeout=10) as client:
+        timeout = self._config.get("discovery", {}).get("timeout", 10)
+        client = self._get_client()
+        for path in paths:
             try:
-                resp = await client.get(url)
+                url = base_url.rstrip("/") + path
+                resp = await client.get(url, timeout=timeout)
                 if resp.status_code == 200:
                     return resp.json()
             except Exception:
-                return None
+                continue
+        return None
+
+    async def _http_get(self, url: str) -> dict[str, Any] | None:
+        try:
+            resp = await self._get_client().get(url, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            return None
         return None
 
     async def check_reachability(self, profile: DeviceProfile) -> bool:
-        async with httpx.AsyncClient(timeout=5) as client:
-            try:
-                resp = await client.get(profile.base_url, follow_redirects=True)
-                profile.reachable = resp.status_code < 500
-            except Exception:
-                profile.reachable = False
-            profile.last_reachable_check = time.time()
+        try:
+            resp = await self._get_client().get(profile.base_url, timeout=5)
+            profile.reachable = resp.status_code < 500
+        except Exception:
+            profile.reachable = False
+        profile.last_reachable_check = time.time()
         return profile.reachable
 
     async def _health_check_one(self, profile: DeviceProfile) -> None:
         """Check reachability, refresh spec if needed, and manage pod lifecycle for one device."""
-        try:
-            reachable = await self.check_reachability(profile)
-            if reachable:
-                await self.fetch_spec(profile)
-            if profile.reachable and not profile.pod_active:
-                await self._spawn_pod(profile)
-            elif not profile.reachable and profile.pod_active:
-                await self._kill_pod(profile)
-        except Exception:
-            logger.exception(f"Health check error for {profile.hostname}")
+        async with self._health_semaphore:
+            async with self._lock_for(profile.hostname):
+                # Device may have been deregistered between the snapshot and now.
+                if profile.hostname not in self._devices:
+                    return
+                try:
+                    reachable = await self.check_reachability(profile)
+                    if reachable:
+                        await self.fetch_spec(profile)
+                    if profile.reachable and not profile.pod_active:
+                        await self._spawn_pod(profile)
+                    elif not profile.reachable and profile.pod_active:
+                        await self._kill_pod(profile)
+                except Exception:
+                    logger.exception(f"Health check error for {profile.hostname}")
 
     async def start_health_loop(self) -> None:
         while True:
@@ -286,6 +342,7 @@ class Registry:
             profile.spawn_error = msg
             return
         mcp_manifest = SpecTranslator().translate(spec, profile.hostname)
+        keep_alive_interval = self._config.get("transport", {}).get("sse", {}).get("keep_alive_interval", 30)
         pod = DevicePod(
             hostname=profile.hostname,
             manifest=mcp_manifest,
@@ -293,6 +350,7 @@ class Registry:
             auth=profile.auth,
             base_url=profile.base_url,
             rate_limit_rps=profile.rate_limit_rps,
+            keep_alive_interval=keep_alive_interval,
         )
         await pod.start()
         profile.pod = pod
@@ -308,6 +366,8 @@ class Registry:
     async def shutdown(self) -> None:
         for profile in self._devices.values():
             await self._kill_pod(profile)
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
         logger.info("Registry shutdown complete")
 
 

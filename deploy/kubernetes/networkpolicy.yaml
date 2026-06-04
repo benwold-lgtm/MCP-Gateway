@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: device-mcp-gateway
+  namespace: mcp-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: device-mcp-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Accept MCP client connections on the gateway API port only.
+    - ports:
+        - port: 8000
+          protocol: TCP
+
+  egress:
+    # DNS resolution (required for device hostname lookups).
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # HTTP/HTTPS to downstream device APIs. Add entries here for devices
+    # that run on non-standard ports (e.g. 8080, 8443, 9000).
+    - ports:
+        - port: 80
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+        - port: 8443
+          protocol: TCP

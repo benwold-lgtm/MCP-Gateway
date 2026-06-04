@@ -37,14 +37,7 @@ class SqliteDeviceStore(AbstractDeviceStore):
 
     def _decrypt(self, stored: str) -> str:
         if self._fernet:
-            try:
-                return self._fernet.decrypt(stored.encode()).decode()
-            except Exception:
-                logger.warning(
-                    "auth_config decryption failed — record may be unencrypted plaintext; "
-                    "re-register the device to encrypt it"
-                )
-                return stored
+            return self._fernet.decrypt(stored.encode()).decode()
         return stored
 
     async def initialize(self) -> None:
@@ -98,7 +91,10 @@ class SqliteDeviceStore(AbstractDeviceStore):
                 try:
                     auth_config = json.loads(self._decrypt(row["auth_config"]))
                 except Exception:
-                    logger.warning(f"Could not parse auth_config for {row['hostname']}")
+                    logger.error(
+                        f"Failed to decrypt auth_config for {row['hostname']} — "
+                        "key may have rotated; device will load without credentials"
+                    )
             result.append(
                 {
                     "hostname": row["hostname"],
