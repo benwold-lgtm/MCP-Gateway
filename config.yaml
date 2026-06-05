@@ -26,6 +26,11 @@ registry:
   spec_poll_interval: 300
   # Spec cache TTL in seconds
   spec_cache_ttl: 3600
+  # Per-device health-check lock TTL in seconds (distributed mode). Must exceed
+  # the worst-case single check (reachability + spec fetch + translation) so a
+  # slow check can't let the lock expire and a second worker double-check the
+  # same device. Defaults to max(2 × health_check_interval, 120) when unset.
+  # health_lock_ttl: 120
   # Max pods to run concurrently (embedded mode only)
   max_concurrent_pods: 50
 

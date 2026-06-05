@@ -85,6 +85,11 @@ class DeviceWorker:
         self._stop_event = asyncio.Event()
 
         self._keep_alive = config.get("transport", {}).get("sse", {}).get("keep_alive_interval", 30)
+        # Device-claim lease TTL (RC-6). Outlives the heartbeat interval so a
+        # claim refreshed each heartbeat never lapses while the pod runs, but
+        # expires soon after a worker dies so another worker can take over.
+        _hc = config.get("registry", {}).get("health_check_interval", 30)
+        self._claim_ttl = max(_hc * 2, 60)
         # _health is initialised in run() after the backend is available
         self._health: WorkerHealthLoop | None = None
 
@@ -100,6 +105,7 @@ class DeviceWorker:
             spec_poll_interval=_reg_cfg.get("spec_poll_interval", 300),
             spec_cache_ttl=_reg_cfg.get("spec_cache_ttl", 3600),
             discovery_cfg=self._config.get("discovery", {}),
+            lock_ttl=_reg_cfg.get("health_lock_ttl"),
         )
         self._health.on_spec_changed = self._replace_pod
         await backend.initialize()
@@ -149,6 +155,7 @@ class DeviceWorker:
         key = f"worker:{self._id}:heartbeat"
         while not self._stop_event.is_set():
             await self._r.setex(key, ttl, str(time.time()))
+            await self._refresh_claims()  # keep device-claim leases alive (RC-6)
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
     # ------------------------------------------------------------------
@@ -239,14 +246,49 @@ class DeviceWorker:
     # Pod lifecycle
     # ------------------------------------------------------------------
 
+    async def _acquire_claim(self, hostname: str) -> bool:
+        """Atomically claim a device before spawning so two workers can't both
+        run a pod for it (RC-6). The local ``_assigned`` set isn't enough — it's
+        per-worker — so a pending-assignment reclaim could otherwise hand the
+        same device to two workers. Returns True if this worker holds the claim.
+        """
+        key = f"claim:{hostname}"
+        if await self._r.set(key, self._id, nx=True, ex=self._claim_ttl):
+            return True
+        # Key already exists — only proceed if we already own it, which happens
+        # on pod replacement and on restart recovery (worker_id is stable).
+        return (await self._r.get(key)) == self._id
+
+    async def _release_claim(self, hostname: str) -> None:
+        """Release this worker's claim on a device.
+
+        Owner-checked get-then-delete (this fakeredis build has no EVAL, so no
+        Lua CAS). It is only ever called for a device we actively own and keep
+        refreshed via the heartbeat, so the non-atomic window — our claim
+        expiring and being re-taken between the get and the delete — is not
+        reachable in practice.
+        """
+        key = f"claim:{hostname}"
+        if (await self._r.get(key)) == self._id:
+            await self._r.delete(key)
+
+    async def _refresh_claims(self) -> None:
+        """Extend the lease on every owned device claim (called per heartbeat)."""
+        for hostname in list(self._assigned):
+            await self._r.expire(f"claim:{hostname}", self._claim_ttl)
+
     async def _spawn_pod(self, hostname: str) -> None:
         if hostname in self._assigned:
             logger.debug(f"Already assigned: {hostname}")
+            return
+        if not await self._acquire_claim(hostname):
+            logger.info(f"Device {hostname} is claimed by another worker; skipping spawn")
             return
         assert self._backend is not None, "backend not initialised — call run() first"
         cfg = await self._backend.get_device(hostname)
         if cfg is None:
             logger.warning(f"No config for device {hostname}, cannot spawn pod")
+            await self._release_claim(hostname)
             return
 
         # Fetch or build manifest
@@ -257,6 +299,7 @@ class DeviceWorker:
                 err = f"No spec available for {hostname}"
                 logger.warning(err)
                 await self._backend.update_device_fields(hostname, spawn_error=err, pod_active=False)
+                await self._release_claim(hostname)
                 return
             loop = asyncio.get_event_loop()
             manifest_obj = await loop.run_in_executor(_spec_executor, partial(_translate_spec_sync, spec, hostname))
@@ -300,6 +343,7 @@ class DeviceWorker:
         if self._backend:
             await self._backend.update_device_fields(hostname, pod_active=False, worker_id=None)
         await self._r.srem(f"worker:{self._id}:devices", hostname)
+        await self._release_claim(hostname)
         logger.info(f"Pod killed for {hostname} by worker {self._id}")
 
     async def _replace_pod(self, hostname: str) -> None:

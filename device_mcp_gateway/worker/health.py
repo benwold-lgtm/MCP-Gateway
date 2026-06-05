@@ -12,6 +12,7 @@ skip devices they can't lock and let the lock-holder update Redis.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import hashlib
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -24,6 +25,14 @@ from loguru import logger
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 
 _spec_executor = ProcessPoolExecutor(max_workers=2)
+
+
+def _shutdown_spec_executor() -> None:
+    """Reap the spec-translation worker processes at interpreter exit (RC-5)."""
+    _spec_executor.shutdown(wait=False)
+
+
+atexit.register(_shutdown_spec_executor)
 
 
 def _translate_spec_sync(spec: dict, hostname: str) -> Any:
@@ -44,6 +53,7 @@ class WorkerHealthLoop:
         spec_poll_interval: int = 300,
         spec_cache_ttl: int = 3600,
         discovery_cfg: dict | None = None,
+        lock_ttl: int | None = None,
     ) -> None:
         self._worker_id = worker_id
         self._backend = backend
@@ -52,7 +62,18 @@ class WorkerHealthLoop:
         self._spec_poll_interval = spec_poll_interval
         self._spec_cache_ttl = spec_cache_ttl
         self._discovery = discovery_cfg or {}
+        # Per-device check lock TTL. Must exceed the worst-case single-device
+        # check (reachability GET + spec fetch + translation), which is
+        # independent of the poll interval — otherwise a slow check lets the
+        # lock expire mid-flight and a second worker checks the same device.
+        # It is only a crash/hang safety net: the holder deletes the lock in
+        # _check_device's finally, so a longer TTL never blocks the next cycle.
+        self._lock_ttl = lock_ttl if lock_ttl is not None else max(self._interval * 2, 120)
         self._http: httpx.AsyncClient | None = None
+        # Per-device timestamp of the last spec poll. Tracked separately from
+        # cfg.last_check (which updates every health cycle) so the much longer
+        # spec_poll_interval is honoured instead of always short-circuiting.
+        self._last_spec_check: dict[str, float] = {}
         # Callback set by DeviceWorker: (hostname) -> coroutine — replace pod
         self.on_spec_changed: Any = None
 
@@ -69,11 +90,14 @@ class WorkerHealthLoop:
                     await self._check_device(hostname)
                 except Exception:
                     logger.exception(f"Health loop error for {hostname}")
+            # Drop spec-poll timestamps for devices no longer assigned.
+            for stale in set(self._last_spec_check) - set(assigned):
+                self._last_spec_check.pop(stale, None)
             await asyncio.sleep(self._interval)
 
     async def _check_device(self, hostname: str) -> None:
         lock_key = f"health_lock:{hostname}"
-        acquired = await self._r.set(lock_key, self._worker_id, nx=True, ex=self._interval)
+        acquired = await self._r.set(lock_key, self._worker_id, nx=True, ex=self._lock_ttl)
         if not acquired:
             return  # another worker is handling this device
 
@@ -92,10 +116,18 @@ class WorkerHealthLoop:
                     await self._backend.publish_assignment("unassign", hostname)
                 return
 
-            # Spec polling
+            # Spec polling — throttled by its own timestamp, not cfg.last_check
+            # (which is rewritten every cycle above and would always short-circuit).
             now = time.time()
-            if now - cfg.last_check < self._spec_poll_interval:
+            last_spec = self._last_spec_check.get(hostname)
+            if last_spec is None:
+                # First sighting: the spec was just fetched at pod spawn, so
+                # defer the first poll by a full interval rather than re-fetching.
+                self._last_spec_check[hostname] = now
                 return
+            if now - last_spec < self._spec_poll_interval:
+                return
+            self._last_spec_check[hostname] = now
             spec = await self._fetch_spec(cfg)
             if spec is None:
                 return

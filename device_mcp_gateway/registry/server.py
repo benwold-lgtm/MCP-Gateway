@@ -20,6 +20,7 @@ In distributed mode (registry.mode = "distributed"):
 from __future__ import annotations
 
 import asyncio
+import atexit
 import hashlib
 import heapq
 import time
@@ -42,6 +43,19 @@ from device_mcp_gateway.shared.registry_backend import (
 from device_mcp_gateway.storage.base import AbstractDeviceStore
 
 _spec_executor = ProcessPoolExecutor(max_workers=4)
+
+
+def _shutdown_spec_executor() -> None:
+    """Reap the spec-translation worker processes at interpreter exit (RC-5).
+
+    Registered with atexit rather than called from Registry.shutdown() because
+    the executor is process-global and shared across Registry instances —
+    shutting it down per-instance would break reuse.
+    """
+    _spec_executor.shutdown(wait=False)
+
+
+atexit.register(_shutdown_spec_executor)
 
 
 def _translate_spec_sync(spec: dict, hostname: str) -> Any:
