@@ -154,7 +154,7 @@ class DeviceWorker:
         ttl = self._config.get("registry", {}).get("health_check_interval", 30) * 2
         key = f"worker:{self._id}:heartbeat"
         while not self._stop_event.is_set():
-            await self._r.setex(key, ttl, str(time.time()))
+            await self._r.set(key, str(time.time()), ex=ttl)
             await self._refresh_claims()  # keep device-claim leases alive (RC-6)
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
 

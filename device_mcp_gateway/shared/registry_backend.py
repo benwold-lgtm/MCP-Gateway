@@ -270,7 +270,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
             return None
 
     async def set_manifest(self, hostname: str, manifest: dict, ttl: int) -> None:
-        await self._r.setex(f"device:{hostname}:manifest", ttl, json.dumps(manifest))
+        await self._r.set(f"device:{hostname}:manifest", json.dumps(manifest), ex=ttl)
 
     async def delete_manifest(self, hostname: str) -> None:
         await self._r.delete(f"device:{hostname}:manifest")
