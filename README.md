@@ -400,6 +400,67 @@ See [`docs/kubernetes-architecture.md`](docs/kubernetes-architecture.md) for the
 
 ---
 
+## Observability
+
+### Log format
+
+The gateway writes to two sinks simultaneously:
+
+| Sink | Format | Use |
+|------|--------|-----|
+| **stderr** | Human-readable colored text | `kubectl logs`, local dev |
+| **File** (`logs/gateway.log`) | Newline-delimited JSON (default) | External collectors |
+
+JSON is the default because Splunk, Grafana Loki, and Elasticsearch all ingest it without
+custom extraction rules. Each record is a single JSON line; structured fields from
+`logger.bind()` appear under `record.extra` and are directly indexable.
+
+Toggle plain-text file output for local development:
+
+```yaml
+# config.yaml
+logging:
+  json_logs: false   # default is true
+```
+
+### Audit events
+
+Every tool dispatch emits a structured `audit` event with these fields:
+
+| Field | Description |
+|-------|-------------|
+| `record.extra.event` | Always `"audit"` — use this to filter audit records |
+| `record.extra.hostname` | Registered device name |
+| `record.extra.caller` | Truncated bearer token prefix identifying the API caller |
+| `record.extra.method` | MCP JSON-RPC method (`"tools/call"`, `"tools/list"`, …) |
+| `record.extra.status` | `"ok"`, `"error"`, or `"dispatched"` (distributed mode) |
+| `record.extra.duration_ms` | Round-trip time in ms (embedded mode only) |
+| `record.extra.rid` | Correlation ID — matches the `X-Request-Id` response header |
+
+### Connecting an external collector
+
+Full configuration snippets for **Grafana Loki (Promtail)**, **Splunk (UF and HEC)**,
+and **Elasticsearch (Fluent Bit)** — including sample queries for each platform — are in
+[docs/observability.md](docs/observability.md).
+
+Quick reference:
+
+```bash
+# Grafana Loki — filter all audit events (LogQL)
+{job="mcp-gateway"} | json | event="audit"
+
+# Splunk (SPL)
+index=mcp_gateway sourcetype=_json record.extra.event="audit"
+
+# Trace a request by correlation ID across all log lines
+{job="mcp-gateway"} | json | rid="<X-Request-Id value>"
+```
+
+The `X-Request-Id` header is returned on every API response; use it to correlate a
+failed client call with the corresponding gateway and worker log entries.
+
+---
+
 ## Troubleshooting
 
 ### Device registered but `pod_active: false`

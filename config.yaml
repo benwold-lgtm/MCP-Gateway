@@ -89,9 +89,12 @@ cors:
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR
   level: "INFO"
-  # Log file path
+  # Log file path (rotated; tailed by Fluent Bit / Splunk UF / Promtail)
   file: "logs/gateway.log"
-  # Max log file size in MB
+  # Max log file size in MB before rotation
   max_size: 50
-  # Max backup files
+  # Number of rotated backup files to retain
   backup_count: 5
+  # Emit log file as newline-delimited JSON (recommended for external collectors).
+  # Set to false only for local development without an observability stack.
+  json_logs: true

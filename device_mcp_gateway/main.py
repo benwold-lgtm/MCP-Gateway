@@ -111,6 +111,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         log_file=_log_cfg.get("file", "logs/gateway.log"),
         max_size_mb=_log_cfg.get("max_size", 50),
         backup_count=_log_cfg.get("backup_count", 5),
+        json_logs=_log_cfg.get("json_logs", True),
     )
 
     _gateway_cfg = cfg.get("gateway", {})
@@ -559,10 +560,14 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                 gateway_id=_GATEWAY_ID,
                 message=payload,
             )
-            logger.info(
-                f"AUDIT hostname={hostname} caller={_caller} "
-                f"method={payload.get('method', '?')} dispatched rid={_rid}"
-            )
+            logger.bind(
+                event="audit",
+                hostname=hostname,
+                caller=_caller,
+                method=payload.get("method", "?"),
+                status="dispatched",
+                rid=_rid,
+            ).info("tool dispatch")
             return {"status": "accepted"}
         else:
             profile = reg.get_profile(hostname)
@@ -575,11 +580,15 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             response = await sse_transport.handle_message(effective_id, payload)
             _dur = (time.perf_counter() - _t) * 1000
             _status = "ok" if response and "result" in response else "error"
-            logger.info(
-                f"AUDIT hostname={hostname} caller={_caller} "
-                f"method={payload.get('method', '?')} status={_status} "
-                f"duration={_dur:.1f}ms rid={_rid}"
-            )
+            logger.bind(
+                event="audit",
+                hostname=hostname,
+                caller=_caller,
+                method=payload.get("method", "?"),
+                status=_status,
+                duration_ms=round(_dur, 1),
+                rid=_rid,
+            ).info("tool dispatch")
             return response
 
     @protected.delete("/devices/{hostname}")
