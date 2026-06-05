@@ -7,9 +7,9 @@ name = "device-mcp-gateway"
 version = "0.1.0"
 description = "Universal API-to-MCP Gateway - Translates OpenAPI specs to MCP servers"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Elastic-2.0"}
 authors = [
-    {name = "Open MCP Team"}
+    {name = "Ben Wold", email = "benwold@gmail.com"}
 ]
 requires-python = ">=3.10"
 dependencies = [
