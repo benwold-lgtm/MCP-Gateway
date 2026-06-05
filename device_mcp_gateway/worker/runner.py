@@ -209,18 +209,14 @@ class DeviceWorker:
                     continue
                 for _s, messages in results:
                     for msg_id, fields in messages:
-                        asyncio.create_task(
-                            self._dispatch_call(hostname, stream, group, msg_id, fields)
-                        )
+                        asyncio.create_task(self._dispatch_call(hostname, stream, group, msg_id, fields))
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception(f"Call consumer error for {hostname}; retrying")
                 await asyncio.sleep(1)
 
-    async def _dispatch_call(
-        self, hostname: str, stream: str, group: str, msg_id: str, fields: dict
-    ) -> None:
+    async def _dispatch_call(self, hostname: str, stream: str, group: str, msg_id: str, fields: dict) -> None:
         session_id = fields.get("session_id", "")
         try:
             message = json.loads(fields.get("message", "{}"))
@@ -260,9 +256,7 @@ class DeviceWorker:
                 await self._backend.update_device_fields(hostname, spawn_error=err, pod_active=False)
                 return
             loop = asyncio.get_event_loop()
-            manifest_obj = await loop.run_in_executor(
-                _spec_executor, partial(_translate_spec_sync, spec, hostname)
-            )
+            manifest_obj = await loop.run_in_executor(_spec_executor, partial(_translate_spec_sync, spec, hostname))
             manifest_dict = _manifest_to_dict(manifest_obj)
             ttl = self._config.get("registry", {}).get("spec_cache_ttl", 3600)
             await self._backend.set_manifest(hostname, manifest_dict, ttl=ttl)
@@ -282,9 +276,7 @@ class DeviceWorker:
         await pod.start(with_sse=False)  # distributed mode: no in-process SSE transport
         self._pods[hostname] = pod
         self._assigned.add(hostname)
-        await self._backend.update_device_fields(
-            hostname, pod_active=True, worker_id=self._id, spawn_error=None
-        )
+        await self._backend.update_device_fields(hostname, pod_active=True, worker_id=self._id, spawn_error=None)
         await self._r.sadd(f"worker:{self._id}:devices", hostname)
 
         # Start call consumer task for this device

@@ -573,9 +573,7 @@ class TestComponentRefResolution:
             "post": {
                 "operationId": "create_item",
                 "requestBody": {
-                    "content": {
-                        "application/json": {"schema": {"$ref": "./other.yaml#/components/schemas/Item"}}
-                    }
+                    "content": {"application/json": {"schema": {"$ref": "./other.yaml#/components/schemas/Item"}}}
                 },
                 "responses": {"201": {"description": "Created"}},
             }
@@ -668,11 +666,7 @@ class TestCompositionKeywords:
             "post": {
                 "operationId": "post_data",
                 "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {"allOf": [{"$ref": "#/components/schemas/Body"}]}
-                        }
-                    }
+                    "content": {"application/json": {"schema": {"allOf": [{"$ref": "#/components/schemas/Body"}]}}}
                 },
                 "responses": {"200": {"description": "OK"}},
             }

@@ -81,9 +81,7 @@ class WorkerHealthLoop:
 
             # Reachability check
             reachable = await self._check_reachability(cfg.base_url)
-            await self._backend.update_device_fields(
-                hostname, reachable=reachable, last_check=time.time()
-            )
+            await self._backend.update_device_fields(hostname, reachable=reachable, last_check=time.time())
 
             if not reachable:
                 if cfg.pod_active:
@@ -104,9 +102,7 @@ class WorkerHealthLoop:
                 logger.info(f"Spec changed for {hostname}: {cfg.spec_hash} → {new_hash}")
                 # Store new manifest in Redis
                 loop = asyncio.get_event_loop()
-                manifest_obj = await loop.run_in_executor(
-                    _spec_executor, partial(_translate_spec_sync, spec, hostname)
-                )
+                manifest_obj = await loop.run_in_executor(_spec_executor, partial(_translate_spec_sync, spec, hostname))
                 manifest_dict = _manifest_to_dict(manifest_obj)
                 await self._backend.set_manifest(hostname, manifest_dict, ttl=self._spec_cache_ttl)
                 await self._backend.update_device_fields(hostname, spec_hash=new_hash)

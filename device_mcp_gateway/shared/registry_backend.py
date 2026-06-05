@@ -17,7 +17,6 @@ from typing import Any
 
 from loguru import logger
 
-
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -89,16 +88,13 @@ class AbstractRegistryBackend(ABC):
     """All registry state operations — device configs, manifests, and streams."""
 
     @abstractmethod
-    async def initialize(self) -> None:
-        ...
+    async def initialize(self) -> None: ...
 
     @abstractmethod
-    async def get_device(self, hostname: str) -> DeviceConfig | None:
-        ...
+    async def get_device(self, hostname: str) -> DeviceConfig | None: ...
 
     @abstractmethod
-    async def set_device(self, hostname: str, config: DeviceConfig) -> None:
-        ...
+    async def set_device(self, hostname: str, config: DeviceConfig) -> None: ...
 
     @abstractmethod
     async def update_device_fields(self, hostname: str, **fields: Any) -> None:
@@ -106,24 +102,19 @@ class AbstractRegistryBackend(ABC):
         ...
 
     @abstractmethod
-    async def delete_device(self, hostname: str) -> None:
-        ...
+    async def delete_device(self, hostname: str) -> None: ...
 
     @abstractmethod
-    async def list_hostnames(self) -> list[str]:
-        ...
+    async def list_hostnames(self) -> list[str]: ...
 
     @abstractmethod
-    async def get_manifest(self, hostname: str) -> dict | None:
-        ...
+    async def get_manifest(self, hostname: str) -> dict | None: ...
 
     @abstractmethod
-    async def set_manifest(self, hostname: str, manifest: dict, ttl: int) -> None:
-        ...
+    async def set_manifest(self, hostname: str, manifest: dict, ttl: int) -> None: ...
 
     @abstractmethod
-    async def delete_manifest(self, hostname: str) -> None:
-        ...
+    async def delete_manifest(self, hostname: str) -> None: ...
 
     @abstractmethod
     async def publish_assignment(self, action: str, hostname: str) -> None:

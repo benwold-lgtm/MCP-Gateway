@@ -131,7 +131,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         logger.warning(
             "gateway.secret_key is not set — OAuth2 client_secret and API key credentials "
             "will be stored as plaintext in SQLite. Set MCP_SECRET_KEY to a Fernet key. "
-            "Generate one: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            'Generate one: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
         )
 
     def _parse_auth(data: dict) -> AbstractAuth | None:
@@ -274,8 +274,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         response = await call_next(request)
         elapsed = (time.perf_counter() - start) * 1000
         logger.info(
-            f"{request.method} {request.url.path} -> {response.status_code} "
-            f"({elapsed:.1f}ms) rid={request_id}"
+            f"{request.method} {request.url.path} -> {response.status_code} " f"({elapsed:.1f}ms) rid={request_id}"
         )
         response.headers["X-Request-Id"] = request_id
         return response
@@ -613,10 +612,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         }
 
         if mode == "embedded":
-            metrics["device_rate_limits"] = {
-                d.hostname: {"rate_limit_rps": d.rate_limit_rps}
-                for d in devices
-            }
+            metrics["device_rate_limits"] = {d.hostname: {"rate_limit_rps": d.rate_limit_rps} for d in devices}
 
         return metrics
 

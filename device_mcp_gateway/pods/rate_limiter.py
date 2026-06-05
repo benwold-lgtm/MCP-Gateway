@@ -46,8 +46,7 @@ class TokenBucket:
             sleep_for = (1.0 - self._tokens) / self._rate
             if self._max_wait is not None and waited + sleep_for > self._max_wait:
                 raise asyncio.TimeoutError(
-                    f"Rate limit wait would exceed {self._max_wait}s "
-                    f"(rate={self._rate} rps)"
+                    f"Rate limit wait would exceed {self._max_wait}s " f"(rate={self._rate} rps)"
                 )
             await asyncio.sleep(sleep_for)
             waited += sleep_for

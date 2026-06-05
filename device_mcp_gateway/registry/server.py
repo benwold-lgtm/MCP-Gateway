@@ -226,13 +226,9 @@ class Registry:
     ) -> DeviceConfig:
         """POST semantics: create a new device."""
         if self._mode == "distributed":
-            return await self._register_distributed(
-                hostname, base_url, spec_url, auth, transport, rate_limit_rps
-            )
+            return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
         async with self._lock_for(hostname):
-            profile = await self._setup_device_nolock(
-                hostname, base_url, spec_url, auth, transport, rate_limit_rps
-            )
+            profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
             return profile.config
 
     async def replace_device(
@@ -247,17 +243,13 @@ class Registry:
         """PUT semantics: kill existing pod and re-register atomically."""
         if self._mode == "distributed":
             await self._backend.publish_assignment("unassign", hostname)
-            return await self._register_distributed(
-                hostname, base_url, spec_url, auth, transport, rate_limit_rps
-            )
+            return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
         async with self._lock_for(hostname):
             existing = self._profiles.get(hostname)
             if existing:
                 await self._kill_pod(existing)
                 self._spec_cache.invalidate(existing.base_url)
-            profile = await self._setup_device_nolock(
-                hostname, base_url, spec_url, auth, transport, rate_limit_rps
-            )
+            profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
             return profile.config
 
     async def deregister_device(self, hostname: str) -> None:
@@ -516,9 +508,7 @@ class Registry:
             profile.config.spawn_error = msg
             return
         loop = asyncio.get_event_loop()
-        mcp_manifest = await loop.run_in_executor(
-            _spec_executor, partial(_translate_spec_sync, spec, profile.hostname)
-        )
+        mcp_manifest = await loop.run_in_executor(_spec_executor, partial(_translate_spec_sync, spec, profile.hostname))
         keep_alive = self._config.get("transport", {}).get("sse", {}).get("keep_alive_interval", 30)
         pod = DevicePod(
             hostname=profile.hostname,

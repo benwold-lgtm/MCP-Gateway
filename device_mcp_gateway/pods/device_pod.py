@@ -183,8 +183,7 @@ class DevicePod:
 
         if method == "tools/list":
             tools = [
-                {"name": t.name, "description": t.description, "inputSchema": t.schema}
-                for t in self.manifest.tools
+                {"name": t.name, "description": t.description, "inputSchema": t.schema} for t in self.manifest.tools
             ]
             return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}}
 
@@ -229,7 +228,7 @@ class DevicePod:
                     "id": msg_id,
                     "error": {"code": -32602, "message": f"Unknown resource URI: {uri}"},
                 }
-            path = uri[len(prefix):]
+            path = uri[len(prefix) :]
             if self._rate_limiter:
                 await self._rate_limiter.acquire()
             headers = await self.auth.get_headers() if self.auth else {}

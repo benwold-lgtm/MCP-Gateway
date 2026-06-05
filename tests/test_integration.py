@@ -132,10 +132,10 @@ def test_sse_transport_client_flow(client, mock_target_url):
                 data_payload = ""
                 continue
             if line.startswith("event:"):
-                event_name = line[len("event:"):].strip()
+                event_name = line[len("event:") :].strip()
                 continue
             if line.startswith("data:"):
-                data_payload += line[len("data:"):].strip()
+                data_payload += line[len("data:") :].strip()
                 continue
 
         assert data_line is not None, "No SSE message event received"
@@ -161,9 +161,7 @@ async def test_spec_change_replaces_pod():
     spec_v1 = {
         "openapi": "3.0.3",
         "info": {"title": "Sensor API", "version": "1.0.0"},
-        "paths": {
-            "/status": {"get": {"operationId": "get_status", "responses": {"200": {"description": "OK"}}}}
-        },
+        "paths": {"/status": {"get": {"operationId": "get_status", "responses": {"200": {"description": "OK"}}}}},
     }
     spec_v2 = {
         "openapi": "3.0.3",
