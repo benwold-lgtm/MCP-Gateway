@@ -251,6 +251,9 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         pipe = self._r.pipeline()
         pipe.delete(f"device:{hostname}:config")
         pipe.delete(f"device:{hostname}:manifest")
+        # Drop the tool-call stream too, or it lingers in Redis after the
+        # device is gone and accumulates over churn (RC-4).
+        pipe.delete(f"device:{hostname}:calls")
         pipe.srem(_DEVICES_SET, hostname)
         await pipe.execute()
 

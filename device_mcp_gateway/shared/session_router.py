@@ -18,11 +18,32 @@ Session keys carry a TTL so abandoned sessions expire automatically.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, AsyncGenerator
 
 from loguru import logger
 
-_SESSION_TTL = 86_400  # 24 h — refreshed on every message
+_SESSION_TTL = 86_400  # 24 h — refreshed periodically while the stream is active
+_REFRESH_THROTTLE = 60.0  # min seconds between TTL refreshes on a busy stream
+
+
+class _RefreshThrottle:
+    """Permits an action at most once per `window` seconds (monotonic clock).
+
+    Used to cap session-TTL refreshes: a busy SSE stream would otherwise issue
+    one Redis EXPIRE per message. One refresh per minute keeps a 24 h TTL alive
+    with negligible Redis traffic.
+    """
+
+    def __init__(self, window: float) -> None:
+        self._window = window
+        self._last = 0.0  # 0 → first call always fires
+
+    def ready(self, now: float) -> bool:
+        if now - self._last >= self._window:
+            self._last = now
+            return True
+        return False
 
 
 class SessionRouter:
@@ -40,8 +61,12 @@ class SessionRouter:
     ) -> None:
         """Record that session_id is held by this gateway instance."""
         key = f"session:{session_id}"
-        await self._r.hset(key, mapping={"hostname": hostname, "gateway_id": gateway_id})
-        await self._r.expire(key, ttl)
+        # Pipeline hset + expire so the hash never lands without a TTL — a drop
+        # between two separate round-trips would otherwise leak the session key.
+        pipe = self._r.pipeline()
+        pipe.hset(key, mapping={"hostname": hostname, "gateway_id": gateway_id})
+        pipe.expire(key, ttl)
+        await pipe.execute()
         logger.debug(f"Session registered: session_id={session_id} gateway={gateway_id}")
 
     async def get(self, session_id: str) -> dict | None:
@@ -63,13 +88,17 @@ class SessionRouter:
         disconnect).
         """
         channel = f"session:{session_id}:results"
+        throttle = _RefreshThrottle(_REFRESH_THROTTLE)
         async with self._r.pubsub() as ps:
             await ps.subscribe(channel)
             logger.debug(f"Subscribed to {channel}")
             try:
                 async for msg in ps.listen():
                     if msg["type"] == "message":
-                        await self.refresh(session_id)
+                        # Throttle TTL refreshes so a busy stream doesn't issue
+                        # one EXPIRE per message (RC-3).
+                        if throttle.ready(time.monotonic()):
+                            await self.refresh(session_id)
                         try:
                             yield json.loads(msg["data"])
                         except json.JSONDecodeError:
