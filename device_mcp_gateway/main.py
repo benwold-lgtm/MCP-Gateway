@@ -175,6 +175,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # ---------------------------------------------------------------------------
 
     _app = FastAPI(title="Device MCP Gateway", version="0.1.0")
+    _app.state.config = cfg
     _app.state.gateway_api_key = gateway_api_key
     _app.state.mode = _mode
     _app.state.redis = None

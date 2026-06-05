@@ -9,6 +9,18 @@ from fastapi.testclient import TestClient
 client = TestClient(gw_main.app)
 
 
+def test_app_state_config_is_set():
+    # Regression: the __main__ launch block reads app.state.config to resolve
+    # host/port/log-level. create_app() must populate it or direct
+    # `python -m device_mcp_gateway.main` raises AttributeError at startup.
+    cfg = gw_main.app.state.config
+    assert isinstance(cfg, dict)
+    # Mirror the exact access pattern used in the __main__ block.
+    cfg.get("server", {}).get("host", "0.0.0.0")
+    cfg.get("server", {}).get("port", 8000)
+    cfg.get("logging", {}).get("level", "INFO")
+
+
 def test_health_check():
     response = client.get("/health")
     assert response.status_code == 200
