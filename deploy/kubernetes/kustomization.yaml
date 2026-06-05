@@ -12,3 +12,4 @@ resources:
   - worker-deployment.yaml
   - service.yaml
   - ingress.yaml
+  - pdb.yaml

@@ -1,0 +1,32 @@
+---
+# PodDisruptionBudgets — protect availability during node drains and rolling updates.
+#
+# Gateway PDB: ensures at least 1 gateway replica continues serving requests
+# during a voluntary disruption (node drain, cluster upgrade). With replicas ≥ 2
+# (distributed mode), rolling updates proceed normally. With replicas = 1
+# (embedded mode), this intentionally blocks voluntary eviction to protect the
+# only serving instance — operators must scale to 0 before draining.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: device-mcp-gateway-pdb
+  namespace: mcp-gateway
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: device-mcp-gateway
+---
+# Worker PDB: ensures at least 1 worker remains available to service tool calls
+# and health checks. Devices owned by an evicted worker are reassigned to
+# surviving workers via Redis Stream XAUTOCLAIM after the heartbeat TTL expires.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: device-mcp-worker-pdb
+  namespace: mcp-gateway
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: device-mcp-worker

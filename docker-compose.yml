@@ -5,19 +5,32 @@ services:
   redis:
     image: redis:7-alpine
     ports:
+      # Expose to host for development tooling (redis-insight, redis-cli).
+      # Remove this port mapping in production to limit external exposure.
       - "6379:6379"
     command: redis-server --appendonly yes
     volumes:
       - redis-data:/data
+    networks:
+      - mcp-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
 
   # ---------------------------------------------------------------------------
   # Gateway — stateless HTTP/SSE API server (scale freely)
+  # Scale horizontally: docker compose up --scale gateway=3
   # ---------------------------------------------------------------------------
   gateway:
     build: .
@@ -25,6 +38,8 @@ services:
       - "8000:8000"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+    networks:
+      - mcp-net
     environment:
       - MCP_CONFIG=/app/config.yaml
       - MCP_GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY:-}
@@ -34,15 +49,27 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # Tune upward for high SSE connection counts or many concurrent devices.
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
 
   # ---------------------------------------------------------------------------
   # Worker — hosts DevicePods, executes tool calls (scale independently)
+  # Scale horizontally: docker compose up --scale worker=3
   # ---------------------------------------------------------------------------
   worker:
     build: .
     command: ["device-mcp-worker", "--config", "/app/config.yaml"]
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+    networks:
+      - mcp-net
     environment:
       - MCP_CONFIG=/app/config.yaml
       - MCP_GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY:-}
@@ -53,6 +80,20 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # Workers make outbound HTTP calls to device APIs and run one asyncio task
+          # per assigned device. Tune cpus/memory based on device count per worker.
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+networks:
+  mcp-net:
+    driver: bridge
 
 volumes:
   redis-data:

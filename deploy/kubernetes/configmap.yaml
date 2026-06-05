@@ -20,17 +20,25 @@ data:
       port: 8000
 
     registry:
+      # "distributed" enables Redis-backed shared state, multiple gateway replicas,
+      # and separate worker processes. "embedded" is for local dev only (no Redis).
+      mode: "distributed"
       health_check_interval: 30
       spec_poll_interval: 300
       spec_cache_ttl: 3600
       max_concurrent_pods: 50
+
+    redis:
+      # URL is overridden by MCP_REDIS_URL env var injected in deployment.yaml.
+      url: "redis://redis:6379/0"
+      socket_timeout: 5
+      max_connections: 20
 
     auth:
       type: "api_key"
       api_key:
         header_name: "X-API-Key"
       oauth2:
-        token_refresh_before_expiry_seconds: 300
         token_endpoint: ""
         client_id: ""
         client_secret: ""
@@ -58,6 +66,10 @@ data:
     storage:
       type: "sqlite"
       db_path: "/app/data/devices.db"
+
+    cors:
+      # Set specific origins for production browser clients; empty disables CORS.
+      allowed_origins: []
 
     logging:
       level: "INFO"

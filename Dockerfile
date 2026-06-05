@@ -15,4 +15,8 @@ RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
 USER appuser
 EXPOSE 8000
 ENV MCP_CONFIG=/app/config.yaml
-CMD ["uvicorn", "device_mcp_gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD python -c \
+    "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)" \
+    || exit 1
+CMD ["device-mcp"]

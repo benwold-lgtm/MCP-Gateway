@@ -1,3 +1,22 @@
+# Optional — for embedded mode (registry.mode: embedded) only.
+#
+# In embedded mode, the gateway stores device registrations in a local SQLite
+# database. Without a PVC, that database is lost when the pod restarts. Mount
+# this claim in deployment.yaml to add persistence:
+#
+#   volumeMounts:
+#     - name: data
+#       mountPath: /app/data
+#   volumes:
+#     - name: data
+#       persistentVolumeClaim:
+#         claimName: gateway-data
+#
+# In distributed mode (the default for this K8s deployment), all device state
+# lives in Redis — this PVC is not needed and is NOT included in kustomization.yaml.
+# Apply separately if you need embedded-mode persistence:
+#   kubectl apply -f pvc.yaml
+#
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -23,9 +23,13 @@ from contextlib import asynccontextmanager, suppress
 from typing import Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway.cfg import load_config
@@ -51,6 +55,7 @@ async def require_auth(
 ) -> None:
     key = request.app.state.gateway_api_key
     if not key:
+        request.state.auth_caller = "unauthenticated"
         return
     if credentials is None or not hmac.compare_digest(credentials.credentials, key):
         raise HTTPException(
@@ -58,6 +63,8 @@ async def require_auth(
             detail="Unauthorized",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # Store a non-secret fingerprint for audit logs (first 8 chars of the token).
+    request.state.auth_caller = f"bearer:{credentials.credentials[:8]}..."
 
 
 def _parse_rate_limit(data: dict) -> float | None:
@@ -120,7 +127,11 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         except Exception as exc:
             logger.error(f"Invalid secret_key — credentials will be stored as plaintext: {exc}")
     else:
-        logger.warning("gateway.secret_key is not set — device credentials stored as plaintext")
+        logger.warning(
+            "gateway.secret_key is not set — OAuth2 client_secret and API key credentials "
+            "will be stored as plaintext in SQLite. Set MCP_SECRET_KEY to a Fernet key. "
+            "Generate one: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
 
     def _parse_auth(data: dict) -> AbstractAuth | None:
         auth_type = (
@@ -164,6 +175,22 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.mode = _mode
     _app.state.redis = None
     _app.state.session_router = None
+
+    # --- Rate limiting (per-IP, in-memory) ---
+    _limiter = Limiter(key_func=get_remote_address)
+    _app.state.limiter = _limiter
+    _app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    # --- CORS (opt-in; configure cors.allowed_origins in config.yaml) ---
+    _allowed_origins = cfg.get("cors", {}).get("allowed_origins", [])
+    if _allowed_origins:
+        _app.add_middleware(
+            CORSMiddleware,
+            allow_origins=_allowed_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     if _mode == "embedded":
         from device_mcp_gateway.storage.sqlite_store import SqliteDeviceStore
@@ -240,15 +267,22 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     @_app.middleware("http")
     async def log_requests(request: Request, call_next):
+        request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+        request.state.request_id = request_id
         start = time.perf_counter()
         response = await call_next(request)
         elapsed = (time.perf_counter() - start) * 1000
-        logger.info(f"{request.method} {request.url.path} -> {response.status_code} ({elapsed:.1f}ms)")
+        logger.info(
+            f"{request.method} {request.url.path} -> {response.status_code} "
+            f"({elapsed:.1f}ms) rid={request_id}"
+        )
+        response.headers["X-Request-Id"] = request_id
         return response
 
     # --- Unauthenticated routes ---
 
     @_app.get("/health")
+    @_limiter.limit("300/minute")
     async def health_check(request: Request):
         reg: Registry = request.app.state.registry
         mode = request.app.state.mode
@@ -270,11 +304,38 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "version": cfg.get("server", {}).get("version", "0.1.0"),
         }
 
+    @_app.get("/readyz")
+    @_limiter.limit("300/minute")
+    async def readiness_check(request: Request):
+        """Deep readiness probe — checks backend infrastructure connectivity.
+        K8s readiness probe target; returns 503 until the backend is reachable.
+        Unlike /health, does NOT check business state (device count, pod_active).
+        """
+        mode = request.app.state.mode
+        try:
+            if mode == "distributed":
+                redis = request.app.state.redis
+                if redis is None:
+                    return JSONResponse(
+                        status_code=503,
+                        content={"status": "not ready", "mode": mode, "reason": "Redis not yet connected"},
+                    )
+                await redis.ping()
+            else:
+                await request.app.state.store.health_check()
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not ready", "mode": mode, "reason": str(exc)},
+            )
+        return {"status": "ready", "mode": mode}
+
     # --- Protected routes ---
 
     protected = APIRouter(dependencies=[Depends(require_auth)])
 
     @protected.post("/devices")
+    @_limiter.limit("60/minute")
     async def register_device(request: Request):
         data = await request.json()
         reg: Registry = request.app.state.registry
@@ -456,13 +517,16 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             if not profile or not profile.pod:
                 raise HTTPException(status_code=404, detail="Device pod not found")
 
-            effective_id = session_id or client_id or str(uuid.uuid4())
+            # Always server-assigned — ignore client-supplied session_id/client_id
+            # to prevent session hijacking (S2).
+            effective_id = str(uuid.uuid4())
             endpoint_url = f"/devices/{hostname}/messages?session_id={effective_id}"
             transport = profile.pod._ensure_sse_transport()
             transport.register_client(effective_id, endpoint_url)
             return EventSourceResponse(transport.event_stream(effective_id))
 
     @protected.post("/devices/{hostname}/messages")
+    @_limiter.limit("600/minute")
     async def device_sse_message(
         hostname: str,
         request: Request,
@@ -483,6 +547,8 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="session_id is required")
 
         payload = await request.json()
+        _caller = getattr(request.state, "auth_caller", "unknown")
+        _rid = getattr(request.state, "request_id", "-")
 
         if mode == "distributed":
             request_id = str(uuid.uuid4())
@@ -493,6 +559,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                 gateway_id=_GATEWAY_ID,
                 message=payload,
             )
+            logger.info(
+                f"AUDIT hostname={hostname} caller={_caller} "
+                f"method={payload.get('method', '?')} dispatched rid={_rid}"
+            )
             return {"status": "accepted"}
         else:
             profile = reg.get_profile(hostname)
@@ -501,7 +571,15 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             sse_transport = profile.pod.sse_transport
             if not sse_transport:
                 raise HTTPException(status_code=500, detail="SSE transport not initialised")
+            _t = time.perf_counter()
             response = await sse_transport.handle_message(effective_id, payload)
+            _dur = (time.perf_counter() - _t) * 1000
+            _status = "ok" if response and "result" in response else "error"
+            logger.info(
+                f"AUDIT hostname={hostname} caller={_caller} "
+                f"method={payload.get('method', '?')} status={_status} "
+                f"duration={_dur:.1f}ms rid={_rid}"
+            )
             return response
 
     @protected.delete("/devices/{hostname}")

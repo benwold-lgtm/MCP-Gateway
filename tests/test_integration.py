@@ -91,28 +91,19 @@ def test_sse_transport_client_flow(client, mock_target_url):
     else:
         raise AssertionError("SSE device pod did not become active")
 
-    session_id = "test-sse-client"
-    with client.stream("GET", f"/devices/{hostname}/sse?session_id={session_id}") as event_resp:
+    with client.stream("GET", f"/devices/{hostname}/sse") as event_resp:
         assert event_resp.status_code == 200
 
-        # MCP JSON-RPC 2.0 tools/call request
-        send_resp = client.post(
-            f"/devices/{hostname}/messages?session_id={session_id}",
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": "get_device_status", "arguments": {}},
-            },
-        )
-        assert send_resp.status_code == 200
-        assert send_resp.json().get("status") == "accepted"
-
-        # Read SSE events; skip the 'endpoint' event, wait for 'message'
+        # Single-pass iterator: read endpoint event first (server-assigned session_id),
+        # then POST the tool call inside the loop, then read the message event.
+        # Two separate iter_lines() calls would raise StreamConsumed on the same stream.
+        session_id = None
         data_line = None
         event_name = None
         data_payload = ""
-        deadline = time.time() + 10
+        _posted = False
+        deadline = time.time() + 15
+
         for line in event_resp.iter_lines():
             if time.time() > deadline:
                 break
@@ -120,10 +111,23 @@ def test_sse_transport_client_flow(client, mock_target_url):
                 continue
             line = line.strip()
             if line == "":
-                if event_name == "message" and data_payload:
+                if event_name == "endpoint" and data_payload and "session_id=" in data_payload:
+                    session_id = data_payload.split("session_id=")[-1]
+                    send_resp = client.post(
+                        f"/devices/{hostname}/messages?session_id={session_id}",
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "tools/call",
+                            "params": {"name": "get_device_status", "arguments": {}},
+                        },
+                    )
+                    assert send_resp.status_code == 200
+                    assert send_resp.json().get("status") == "accepted"
+                    _posted = True
+                elif event_name == "message" and data_payload and _posted:
                     data_line = data_payload
                     break
-                # Reset for the next event (handles 'endpoint' and 'keep-alive' events)
                 event_name = None
                 data_payload = ""
                 continue

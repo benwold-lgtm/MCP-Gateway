@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
+from pybreaker import CircuitBreaker, CircuitBreakerError
 
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.pods.sse_server import SseTransport
@@ -45,6 +46,9 @@ class DevicePod:
         self.base_url = base_url
         self._keep_alive_interval = keep_alive_interval
         self._rate_limiter = TokenBucket(rate_limit_rps) if rate_limit_rps and rate_limit_rps > 0 else None
+        # Open after 5 consecutive 5xx/connection failures; reset after 60s.
+        # 4xx responses do not trip the breaker (client error, not device failure).
+        self._breaker = CircuitBreaker(fail_max=5, reset_timeout=60)
         self._mcp = FastMCP(
             name=f"mcp-{hostname}",
             instructions=f"{manifest.server_name} v{manifest.server_version}",
@@ -58,6 +62,9 @@ class DevicePod:
     def _register_tools(self) -> None:
         """Register all MCP tools from the manifest as async callables."""
         self._tool_dispatch: dict[str, Any] = {}
+        # Capture once so all tool closures share the same per-pod circuit breaker
+        # without it appearing in the function signature (Pydantic would warn on it).
+        _pod_breaker = self._breaker
         for tool in self.manifest.tools:
             # Build a callable closure per tool. All closure variables are bound
             # via default-argument so each iteration captures its own snapshot.
@@ -86,7 +93,8 @@ class DevicePod:
                 url = f"{base_url}{tool.path}".format_map(path_params)
                 headers = await auth.get_headers() if auth else {}
                 headers.update(extra_headers)
-                try:
+
+                async def _call():
                     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
                         resp = await c.request(
                             method=tool.method,
@@ -95,7 +103,17 @@ class DevicePod:
                             json=body_params if tool.method in ("POST", "PUT", "PATCH") else None,
                             params=query_params or None,
                         )
-                    resp.raise_for_status()
+                    # Only raise on 5xx — device-side failures trip the breaker.
+                    # 4xx are client/LLM errors and should not affect circuit state.
+                    if 500 <= resp.status_code < 600:
+                        resp.raise_for_status()
+                    return resp
+
+                try:
+                    # calling() is a sync context manager that tracks state for asyncio
+                    # (call_async requires Tornado and is not usable in asyncio contexts).
+                    with _pod_breaker.calling():
+                        resp = await _call()
                     if resp.status_code == 204 or not resp.content:
                         return {"status": resp.status_code, "body": None}
                     ct = resp.headers.get("content-type", "")
@@ -107,6 +125,12 @@ class DevicePod:
                     if ct.startswith("text/"):
                         return {"status": resp.status_code, "body": resp.text}
                     return {"status": resp.status_code, "body": base64.b64encode(resp.content).decode()}
+                except CircuitBreakerError:
+                    logger.warning(f"Circuit breaker open for pod {base_url}")
+                    return {
+                        "error": "Device unavailable: circuit breaker open (too many recent failures)",
+                        "status_code": 503,
+                    }
                 except httpx.HTTPStatusError as e:
                     return {"error": str(e), "status_code": e.response.status_code}
                 except Exception as e:

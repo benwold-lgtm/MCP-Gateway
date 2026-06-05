@@ -80,6 +80,12 @@ storage:
   # Path to the SQLite database file
   db_path: "./data/devices.db"
 
+cors:
+  # Allowed origins for browser-based MCP clients. Empty list disables CORS headers.
+  # Use ["*"] only in development; set specific origins in production.
+  # Example: ["https://my-llm-app.example.com", "https://app.anthropic.com"]
+  allowed_origins: []
+
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR
   level: "INFO"

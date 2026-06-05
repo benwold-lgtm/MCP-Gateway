@@ -17,7 +17,11 @@ spec:
       labels:
         app: device-mcp-worker
     spec:
-      terminationGracePeriodSeconds: 60
+      # 120s matches the gateway. Workers make outbound tool calls (15s httpx timeout)
+      # and need time to finish in-flight calls, drain the Redis Stream consumer, and
+      # unregister from workers:active before the pod is forcibly killed.
+      # Future improvement: have the shutdown handler drain call tasks before cancelling.
+      terminationGracePeriodSeconds: 120
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -26,6 +30,12 @@ spec:
           # Pin to an immutable digest or semantic tag in production — never ship :latest
           image: device-mcp-gateway:latest
           command: ["device-mcp-worker"]
+          lifecycle:
+            preStop:
+              exec:
+                # Give Kubernetes time to remove this pod from any routing layer
+                # before SIGTERM fires, preventing new assignments during shutdown.
+                command: ["/bin/sh", "-c", "sleep 5"]
           env:
             - name: MCP_CONFIG
               value: /app/config.yaml
@@ -60,6 +70,27 @@ spec:
             limits:
               cpu: "1000m"
               memory: "1Gi"
+          # Workers have no HTTP port; use exec probes via Redis heartbeat key.
+          # The heartbeat key is set by the worker's heartbeat loop with TTL =
+          # 2 × health_check_interval. A missing key means the loop has stalled.
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import os, sys, redis as r
+                  client = r.from_url(
+                      os.environ.get("MCP_REDIS_URL", "redis://redis:6379/0"),
+                      socket_connect_timeout=3,
+                  )
+                  key = f"worker:{os.environ.get('WORKER_ID', 'unknown')}:heartbeat"
+                  sys.exit(0 if client.exists(key) else 1)
+            # Allow time for: Python startup + Redis connect + first heartbeat write.
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
       volumes:
         - name: config
           configMap:

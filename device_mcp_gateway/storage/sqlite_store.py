@@ -91,6 +91,11 @@ class SqliteDeviceStore(AbstractDeviceStore):
             await db.execute("DELETE FROM devices WHERE hostname = ?", (hostname,))
             await db.commit()
 
+    async def health_check(self) -> None:
+        """Verify the SQLite database is accessible. Raises on failure."""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("SELECT 1")
+
     async def load_all(self) -> list[dict[str, Any]]:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
