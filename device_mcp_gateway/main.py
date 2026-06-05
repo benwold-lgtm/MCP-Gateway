@@ -180,7 +180,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # --- Rate limiting (per-IP, in-memory) ---
     _limiter = Limiter(key_func=get_remote_address)
     _app.state.limiter = _limiter
-    _app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    _app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
     # --- CORS (opt-in; configure cors.allowed_origins in config.yaml) ---
     _allowed_origins = cfg.get("cors", {}).get("allowed_origins", [])
