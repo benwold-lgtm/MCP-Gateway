@@ -2,7 +2,10 @@ FROM python:3.12-slim AS builder
 WORKDIR /build
 COPY requirements.txt pyproject.toml ./
 COPY device_mcp_gateway/ ./device_mcp_gateway/
-RUN pip install --no-cache-dir --prefix=/deps .
+# Install pinned runtime deps from the lockfile, then the package itself
+# without re-resolving — reproducible, fully-pinned image builds.
+RUN pip install --no-cache-dir --prefix=/deps -r requirements.txt \
+    && pip install --no-cache-dir --prefix=/deps --no-deps .
 
 FROM python:3.12-slim
 WORKDIR /app

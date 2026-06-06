@@ -30,6 +30,7 @@ from loguru import logger
 
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.worker.health import WorkerHealthLoop, _manifest_to_dict
 
@@ -71,12 +72,12 @@ class DeviceWorker:
         worker_id: str,
         config: dict[str, Any],
         redis_client: Any,
-        fernet: Any = None,
+        codec: CredentialCodec | None = None,
     ) -> None:
         self._id = worker_id
         self._config = config
         self._r = redis_client
-        self._fernet = fernet
+        self._codec = codec or CredentialCodec(None)
         self._backend: AbstractRegistryBackend | None = None
 
         self._pods: dict[str, DevicePod] = {}
@@ -90,6 +91,9 @@ class DeviceWorker:
         # expires soon after a worker dies so another worker can take over.
         _hc = config.get("registry", {}).get("health_check_interval", 30)
         self._claim_ttl = max(_hc * 2, 60)
+        # TTL for the per-call "result seen" marker the gateway's timeout watcher
+        # checks (F6). Outlives the tool-call timeout so the watcher always sees it.
+        self._result_marker_ttl = max(config.get("registry", {}).get("tool_call_timeout", 30) * 2, 60)
         # _health is initialised in run() after the backend is available
         self._health: WorkerHealthLoop | None = None
 
@@ -228,6 +232,7 @@ class DeviceWorker:
 
     async def _dispatch_call(self, hostname: str, stream: str, group: str, msg_id: str, fields: dict) -> None:
         session_id = fields.get("session_id", "")
+        request_id = fields.get("request_id", "")
         try:
             message = json.loads(fields.get("message", "{}"))
             pod = self._pods.get(hostname)
@@ -237,6 +242,10 @@ class DeviceWorker:
             result = await pod.call_tool(message)
             if result is not None:
                 await self._r.publish(f"session:{session_id}:results", json.dumps(result))
+            # Mark the call as handled so the gateway's timeout watcher (F6)
+            # stands down even when the result reached a different gateway replica.
+            if request_id:
+                await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
         except Exception:
             logger.exception(f"Tool call dispatch error for {hostname} session {session_id}")
         finally:
@@ -277,6 +286,24 @@ class DeviceWorker:
         for hostname in list(self._assigned):
             await self._r.expire(f"claim:{hostname}", self._claim_ttl)
 
+    def _decrypt_auth(self, hostname: str, auth_config_str: str | None) -> str | None:
+        """Decrypt a stored credential blob from Redis (distributed mode).
+
+        On failure (key mismatch / rotation) the pod loads without credentials
+        and the error is logged loudly, rather than silently treating ciphertext
+        as plaintext.
+        """
+        if not auth_config_str or not self._codec.enabled:
+            return auth_config_str
+        try:
+            return self._codec.decrypt(auth_config_str)
+        except Exception:
+            logger.error(
+                f"Failed to decrypt credentials for {hostname} — key may have rotated; "
+                "pod will load without credentials"
+            )
+            return None
+
     async def _spawn_pod(self, hostname: str) -> None:
         if hostname in self._assigned:
             logger.debug(f"Already assigned: {hostname}")
@@ -309,7 +336,7 @@ class DeviceWorker:
         else:
             manifest_obj = _dict_to_manifest(manifest_dict)
 
-        auth = _auth_from_config(cfg.auth_type, cfg.auth_config)
+        auth = _auth_from_config(cfg.auth_type, self._decrypt_auth(hostname, cfg.auth_config))
         pod = DevicePod(
             hostname=hostname,
             manifest=manifest_obj,
@@ -336,6 +363,7 @@ class DeviceWorker:
         pod = self._pods.pop(hostname, None)
         if pod:
             pod.stop()
+            await pod.aclose()
         self._assigned.discard(hostname)
         task = self._call_tasks.pop(hostname, None)
         if task and not task.done():

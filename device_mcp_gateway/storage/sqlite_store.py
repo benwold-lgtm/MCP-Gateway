@@ -13,6 +13,7 @@ import aiosqlite
 from loguru import logger
 
 from .base import AbstractDeviceStore
+from device_mcp_gateway.shared.crypto import CredentialCodec
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -30,9 +31,16 @@ CREATE TABLE IF NOT EXISTS devices (
 class SqliteDeviceStore(AbstractDeviceStore):
     """Persists device registrations in a local SQLite database."""
 
-    def __init__(self, db_path: str = "./data/devices.db", fernet: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        db_path: str = "./data/devices.db",
+        fernet: Optional[Any] = None,
+        codec: Optional[CredentialCodec] = None,
+    ) -> None:
         self._db_path = db_path
-        self._fernet = fernet  # cryptography.fernet.Fernet instance, or None
+        # Prefer an injected codec; fall back to wrapping a bare Fernet for
+        # back-compat with callers/tests that pass fernet= directly.
+        self._codec = codec or CredentialCodec(fernet)
         db_dir = os.path.dirname(db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
@@ -48,14 +56,10 @@ class SqliteDeviceStore(AbstractDeviceStore):
                 pass  # column already exists
 
     def _encrypt(self, plaintext: str) -> str:
-        if self._fernet:
-            return self._fernet.encrypt(plaintext.encode()).decode()
-        return plaintext
+        return self._codec.encrypt(plaintext)
 
     def _decrypt(self, stored: str) -> str:
-        if self._fernet:
-            return self._fernet.decrypt(stored.encode()).decode()
-        return stored
+        return self._codec.decrypt(stored)
 
     async def initialize(self) -> None:
         async with aiosqlite.connect(self._db_path) as db:

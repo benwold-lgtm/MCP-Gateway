@@ -30,7 +30,10 @@ services:
 
   # ---------------------------------------------------------------------------
   # Gateway — stateless HTTP/SSE API server (scale freely)
-  # Scale horizontally: docker compose up --scale gateway=3
+  # NOTE: the fixed host port below means `--scale gateway=N` will fail with a
+  # port conflict. For multi-replica gateways use Kubernetes (deploy/kubernetes,
+  # with the gateway HPA) or front several gateway containers with a load
+  # balancer. Workers scale freely (they publish no host port).
   # ---------------------------------------------------------------------------
   gateway:
     build: .
@@ -42,6 +45,7 @@ services:
       - mcp-net
     environment:
       - MCP_CONFIG=/app/config.yaml
+      - MCP_REGISTRY_MODE=distributed
       - MCP_GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY:-}
       - MCP_SECRET_KEY=${MCP_SECRET_KEY:-}
       - MCP_REDIS_URL=redis://redis:6379/0
@@ -72,6 +76,7 @@ services:
       - mcp-net
     environment:
       - MCP_CONFIG=/app/config.yaml
+      - MCP_REGISTRY_MODE=distributed
       - MCP_GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY:-}
       - MCP_SECRET_KEY=${MCP_SECRET_KEY:-}
       - MCP_REDIS_URL=redis://redis:6379/0

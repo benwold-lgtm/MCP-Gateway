@@ -110,6 +110,19 @@ class AbstractRegistryBackend(ABC):
     @abstractmethod
     async def list_hostnames(self) -> list[str]: ...
 
+    async def get_devices(self, hostnames: list[str]) -> list[DeviceConfig]:
+        """Fetch many device configs. Default: one get_device per hostname.
+
+        Backends with a multi-key fetch (e.g. Redis pipelines) should override
+        this to avoid N round-trips.
+        """
+        out: list[DeviceConfig] = []
+        for h in hostnames:
+            cfg = await self.get_device(h)
+            if cfg:
+                out.append(cfg)
+        return out
+
     @abstractmethod
     async def get_manifest(self, hostname: str) -> dict | None: ...
 
@@ -236,6 +249,16 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         if not h:
             return None
         return DeviceConfig.from_redis_hash(h)
+
+    async def get_devices(self, hostnames: list[str]) -> list[DeviceConfig]:
+        """Fetch all device configs in a single pipeline (avoids N round-trips)."""
+        if not hostnames:
+            return []
+        pipe = self._r.pipeline()
+        for h in hostnames:
+            pipe.hgetall(f"device:{h}:config")
+        raw_hashes = await pipe.execute()
+        return [DeviceConfig.from_redis_hash(h) for h in raw_hashes if h]
 
     async def set_device(self, hostname: str, config: DeviceConfig) -> None:
         pipe = self._r.pipeline()

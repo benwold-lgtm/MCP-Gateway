@@ -87,13 +87,25 @@ def worker_main() -> None:
     os.environ["MCP_CONFIG"] = args.config
 
     try:
-        from device_mcp_gateway.cfg import load_config
+        from device_mcp_gateway.cfg import load_config, resolve_mode
+        from device_mcp_gateway.shared.crypto import CredentialCodec
         from device_mcp_gateway.shared.redis_client import create_redis
         from device_mcp_gateway.shared.registry_backend import RedisRegistryBackend
         from device_mcp_gateway.worker.runner import DeviceWorker
         from device_mcp_gateway.logging_setup import setup_logging
 
         cfg = load_config(args.config)
+
+        # The worker only has a role in distributed mode. Refuse to run against an
+        # embedded config so it can't silently diverge from an embedded gateway.
+        mode = resolve_mode(cfg)
+        if mode != "distributed":
+            print(
+                f"Error: device-mcp-worker requires distributed mode, but registry.mode "
+                f"resolves to '{mode}'. Set registry.mode: distributed (or MCP_REGISTRY_MODE=distributed).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         log_cfg = cfg.get("logging", {})
         setup_logging(
             level=log_cfg.get("level", "INFO"),
@@ -102,17 +114,23 @@ def worker_main() -> None:
             backup_count=log_cfg.get("backup_count", 5),
         )
 
-        secret_raw: str = os.getenv("MCP_SECRET_KEY") or cfg.get("gateway", {}).get("secret_key") or ""
-        fernet = None
-        if secret_raw:
-            try:
-                from cryptography.fernet import Fernet
+        try:
+            codec = CredentialCodec.from_config(cfg)
+        except ValueError as exc:
+            print(f"Error: invalid MCP_SECRET_KEY / gateway.secret_key: {exc}", file=sys.stderr)
+            sys.exit(1)
 
-                fernet = Fernet(secret_raw.encode() if isinstance(secret_raw, str) else secret_raw)
-            except Exception as exc:
-                import sys
-
-                print(f"Warning: invalid MCP_SECRET_KEY — credentials will not be decryptable: {exc}", file=sys.stderr)
+        # The worker only runs in distributed mode and reads credentials from
+        # Redis; refuse to start without a key unless explicitly allowed.
+        allow_plaintext = bool(cfg.get("gateway", {}).get("allow_plaintext_credentials", False))
+        if not codec.enabled and not allow_plaintext:
+            print(
+                "Error: refusing to start worker without MCP_SECRET_KEY — device credentials in "
+                "Redis cannot be decrypted. Set a Fernet key, or set "
+                "gateway.allow_plaintext_credentials: true to override.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         async def _run() -> None:
             redis_client = await create_redis(cfg)
@@ -121,7 +139,7 @@ def worker_main() -> None:
                 worker_id=args.worker_id,
                 config=cfg,
                 redis_client=redis_client,
-                fernet=fernet,
+                codec=codec,
             )
             await worker.run(backend)
 

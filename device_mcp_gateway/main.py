@@ -35,12 +35,14 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from sse_starlette import EventSourceResponse
 
-from device_mcp_gateway.cfg import load_config
+from device_mcp_gateway import __version__
+from device_mcp_gateway.cfg import load_config, resolve_mode
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
 from device_mcp_gateway.logging_setup import setup_logging
 from device_mcp_gateway.registry.server import Registry
+from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
     MemoryRegistryBackend,
     RedisRegistryBackend,
@@ -103,10 +105,69 @@ def _validate_hostname(hostname: str) -> None:
         )
 
 
+async def _watch_tool_call_timeout(redis, session_router, session_id, request_id, msg_id, timeout):
+    """Emit a JSON-RPC timeout error on the SSE stream if no worker responds.
+
+    Cross-replica safe: the worker sets result:{request_id} in Redis when it
+    handles the call, so this watcher (which may run on a different gateway
+    replica than the one holding the SSE stream) checks that shared marker
+    rather than observing the pub/sub channel directly (F6).
+    """
+    try:
+        await asyncio.sleep(timeout)
+        if await redis.get(f"result:{request_id}"):
+            return  # worker handled it
+        await session_router.publish_result(
+            session_id,
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32001, "message": f"Tool call timed out after {timeout}s — no worker responded"},
+            },
+        )
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.warning(f"tool-call timeout watcher failed for request {request_id}")
+
+
+def _client_ip_key_func(trust_proxy: bool):
+    """slowapi key function for the rate limiter.
+
+    Behind a trusted reverse proxy / ingress, request.client.host is the proxy
+    IP — so every client looks identical. When trust_proxy is set, use the
+    left-most X-Forwarded-For entry (the original client) instead.
+    """
+
+    def _key(request: Request) -> str:
+        if trust_proxy:
+            xff = request.headers.get("x-forwarded-for")
+            if xff:
+                return xff.split(",")[0].strip()
+        return get_remote_address(request)
+
+    return _key
+
+
+def _rate_limit_storage_uri(cfg: dict, mode: str) -> str | None:
+    """Resolve the slowapi storage URI.
+
+    An explicit gateway.rate_limit_storage_uri wins. Otherwise, in distributed
+    mode, share limits across replicas by deriving the Redis URL. Returns None
+    (in-memory) for embedded mode.
+    """
+    explicit = cfg.get("gateway", {}).get("rate_limit_storage_uri")
+    if explicit:
+        return explicit
+    if mode == "distributed":
+        return os.getenv("MCP_REDIS_URL") or cfg.get("redis", {}).get("url")
+    return None
+
+
 def create_app(override_config: dict | None = None) -> FastAPI:
     """Application factory. Pass override_config to skip file I/O (useful in tests)."""
     cfg = override_config if override_config is not None else load_config()
-    _mode = cfg.get("registry", {}).get("mode", "embedded")
+    _mode = resolve_mode(cfg)
 
     _log_cfg = cfg.get("logging", {})
     setup_logging(
@@ -119,21 +180,29 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     _gateway_cfg = cfg.get("gateway", {})
     gateway_api_key: str = os.getenv("MCP_GATEWAY_API_KEY") or _gateway_cfg.get("api_key") or ""
-    _secret_key_raw: str = os.getenv("MCP_SECRET_KEY") or _gateway_cfg.get("secret_key") or ""
 
-    _fernet: Optional[object] = None
-    if _secret_key_raw:
-        try:
-            from cryptography.fernet import Fernet
+    try:
+        _codec = CredentialCodec.from_config(cfg)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid MCP_SECRET_KEY / gateway.secret_key: {exc}") from exc
 
-            _fernet = Fernet(_secret_key_raw.encode() if isinstance(_secret_key_raw, str) else _secret_key_raw)
-            logger.info("Credential encryption enabled")
-        except Exception as exc:
-            logger.error(f"Invalid secret_key — credentials will be stored as plaintext: {exc}")
+    _allow_plaintext = bool(_gateway_cfg.get("allow_plaintext_credentials", False))
+    if _codec.enabled:
+        logger.info("Credential encryption enabled")
+    elif _mode == "distributed" and not _allow_plaintext:
+        # Distributed mode persists credentials to Redis; refuse to run without a
+        # key so secrets never land there in plaintext. Set gateway.
+        # allow_plaintext_credentials: true to override (not recommended).
+        raise RuntimeError(
+            "Refusing to start in distributed mode without MCP_SECRET_KEY: device "
+            "credentials would be written to Redis in plaintext. Set a Fernet key "
+            "(MCP_SECRET_KEY) or, to override, set gateway.allow_plaintext_credentials: true. "
+            'Generate a key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
+        )
     else:
         logger.warning(
             "gateway.secret_key is not set — OAuth2 client_secret and API key credentials "
-            "will be stored as plaintext in SQLite. Set MCP_SECRET_KEY to a Fernet key. "
+            "will be stored as plaintext. Set MCP_SECRET_KEY to a Fernet key. "
             'Generate one: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
         )
 
@@ -174,15 +243,29 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # the lifespan has not yet fired (e.g. bare TestClient without context mgr).
     # ---------------------------------------------------------------------------
 
-    _app = FastAPI(title="Device MCP Gateway", version="0.1.0")
+    _app = FastAPI(title="Device MCP Gateway", version=__version__)
     _app.state.config = cfg
     _app.state.gateway_api_key = gateway_api_key
     _app.state.mode = _mode
     _app.state.redis = None
+    _app.state.pubsub_redis = None
     _app.state.session_router = None
+    # Strong refs to fire-and-forget timeout watchers so they aren't GC'd.
+    _app.state.bg_tasks = set()
 
     # --- Rate limiting (per-IP, in-memory) ---
-    _limiter = Limiter(key_func=get_remote_address)
+    _trust_proxy = bool(_gateway_cfg.get("trust_proxy_headers", False))
+    _storage_uri = _rate_limit_storage_uri(cfg, _mode)
+    _limiter_kwargs: dict = {
+        "key_func": _client_ip_key_func(_trust_proxy),
+        # Fall back to in-memory if the Redis storage is unreachable rather than
+        # failing requests.
+        "in_memory_fallback_enabled": True,
+    }
+    if _storage_uri:
+        _limiter_kwargs["storage_uri"] = _storage_uri
+        logger.info(f"Rate limiter using shared storage: {_storage_uri.split('@')[-1]}")
+    _limiter = Limiter(**_limiter_kwargs)
     _app.state.limiter = _limiter
     _app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
@@ -201,8 +284,8 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         from device_mcp_gateway.storage.sqlite_store import SqliteDeviceStore
 
         _storage_cfg = cfg.get("storage", {})
-        _db_path = _storage_cfg.get("db_path", "./devices.db")
-        _store = SqliteDeviceStore(db_path=_db_path, fernet=_fernet)
+        _db_path = _storage_cfg.get("db_path", "./data/devices.db")
+        _store = SqliteDeviceStore(db_path=_db_path, codec=_codec)
         _backend = MemoryRegistryBackend()
         _registry = Registry(
             config={
@@ -213,6 +296,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             },
             backend=_backend,
             store=_store,
+            codec=_codec,
         )
         _app.state.registry = _registry
         _app.state.store = _store
@@ -230,11 +314,18 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             from device_mcp_gateway.shared.session_router import SessionRouter
 
             redis_client = await create_redis(cfg)
+            # Dedicated client/pool for SSE pub/sub: one connection per open
+            # stream, so it must be sized above the command pool (F3).
+            _pubsub_max = cfg.get("redis", {}).get("pubsub_max_connections", 1000)
+            pubsub_client = await create_redis(cfg, max_connections=_pubsub_max)
             backend = RedisRegistryBackend(redis_client)
             await backend.initialize()
-            registry = Registry(config={**cfg.get("registry", {}), "mode": "distributed"}, backend=backend)
+            registry = Registry(
+                config={**cfg.get("registry", {}), "mode": "distributed"}, backend=backend, codec=_codec
+            )
             app.state.redis = redis_client
-            app.state.session_router = SessionRouter(redis_client)
+            app.state.pubsub_redis = pubsub_client
+            app.state.session_router = SessionRouter(redis_client, pubsub_client)
             app.state.registry = registry
         else:
             await app.state.store.initialize()
@@ -253,6 +344,8 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             else:
                 if app.state.redis:
                     await app.state.redis.aclose()
+                if app.state.pubsub_redis:
+                    await app.state.pubsub_redis.aclose()
 
     _app.router.lifespan_context = lifespan
 
@@ -291,21 +384,15 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         reg: Registry = request.app.state.registry
         mode = request.app.state.mode
 
-        if mode == "distributed":
-            hostnames = await reg.list_devices()
-            total = len(hostnames)
-            active = sum(1 for d in hostnames if d.pod_active)
-        else:
-            devices = await reg.list_devices()
-            total = len(devices)
-            active = sum(1 for d in devices if d.pod_active)
+        devices = await reg.list_devices()
+        active = sum(1 for d in devices if d.pod_active)
 
         return {
             "status": "healthy",
             "mode": mode,
             "active_pods": active,
-            "registered_devices": total,
-            "version": cfg.get("server", {}).get("version", "0.1.0"),
+            "registered_devices": len(devices),
+            "version": cfg.get("server", {}).get("version", __version__),
         }
 
     @_app.get("/readyz")
@@ -563,6 +650,23 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                 gateway_id=_GATEWAY_ID,
                 message=payload,
             )
+            # Guard against a lost call (no worker consuming): if no result is
+            # marked within the timeout, emit an error event on the SSE stream
+            # so the client doesn't hang forever (F6).
+            if isinstance(payload, dict) and payload.get("id") is not None:
+                _timeout = cfg.get("registry", {}).get("tool_call_timeout", 30)
+                _watcher = asyncio.create_task(
+                    _watch_tool_call_timeout(
+                        request.app.state.redis,
+                        request.app.state.session_router,
+                        effective_id,
+                        request_id,
+                        payload.get("id"),
+                        _timeout,
+                    )
+                )
+                request.app.state.bg_tasks.add(_watcher)
+                _watcher.add_done_callback(request.app.state.bg_tasks.discard)
             logger.bind(
                 event="audit",
                 hostname=hostname,

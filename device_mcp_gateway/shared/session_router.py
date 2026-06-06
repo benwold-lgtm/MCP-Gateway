@@ -49,8 +49,13 @@ class _RefreshThrottle:
 class SessionRouter:
     """Register SSE sessions and route results across gateway instances."""
 
-    def __init__(self, redis_client: Any) -> None:
+    def __init__(self, redis_client: Any, pubsub_client: Any = None) -> None:
         self._r = redis_client
+        # Long-lived SSE subscriptions each hold a connection for their whole
+        # lifetime. Route them through a dedicated client/pool so they don't
+        # exhaust the shared command pool (F3). Falls back to the command client
+        # when no separate one is supplied.
+        self._ps = pubsub_client if pubsub_client is not None else redis_client
 
     async def register(
         self,
@@ -89,7 +94,7 @@ class SessionRouter:
         """
         channel = f"session:{session_id}:results"
         throttle = _RefreshThrottle(_REFRESH_THROTTLE)
-        async with self._r.pubsub() as ps:
+        async with self._ps.pubsub() as ps:
             await ps.subscribe(channel)
             logger.debug(f"Subscribed to {channel}")
             try:

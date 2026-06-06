@@ -10,6 +10,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # Redis available at localhost:6379 for real-Redis integration tests
+    # (the unit suite uses fakeredis; this lets integration tests opt in via
+    # MCP_REDIS_URL without changing the harness).
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      MCP_REDIS_URL: redis://localhost:6379/0
+
     steps:
       - uses: actions/checkout@v4
 
@@ -31,8 +48,33 @@ jobs:
       - name: Type check (mypy)
         run: mypy device_mcp_gateway/ --ignore-missing-imports
 
-      - name: Run tests
-        run: pytest tests/ -v
+      - name: Run tests (with coverage gate)
+        run: pytest tests/ -v --cov=device_mcp_gateway --cov-report=term-missing --cov-fail-under=65
 
       - name: Build Docker image
         run: docker build -t device-mcp-gateway:ci .
+
+  security:
+    runs-on: ubuntu-latest
+    # Advisory: surfaces dependency CVEs and insecure patterns without blocking
+    # the build (new upstream CVEs shouldn't break unrelated PRs). Triage these
+    # to blocking once a baseline is established.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install scanners
+        run: pip install pip-audit bandit
+
+      - name: Dependency vulnerability scan (pip-audit)
+        run: pip-audit -r requirements.txt
+
+      - name: Static security scan (bandit)
+        run: bandit -r device_mcp_gateway -ll

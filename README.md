@@ -82,8 +82,9 @@ MCP_GATEWAY_API_KEY=<token> MCP_SECRET_KEY=<fernet-key> docker compose up -d
 # Generate a Fernet key:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
-# 2. Scale independently
-docker compose up -d --scale gateway=3 --scale worker=2
+# 2. Scale workers (the gateway publishes a fixed host port, so scale it via
+#    Kubernetes or a load balancer — see Kubernetes Deployment below)
+docker compose up -d --scale worker=2
 
 # 3. Register a device (any gateway instance)
 curl -X POST http://localhost:8000/devices \
@@ -262,7 +263,12 @@ Set `MCP_GATEWAY_API_KEY` (environment variable) or `gateway.api_key` in `config
 
 ### Credential encryption
 
-**Set `MCP_SECRET_KEY` before registering any devices with credentials.** Without it, OAuth2 `client_secret` and API key values are stored as plaintext in the SQLite database. The gateway logs a warning on startup when the key is absent.
+Device credentials (OAuth2 `client_secret`, API keys) are encrypted at rest with a Fernet key (`MCP_SECRET_KEY`) on **both** storage paths — the SQLite store (embedded mode) and Redis (distributed mode). The gateway and workers share the same key and the same codec, so credentials are never written in plaintext when a key is set.
+
+**Set `MCP_SECRET_KEY` before registering any devices with credentials.**
+
+- **Distributed mode (production):** the gateway and workers **refuse to start** without a key, because credentials would otherwise be persisted to Redis in plaintext. To override for local experiments only, set `gateway.allow_plaintext_credentials: true`.
+- **Embedded mode:** without a key, credentials are stored as plaintext in SQLite and the gateway logs a startup warning.
 
 Generate a key:
 ```bash
@@ -341,8 +347,9 @@ All settings live in `config.yaml`. Override the file location with `MCP_CONFIG`
 # Build and run all three services (gateway + worker + Redis)
 docker compose up -d
 
-# Scale gateway and worker independently
-docker compose up -d --scale gateway=3 --scale worker=2
+# Scale workers (the gateway publishes a fixed host port, so scale it via
+# Kubernetes or a load balancer rather than `--scale gateway`)
+docker compose up -d --scale worker=2
 
 # Stop everything
 docker compose down

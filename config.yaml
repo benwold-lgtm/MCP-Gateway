@@ -9,8 +9,20 @@ gateway:
   # Override with MCP_SECRET_KEY environment variable.
   # Leave empty to store credentials as plaintext (not recommended for production).
   secret_key: ""
+  # Distributed mode persists device credentials to Redis. By default the gateway
+  # and workers REFUSE to start in distributed mode without a secret_key so
+  # credentials are never written in plaintext. Set true to override (dev only).
+  allow_plaintext_credentials: false
   # Maximum POST/PUT request body size in bytes (default 1 MB). Requests exceeding this return 413.
   max_body_bytes: 1048576
+  # Trust X-Forwarded-For for the rate-limiter client IP. Enable ONLY when the
+  # gateway sits behind a trusted proxy/ingress that sets this header, otherwise
+  # clients can spoof it. When false, the limiter keys on the socket peer IP.
+  trust_proxy_headers: false
+  # Rate-limiter storage. Empty = in-memory (per replica). In distributed mode
+  # the Redis URL is used automatically so limits are shared across replicas;
+  # set an explicit limits URI (e.g. "redis://host:6379") to override.
+  rate_limit_storage_uri: ""
 
 server:
   host: "0.0.0.0"
@@ -19,6 +31,9 @@ server:
 registry:
   # "embedded": in-process pods, SQLite, no Redis required (default, local dev)
   # "distributed": Redis-backed registry + separate worker processes (production)
+  # Override with the MCP_REGISTRY_MODE environment variable. The gateway and
+  # workers must agree on this; a worker refuses to start unless it resolves to
+  # "distributed".
   mode: "embedded"
   # How often to poll device reachability (seconds)
   health_check_interval: 30
@@ -26,6 +41,10 @@ registry:
   spec_poll_interval: 300
   # Spec cache TTL in seconds
   spec_cache_ttl: 3600
+  # Distributed mode: seconds the gateway waits for a worker to handle a tool
+  # call before emitting a timeout error event on the SSE stream, so clients
+  # don't hang forever when no worker is consuming.
+  tool_call_timeout: 30
   # Per-device health-check lock TTL in seconds (distributed mode). Must exceed
   # the worst-case single check (reachability + spec fetch + translation) so a
   # slow check can't let the lock expire and a second worker double-check the
@@ -39,7 +58,12 @@ redis:
   # Override with MCP_REDIS_URL environment variable.
   url: "redis://localhost:6379/0"
   socket_timeout: 5
+  # Command connection pool size per gateway/worker process.
   max_connections: 20
+  # Separate pool for SSE pub/sub subscriptions. Each open SSE stream holds one
+  # connection for its lifetime, so this caps concurrent SSE clients per gateway
+  # replica — size it to your expected concurrency (not shared with commands).
+  pubsub_max_connections: 1000
 
 auth:
   # Default auth type (api_key or oauth2)

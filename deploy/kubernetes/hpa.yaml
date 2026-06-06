@@ -1,0 +1,66 @@
+# HorizontalPodAutoscalers for distributed mode.
+#
+# Gateway and worker scale independently. Gateway scales on CPU (a proxy for
+# request/SSE load). Worker scales on CPU too by default; the ideal worker
+# signal is Redis Stream consumer lag on device:*:calls, which requires a custom
+# metrics adapter (e.g. prometheus-adapter / KEDA) — see the commented block.
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: device-mcp-gateway
+  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: device-mcp-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: device-mcp-worker
+  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: device-mcp-worker
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # Preferred: scale on Redis Stream lag (requires a custom-metrics adapter).
+    # - type: External
+    #   external:
+    #     metric:
+    #       name: redis_stream_lag
+    #       selector:
+    #         matchLabels: {stream: "device-calls"}
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "100"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300

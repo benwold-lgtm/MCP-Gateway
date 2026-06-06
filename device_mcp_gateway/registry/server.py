@@ -35,6 +35,7 @@ from loguru import logger
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.translator import SpecTranslator
 from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
     AbstractRegistryBackend,
     DeviceConfig,
@@ -194,11 +195,14 @@ class Registry:
         config: dict[str, Any],
         backend: AbstractRegistryBackend | None = None,
         store: AbstractDeviceStore | None = None,
+        codec: CredentialCodec | None = None,
     ):
         self._config = config
         self._mode = config.get("mode", "embedded")
         self._backend: AbstractRegistryBackend = backend or MemoryRegistryBackend()
         self._store = store  # SQLite credential store (embedded mode only)
+        # Encrypts credentials written to Redis in distributed mode.
+        self._codec = codec or CredentialCodec(None)
 
         # Embedded-mode runtime state (not used in distributed mode)
         self._profiles: dict[str, DeviceProfile] = {}
@@ -294,12 +298,8 @@ class Registry:
     async def list_devices(self) -> list[DeviceConfig]:
         if self._mode == "distributed":
             hostnames = await self._backend.list_hostnames()
-            configs = []
-            for h in hostnames:
-                cfg = await self._backend.get_device(h)
-                if cfg:
-                    configs.append(cfg)
-            return configs
+            # Single pipelined fetch instead of N get_device round-trips (F5).
+            return await self._backend.get_devices(hostnames)
         return [p.config for p in self._profiles.values()]
 
     async def get_manifest(self, hostname: str) -> dict | None:
@@ -319,6 +319,9 @@ class Registry:
         rate_limit_rps: float | None,
     ) -> DeviceConfig:
         auth_type, auth_config_str = _auth_to_record(auth)
+        # Encrypt credentials before they land in Redis (distributed mode).
+        if auth_config_str:
+            auth_config_str = self._codec.encrypt(auth_config_str)
         cfg = DeviceConfig(
             hostname=hostname,
             base_url=base_url,
@@ -460,12 +463,13 @@ class Registry:
         timeout = self._config.get("discovery", {}).get("timeout", 10)
         client = self._get_client()
         for path in paths:
+            url = base_url.rstrip("/") + path
             try:
-                url = base_url.rstrip("/") + path
                 resp = await client.get(url, timeout=timeout)
                 if resp.status_code == 200:
                     return resp.json()
-            except Exception:
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.debug(f"Spec discovery probe failed for {url}: {exc}")
                 continue
         return None
 
@@ -474,7 +478,8 @@ class Registry:
             resp = await self._get_client().get(url, timeout=10)
             if resp.status_code == 200:
                 return resp.json()
-        except Exception:
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.debug(f"Spec fetch failed for {url}: {exc}")
             return None
         return None
 
@@ -546,6 +551,7 @@ class Registry:
     async def _kill_pod(self, profile: DeviceProfile) -> None:
         if profile.pod and profile.pod_active:
             profile.pod.stop()
+            await profile.pod.aclose()
             profile.config.pod_active = False
             await self._backend.update_device_fields(profile.hostname, pod_active=False)
             logger.info(f"Pod killed for {profile.hostname}")

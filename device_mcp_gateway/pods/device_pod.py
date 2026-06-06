@@ -41,6 +41,7 @@ class DevicePod:
         base_url: str = "",
         rate_limit_rps: float | None = None,
         keep_alive_interval: int = 30,
+        request_timeout: float = 15,
     ):
         self.hostname = hostname
         self.manifest = manifest
@@ -48,6 +49,10 @@ class DevicePod:
         self.auth = auth
         self.base_url = base_url
         self._keep_alive_interval = keep_alive_interval
+        self._request_timeout = request_timeout
+        # One reused HTTP client per pod (created lazily) instead of one per
+        # tool call — keeps connections/TLS alive across invocations (F8).
+        self._http: httpx.AsyncClient | None = None
         self._rate_limiter = TokenBucket(rate_limit_rps) if rate_limit_rps and rate_limit_rps > 0 else None
         # Open after 5 consecutive 5xx/connection failures; reset after 60s.
         # 4xx responses do not trip the breaker (client error, not device failure).
@@ -62,9 +67,21 @@ class DevicePod:
         self.sse_transport: SseTransport | None = None
         self._register_tools()
 
+    def _client(self) -> httpx.AsyncClient:
+        """Return the pod's shared HTTP client, creating it on first use."""
+        if self._http is None or self._http.is_closed:
+            self._http = httpx.AsyncClient(timeout=self._request_timeout, follow_redirects=True)
+        return self._http
+
+    async def aclose(self) -> None:
+        """Close the shared HTTP client. Called when the pod is torn down."""
+        if self._http is not None and not self._http.is_closed:
+            await self._http.aclose()
+
     def _register_tools(self) -> None:
         """Register all MCP tools from the manifest as async callables."""
         self._tool_dispatch: dict[str, Any] = {}
+        _get_client = self._client  # shared client for all tool closures
         # Capture once so all tool closures share the same per-pod circuit breaker
         # without it appearing in the function signature (Pydantic would warn on it).
         _pod_breaker = self._breaker
@@ -98,14 +115,14 @@ class DevicePod:
                 headers.update(extra_headers)
 
                 async def _call():
-                    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
-                        resp = await c.request(
-                            method=tool.method,
-                            url=url,
-                            headers=headers,
-                            json=body_params if tool.method in ("POST", "PUT", "PATCH") else None,
-                            params=query_params or None,
-                        )
+                    c = _get_client()
+                    resp = await c.request(
+                        method=tool.method,
+                        url=url,
+                        headers=headers,
+                        json=body_params if tool.method in ("POST", "PUT", "PATCH") else None,
+                        params=query_params or None,
+                    )
                     # Only raise on 5xx — device-side failures trip the breaker.
                     # 4xx are client/LLM errors and should not affect circuit state.
                     if 500 <= resp.status_code < 600:
@@ -236,8 +253,7 @@ class DevicePod:
                 await self._rate_limiter.acquire()
             headers = await self.auth.get_headers() if self.auth else {}
             try:
-                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
-                    resp = await c.get(f"{self.base_url}{path}", headers=headers)
+                resp = await self._client().get(f"{self.base_url}{path}", headers=headers)
                 resp.raise_for_status()
                 ct = resp.headers.get("content-type", "")
                 text = json.dumps(resp.json()) if "json" in ct else resp.text

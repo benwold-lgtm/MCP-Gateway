@@ -11,6 +11,7 @@
 *.tmp
 *.log
 coverage.xml
+.coverage
 htmlcov/
 dist/
 build/
