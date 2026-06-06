@@ -18,11 +18,9 @@ gateway:
   # Trust X-Forwarded-For for the rate-limiter client IP. Enable ONLY when the
   # gateway sits behind a trusted proxy/ingress that sets this header, otherwise
   # clients can spoof it. When false, the limiter keys on the socket peer IP.
+  # In distributed mode rate limits are shared across replicas via Redis
+  # automatically; in embedded mode they are per-process.
   trust_proxy_headers: false
-  # Rate-limiter storage. Empty = in-memory (per replica). In distributed mode
-  # the Redis URL is used automatically so limits are shared across replicas;
-  # set an explicit limits URI (e.g. "redis://host:6379") to override.
-  rate_limit_storage_uri: ""
 
 server:
   host: "0.0.0.0"

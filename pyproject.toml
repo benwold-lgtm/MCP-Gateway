@@ -28,7 +28,6 @@ dependencies = [
     "aiosqlite>=0.19.0",
     "cryptography>=41.0.7",
     "redis[asyncio]>=5.0",
-    "slowapi>=0.1.9",
     "pybreaker>=1.2"
 ]
 
@@ -58,6 +57,9 @@ target-version = ["py312"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"
+markers = [
+    "integration: tests that require a real Redis (skipped if MCP_REDIS_URL is unreachable)",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:websockets",
     "ignore:websockets.server.WebSocketServerProtocol:DeprecationWarning",

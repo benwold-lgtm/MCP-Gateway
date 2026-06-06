@@ -30,9 +30,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway import __version__
@@ -41,6 +38,12 @@ from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
 from device_mcp_gateway.logging_setup import setup_logging
+from device_mcp_gateway.ratelimit import (
+    InMemoryRateLimiter,
+    RedisRateLimiter,
+    client_ip_key_func,
+    rate_limit,
+)
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
@@ -129,39 +132,6 @@ async def _watch_tool_call_timeout(redis, session_router, session_id, request_id
         pass
     except Exception:
         logger.warning(f"tool-call timeout watcher failed for request {request_id}")
-
-
-def _client_ip_key_func(trust_proxy: bool):
-    """slowapi key function for the rate limiter.
-
-    Behind a trusted reverse proxy / ingress, request.client.host is the proxy
-    IP — so every client looks identical. When trust_proxy is set, use the
-    left-most X-Forwarded-For entry (the original client) instead.
-    """
-
-    def _key(request: Request) -> str:
-        if trust_proxy:
-            xff = request.headers.get("x-forwarded-for")
-            if xff:
-                return xff.split(",")[0].strip()
-        return get_remote_address(request)
-
-    return _key
-
-
-def _rate_limit_storage_uri(cfg: dict, mode: str) -> str | None:
-    """Resolve the slowapi storage URI.
-
-    An explicit gateway.rate_limit_storage_uri wins. Otherwise, in distributed
-    mode, share limits across replicas by deriving the Redis URL. Returns None
-    (in-memory) for embedded mode.
-    """
-    explicit = cfg.get("gateway", {}).get("rate_limit_storage_uri")
-    if explicit:
-        return explicit
-    if mode == "distributed":
-        return os.getenv("MCP_REDIS_URL") or cfg.get("redis", {}).get("url")
-    return None
 
 
 def create_app(override_config: dict | None = None) -> FastAPI:
@@ -253,21 +223,13 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # Strong refs to fire-and-forget timeout watchers so they aren't GC'd.
     _app.state.bg_tasks = set()
 
-    # --- Rate limiting (per-IP, in-memory) ---
+    # --- Rate limiting (async; per-client-IP) ---
+    # Key function honours X-Forwarded-For only behind a trusted proxy.
     _trust_proxy = bool(_gateway_cfg.get("trust_proxy_headers", False))
-    _storage_uri = _rate_limit_storage_uri(cfg, _mode)
-    _limiter_kwargs: dict = {
-        "key_func": _client_ip_key_func(_trust_proxy),
-        # Fall back to in-memory if the Redis storage is unreachable rather than
-        # failing requests.
-        "in_memory_fallback_enabled": True,
-    }
-    if _storage_uri:
-        _limiter_kwargs["storage_uri"] = _storage_uri
-        logger.info(f"Rate limiter using shared storage: {_storage_uri.split('@')[-1]}")
-    _limiter = Limiter(**_limiter_kwargs)
-    _app.state.limiter = _limiter
-    _app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+    _app.state.rate_limit_key = client_ip_key_func(_trust_proxy)
+    # Default to in-memory; distributed mode swaps in the Redis-backed limiter
+    # (shared across replicas) once Redis connects in the lifespan.
+    _app.state.rate_limiter = InMemoryRateLimiter()
 
     # --- CORS (opt-in; configure cors.allowed_origins in config.yaml) ---
     _allowed_origins = cfg.get("cors", {}).get("allowed_origins", [])
@@ -327,6 +289,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             app.state.pubsub_redis = pubsub_client
             app.state.session_router = SessionRouter(redis_client, pubsub_client)
             app.state.registry = registry
+            # Shared, async rate limiter across gateway replicas.
+            app.state.rate_limiter = RedisRateLimiter(redis_client)
+            logger.info("Rate limiter using shared Redis storage")
         else:
             await app.state.store.initialize()
             registry = app.state.registry
@@ -378,8 +343,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     # --- Unauthenticated routes ---
 
-    @_app.get("/health")
-    @_limiter.limit("300/minute")
+    @_app.get("/health", dependencies=[Depends(rate_limit("300/minute", "health"))])
     async def health_check(request: Request):
         reg: Registry = request.app.state.registry
         mode = request.app.state.mode
@@ -395,8 +359,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "version": cfg.get("server", {}).get("version", __version__),
         }
 
-    @_app.get("/readyz")
-    @_limiter.limit("300/minute")
+    @_app.get("/readyz", dependencies=[Depends(rate_limit("300/minute", "readyz"))])
     async def readiness_check(request: Request):
         """Deep readiness probe — checks backend infrastructure connectivity.
         K8s readiness probe target; returns 503 until the backend is reachable.
@@ -425,8 +388,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     protected = APIRouter(dependencies=[Depends(require_auth)])
 
-    @protected.post("/devices")
-    @_limiter.limit("60/minute")
+    @protected.post("/devices", dependencies=[Depends(rate_limit("60/minute", "devices_post"))])
     async def register_device(request: Request):
         data = await request.json()
         reg: Registry = request.app.state.registry
@@ -616,8 +578,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             transport.register_client(effective_id, endpoint_url)
             return EventSourceResponse(transport.event_stream(effective_id))
 
-    @protected.post("/devices/{hostname}/messages")
-    @_limiter.limit("600/minute")
+    @protected.post("/devices/{hostname}/messages", dependencies=[Depends(rate_limit("600/minute", "messages"))])
     async def device_sse_message(
         hostname: str,
         request: Request,

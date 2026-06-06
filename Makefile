@@ -1,13 +1,19 @@
-.PHONY: install test lint format typecheck build run worker clean
+.PHONY: install test test-integration test-fast lint format typecheck build run worker clean
 
 install:
 	pip install -e ".[dev]"
 
+# Fast unit suite (fakeredis); no external services required.
 test:
-	pytest tests/ -v
+	pytest tests/ -v -m "not integration"
+
+# Real-Redis integration tests. Needs Redis at MCP_TEST_REDIS_URL
+# (default redis://localhost:6379/15); tests skip if it's unreachable.
+test-integration:
+	pytest tests/ -v -m integration
 
 test-fast:
-	pytest tests/ -x -q
+	pytest tests/ -x -q -m "not integration"
 
 lint:
 	flake8 device_mcp_gateway/ tests/

@@ -11,9 +11,38 @@ import time
 import threading
 import yaml
 import pytest
+import pytest_asyncio
 import httpx
 from fastapi import FastAPI, Request
 import uvicorn
+
+# Dedicated test DB so integration tests never touch app data (db 0).
+TEST_REDIS_URL = os.getenv("MCP_TEST_REDIS_URL", "redis://localhost:6379/15")
+
+
+@pytest_asyncio.fixture
+async def real_redis():
+    """Async Redis client against a real server, for `integration` tests.
+
+    Skips the test (rather than failing) when no Redis is reachable, so the
+    fakeredis unit suite still runs anywhere. Flushes the dedicated test DB
+    before and after each test for isolation.
+    """
+    import redis.asyncio as aioredis
+
+    client = aioredis.from_url(TEST_REDIS_URL, decode_responses=True)
+    try:
+        await client.ping()
+    except Exception:
+        await client.aclose()
+        pytest.skip(f"real Redis not reachable at {TEST_REDIS_URL}")
+    await client.flushdb()
+    try:
+        yield client
+    finally:
+        await client.flushdb()
+        await client.aclose()
+
 
 # --- Mock Target API ---
 mock_target_app = FastAPI(title="Mock IoT Sensor API", version="1.0.0")

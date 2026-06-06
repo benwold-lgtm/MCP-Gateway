@@ -48,5 +48,5 @@ def test_every_runtime_dependency_is_locked():
 
 def test_runtime_critical_packages_present():
     locked = _locked_names()
-    for pkg in ("redis", "slowapi", "pybreaker", "fastapi", "cryptography"):
+    for pkg in ("redis", "pybreaker", "fastapi", "cryptography"):
         assert pkg in locked, f"{pkg} missing from requirements.txt"
