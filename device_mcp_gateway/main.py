@@ -696,7 +696,7 @@ if __name__ == "__main__":
     import uvicorn
 
     _cfg = app.state.config
-    host = _cfg.get("server", {}).get("host", "0.0.0.0")
+    host = _cfg.get("server", {}).get("host", "0.0.0.0")  # nosec B104 — bind-all intended in containers
     port = _cfg.get("server", {}).get("port", 8000)
     logger.info(f"Starting uvicorn on {host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level=_cfg.get("logging", {}).get("level", "INFO").lower())

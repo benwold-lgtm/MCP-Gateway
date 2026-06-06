@@ -56,10 +56,6 @@ jobs:
 
   security:
     runs-on: ubuntu-latest
-    # Advisory: surfaces dependency CVEs and insecure patterns without blocking
-    # the build (new upstream CVEs shouldn't break unrelated PRs). Triage these
-    # to blocking once a baseline is established.
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
@@ -73,8 +69,12 @@ jobs:
       - name: Install scanners
         run: pip install pip-audit bandit
 
-      - name: Dependency vulnerability scan (pip-audit)
+      # Advisory: new upstream CVEs shouldn't block unrelated PRs.
+      - name: Dependency vulnerability scan (pip-audit, advisory)
+        continue-on-error: true
         run: pip-audit -r requirements.txt
 
+      # Blocking: bandit scans our own code, which we keep clean (intentional
+      # cases suppressed inline with justified # nosec).
       - name: Static security scan (bandit)
         run: bandit -r device_mcp_gateway -ll

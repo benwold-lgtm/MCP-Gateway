@@ -45,7 +45,7 @@ def main() -> None:
         from device_mcp_gateway.cfg import load_config
 
         cfg = load_config(args.config)
-        host = args.host or cfg.get("server", {}).get("host", "0.0.0.0")
+        host = args.host or cfg.get("server", {}).get("host", "0.0.0.0")  # nosec B104 — bind-all intended in containers
         port = args.port or cfg.get("server", {}).get("port", 8000)
         log_level = (args.log_level or cfg.get("logging", {}).get("level", "INFO")).lower()
 

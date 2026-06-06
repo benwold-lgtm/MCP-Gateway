@@ -54,7 +54,7 @@ def _defaults() -> dict:
             "allow_plaintext_credentials": False,
             "max_body_bytes": 1_048_576,
         },
-        "server": {"host": "0.0.0.0", "port": 8000},
+        "server": {"host": "0.0.0.0", "port": 8000},  # nosec B104 — bind-all is intended in containers
         "registry": {
             "mode": "embedded",
             "health_check_interval": 30,
