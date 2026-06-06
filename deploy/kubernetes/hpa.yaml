@@ -2,8 +2,10 @@
 #
 # Gateway and worker scale independently. Gateway scales on CPU (a proxy for
 # request/SSE load). Worker scales on CPU too by default; the ideal worker
-# signal is Redis Stream consumer lag on device:*:calls, which requires a custom
-# metrics adapter (e.g. prometheus-adapter / KEDA) — see the commented block.
+# signal is Redis Stream consumer lag on device:*:calls, now exported by the
+# worker as the `mcp_worker_pending_calls` gauge on the metrics port (:9100).
+# Wiring it to the HPA still requires a custom-metrics adapter
+# (prometheus-adapter / KEDA) — see the commented block.
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -51,13 +53,12 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
-    # Preferred: scale on Redis Stream lag (requires a custom-metrics adapter).
+    # Preferred: scale on Redis Stream lag (requires a custom-metrics adapter
+    # exposing the worker's mcp_worker_pending_calls gauge as an external metric).
     # - type: External
     #   external:
     #     metric:
-    #       name: redis_stream_lag
-    #       selector:
-    #         matchLabels: {stream: "device-calls"}
+    #       name: mcp_worker_pending_calls
     #     target:
     #       type: AverageValue
     #       averageValue: "100"

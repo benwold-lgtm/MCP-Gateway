@@ -1,7 +1,170 @@
 # MCP Gateway — Observability Guide
 
-This document covers the gateway's log format, the fields available for querying, and
-ready-to-use configuration snippets for Grafana Loki, Splunk, and Elasticsearch.
+This document covers the two observability pillars:
+
+1. **[Prometheus metrics](#prometheus-metrics)** — RED-style request/tool-call metrics
+   and fleet gauges, exposed on a dedicated metrics port.
+2. **Structured logs** — JSON audit/event logs and ready-to-use config for Grafana Loki,
+   Splunk, and Elasticsearch (starts at [Log Architecture](#log-architecture)).
+
+---
+
+## Prometheus Metrics
+
+### Exposition model
+
+Metrics are exposed in Prometheus text format on a **dedicated metrics port**
+(`metrics.port`, default `9100`) at `GET /metrics` — deliberately **not** on the API
+port (`8000`). This lets a `ServiceMonitor`/scrape config target a named `metrics` port
+and lets a NetworkPolicy restrict who can scrape it, without opening an unauthenticated
+hole in the API surface. The API port keeps a separate, **auth-protected** JSON summary
+at `GET /metrics/summary`.
+
+| Setting | Default | Override |
+|---------|---------|----------|
+| `metrics.enabled` | `true` | `MCP_METRICS_ENABLED=0` to disable |
+| `metrics.port` | `9100` | `MCP_METRICS_PORT` |
+| `metrics.gauge_refresh_interval` | `15` (s) | config only |
+
+Both the **gateway** and each **worker** expose the same port (workers have no API
+server, so this is their only HTTP surface). Run **one process per pod** and scale via
+replicas — Prometheus aggregates across pods by the `instance` label, so the default
+process-global registry needs no multiprocess mode.
+
+### Metric reference
+
+| Metric | Type | Labels | Emitted by | Description |
+|--------|------|--------|------------|-------------|
+| `mcp_http_requests_total` | counter | `method`, `route`, `status` | gateway | HTTP requests, labelled with the **route template** (`/devices/{hostname}`), never the concrete path. Unmatched paths collapse to `route="__unmatched__"`. |
+| `mcp_http_request_duration_seconds` | histogram | `method`, `route` | gateway | HTTP request latency. |
+| `mcp_tool_calls_total` | counter | `hostname`, `method`, `status` | gateway (embedded) + worker (distributed) | MCP tool calls executed. `status` ∈ `ok`/`error`/`noresult` (`noresult` = a notification with no JSON-RPC response). |
+| `mcp_tool_call_duration_seconds` | histogram | `hostname` | gateway (embedded) + worker | Tool-call execution latency. |
+| `mcp_registered_devices` | gauge | — | gateway | Devices in the registry. |
+| `mcp_active_pods` | gauge | — | gateway | Devices with an active pod (fleet-wide, from the registry). |
+| `mcp_reachable_devices` | gauge | — | gateway | Devices currently reachable. |
+| `mcp_active_sse_connections` | gauge | — | gateway | Open SSE connections **on this replica** (sum across replicas for the total). |
+| `mcp_worker_pods` | gauge | — | worker | DevicePods running on this worker. |
+| `mcp_worker_pending_calls` | gauge | — | worker | Delivered-but-unacked tool calls across this worker's device streams — the **Redis-stream-lag** signal for the worker HPA. |
+| `mcp_worker_assignments_lag` | gauge | — | worker | Pending entries in this worker's assignments consumer group. |
+
+The standard `prometheus_client` process/runtime collectors (`process_*`,
+`python_gc_*`) are also exported.
+
+> **Cardinality:** HTTP metrics use the route **template**, and tool-call metrics use
+> `hostname` (bounded by your device count). Avoid adding unbounded labels (raw paths,
+> request IDs, session IDs) — they will blow up Prometheus.
+
+### Scrape configuration
+
+The gateway and worker Deployments already carry pod annotations
+(`prometheus.io/scrape: "true"`, `prometheus.io/port: "9100"`, `prometheus.io/path: /metrics`).
+
+**Plain Prometheus** (`kubernetes_sd` pod role + annotation relabel):
+
+```yaml
+scrape_configs:
+  - job_name: mcp-gateway-pods
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [mcp-gateway]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: app
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: instance
+```
+
+**Prometheus Operator** (`ServiceMonitor`, targeting the named `metrics` port on the
+gateway Service and the headless `device-mcp-worker-metrics` Service):
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: device-mcp-gateway
+  namespace: mcp-gateway
+  labels:
+    release: prometheus   # match your Prometheus Operator's serviceMonitorSelector
+spec:
+  namespaceSelector:
+    matchNames: [mcp-gateway]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: device-mcp-gateway   # gateway Service
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: device-mcp-worker
+  namespace: mcp-gateway
+  labels:
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames: [mcp-gateway]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: device-mcp-worker     # device-mcp-worker-metrics Service
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+```
+
+### Grafana starter queries (PromQL)
+
+```promql
+# Request rate by route
+sum by (route) (rate(mcp_http_requests_total[5m]))
+
+# Error ratio (5xx) across the gateway
+sum(rate(mcp_http_requests_total{status=~"5.."}[5m]))
+  / sum(rate(mcp_http_requests_total[5m]))
+
+# p95 HTTP latency by route
+histogram_quantile(0.95, sum by (le, route) (rate(mcp_http_request_duration_seconds_bucket[5m])))
+
+# Tool-call throughput and error rate by device
+sum by (hostname) (rate(mcp_tool_calls_total[5m]))
+sum by (hostname) (rate(mcp_tool_calls_total{status="error"}[5m]))
+
+# p95 tool-call latency by device
+histogram_quantile(0.95, sum by (le, hostname) (rate(mcp_tool_call_duration_seconds_bucket[5m])))
+
+# Fleet health
+mcp_registered_devices
+mcp_reachable_devices
+sum(mcp_active_sse_connections)            # total open SSE streams across replicas
+
+# Worker backlog (HPA signal) — average pending calls per worker
+avg(mcp_worker_pending_calls)
+```
+
+### Worker autoscaling on Redis-stream lag
+
+`mcp_worker_pending_calls` is the intended worker HPA signal. Kubernetes can't read a
+Prometheus gauge directly — bridge it with **prometheus-adapter** (exposes it as an
+External/Object metric) or **KEDA** (`prometheus` scaler). The
+`device-mcp-worker` HPA in [`deploy/kubernetes/hpa.yaml`](../deploy/kubernetes/hpa.yaml)
+ships with the External-metric block commented out; uncomment it once the adapter is
+installed.
 
 ---
 

@@ -17,6 +17,12 @@ spec:
     - ports:
         - port: 8000
           protocol: TCP
+    # Prometheus scrape of the dedicated metrics port. Scope this with a
+    # namespaceSelector for your monitoring namespace in production rather than
+    # leaving it open to the whole cluster.
+    - ports:
+        - port: 9100
+          protocol: TCP
 
   egress:
     - ports:
@@ -54,7 +60,12 @@ spec:
     - Ingress
     - Egress
 
-  ingress: []  # Workers accept no inbound connections
+  # Workers accept no API traffic — only Prometheus scraping of the metrics port.
+  # Scope this with a namespaceSelector for your monitoring namespace in production.
+  ingress:
+    - ports:
+        - port: 9100
+          protocol: TCP
 
   egress:
     - ports:

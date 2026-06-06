@@ -133,6 +133,10 @@ def test_config(tmp_path_factory):
     }
     config_path.write_text(yaml.safe_dump(config_data))
     os.environ["MCP_CONFIG"] = str(config_path)
+    # Don't bind the real metrics port across the test session; metrics content is
+    # asserted directly via generate_latest, and the server start is tested in
+    # isolation on an ephemeral port.
+    os.environ.setdefault("MCP_METRICS_ENABLED", "0")
     yield
 
 

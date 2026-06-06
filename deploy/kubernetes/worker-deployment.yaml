@@ -16,6 +16,12 @@ spec:
     metadata:
       labels:
         app: device-mcp-worker
+      annotations:
+        # Workers expose Prometheus on the dedicated metrics port (the worker
+        # HPA's redis-stream-lag signal — mcp_worker_pending_calls — lives here).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
     spec:
       # 120s matches the gateway. Workers make outbound tool calls (15s httpx timeout)
       # and need time to finish in-flight calls, drain the Redis Stream consumer, and
@@ -30,6 +36,10 @@ spec:
           # Pin to an immutable digest or semantic tag in production — never ship :latest
           image: device-mcp-gateway:latest
           command: ["device-mcp-worker"]
+          ports:
+            - name: metrics
+              containerPort: 9100
+              protocol: TCP
           lifecycle:
             preStop:
               exec:

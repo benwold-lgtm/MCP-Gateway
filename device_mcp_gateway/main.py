@@ -37,6 +37,7 @@ from device_mcp_gateway.cfg import load_config, resolve_mode
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
+from device_mcp_gateway import metrics
 from device_mcp_gateway.logging_setup import setup_logging
 from device_mcp_gateway.ratelimit import (
     InMemoryRateLimiter,
@@ -132,6 +133,27 @@ async def _watch_tool_call_timeout(redis, session_router, session_id, request_id
         pass
     except Exception:
         logger.warning(f"tool-call timeout watcher failed for request {request_id}")
+
+
+async def _refresh_device_gauges(app: FastAPI, interval: float) -> None:
+    """Periodically refresh device-fleet gauges from the registry.
+
+    Prometheus collection is synchronous, but ``list_devices()`` is async, so we
+    cannot compute these inside a collector — we poll on a timer instead.
+    """
+    while True:
+        try:
+            reg = app.state.registry
+            if reg is not None:
+                devices = await reg.list_devices()
+                metrics.registered_devices.set(len(devices))
+                metrics.active_pods.set(sum(1 for d in devices if d.pod_active))
+                metrics.reachable_devices.set(sum(1 for d in devices if d.reachable))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("device gauge refresh failed")
+        await asyncio.sleep(interval)
 
 
 def create_app(override_config: dict | None = None) -> FastAPI:
@@ -298,9 +320,20 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             await registry.load_persisted_devices()
             health_task = asyncio.create_task(registry.start_health_loop())
 
+        # --- Metrics (dedicated port + gauge refresher) ---
+        gauge_task = None
+        if metrics.metrics_enabled(cfg):
+            metrics.start_metrics_server(metrics.metrics_port(cfg))
+            _refresh = cfg.get("metrics", {}).get("gauge_refresh_interval", 15)
+            gauge_task = asyncio.create_task(_refresh_device_gauges(app, _refresh))
+
         try:
             yield
         finally:
+            if gauge_task is not None:
+                gauge_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await gauge_task
             if _mode == "embedded":
                 health_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -338,6 +371,11 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         logger.info(
             f"{request.method} {request.url.path} -> {response.status_code} " f"({elapsed:.1f}ms) rid={request_id}"
         )
+        # Prometheus: label with the route *template* (low cardinality), set after
+        # routing has populated scope["endpoint"].
+        route = metrics.route_template(request)
+        metrics.http_requests_total.labels(method=request.method, route=route, status=str(response.status_code)).inc()
+        metrics.http_request_duration_seconds.labels(method=request.method, route=route).observe(elapsed / 1000.0)
         response.headers["X-Request-Id"] = request_id
         return response
 
@@ -554,14 +592,18 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             await session_router.register(effective_id, hostname, _GATEWAY_ID)
 
             async def event_generator():
-                yield {"event": "endpoint", "data": endpoint_url}
+                metrics.active_sse_connections.inc()
                 try:
-                    async for result in session_router.subscribe(effective_id):
-                        yield {"event": "message", "data": json.dumps(result)}
-                except asyncio.CancelledError:
-                    pass
+                    yield {"event": "endpoint", "data": endpoint_url}
+                    try:
+                        async for result in session_router.subscribe(effective_id):
+                            yield {"event": "message", "data": json.dumps(result)}
+                    except asyncio.CancelledError:
+                        pass
+                    finally:
+                        await session_router.delete(effective_id)
                 finally:
-                    await session_router.delete(effective_id)
+                    metrics.active_sse_connections.dec()
 
             return EventSourceResponse(event_generator())
         else:
@@ -576,7 +618,16 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             endpoint_url = f"/devices/{hostname}/messages?session_id={effective_id}"
             transport = profile.pod._ensure_sse_transport()
             transport.register_client(effective_id, endpoint_url)
-            return EventSourceResponse(transport.event_stream(effective_id))
+
+            async def _counted_stream():
+                metrics.active_sse_connections.inc()
+                try:
+                    async for ev in transport.event_stream(effective_id):
+                        yield ev
+                finally:
+                    metrics.active_sse_connections.dec()
+
+            return EventSourceResponse(_counted_stream())
 
     @protected.post("/devices/{hostname}/messages", dependencies=[Depends(rate_limit("600/minute", "messages"))])
     async def device_sse_message(
@@ -648,6 +699,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             response = await sse_transport.handle_message(effective_id, payload)
             _dur = (time.perf_counter() - _t) * 1000
             _status = "ok" if response and "result" in response else "error"
+            _method = payload.get("method", "?") if isinstance(payload, dict) else "?"
+            metrics.tool_calls_total.labels(hostname=hostname, method=_method, status=_status).inc()
+            metrics.tool_call_duration_seconds.labels(hostname=hostname).observe(_dur / 1000.0)
             logger.bind(
                 event="audit",
                 hostname=hostname,
@@ -665,8 +719,11 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         await reg.deregister_device(hostname)
         return {"status": "removed", "hostname": hostname}
 
-    @protected.get("/metrics")
-    async def get_metrics(request: Request):
+    @protected.get("/metrics/summary")
+    async def get_metrics_summary(request: Request):
+        # Human-readable JSON snapshot on the API port (auth-protected; F15 will
+        # scope-gate this to metrics:read). Prometheus exposition is served
+        # separately on the dedicated metrics port — see metrics.start_metrics_server.
         reg: Registry = request.app.state.registry
         mode = request.app.state.mode
         devices = await reg.list_devices()

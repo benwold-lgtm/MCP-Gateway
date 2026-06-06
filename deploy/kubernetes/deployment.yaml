@@ -17,6 +17,11 @@ spec:
     metadata:
       labels:
         app: device-mcp-gateway
+      annotations:
+        # Prometheus scrapes the dedicated metrics port, not the API port (8000).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
     spec:
       # Give SSE streams time to drain before the pod is forcibly killed.
       # Adjust upward if clients hold very long-lived connections.
@@ -33,6 +38,9 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+              protocol: TCP
+            - name: metrics
+              containerPort: 9100
               protocol: TCP
           env:
             - name: MCP_CONFIG

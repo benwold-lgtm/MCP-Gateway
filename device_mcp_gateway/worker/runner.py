@@ -28,6 +28,7 @@ from typing import Any
 
 from loguru import logger
 
+from device_mcp_gateway import metrics
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.shared.crypto import CredentialCodec
@@ -133,6 +134,7 @@ class DeviceWorker:
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
             asyncio.create_task(self._consume_assignments(), name="assignments"),
             asyncio.create_task(self._health.run_forever(self._assigned), name="health"),  # type: ignore[union-attr]
+            asyncio.create_task(self._metrics_loop(), name="metrics"),
         ]
         try:
             await self._stop_event.wait()
@@ -161,6 +163,52 @@ class DeviceWorker:
             await self._r.set(key, str(time.time()), ex=ttl)
             await self._refresh_claims()  # keep device-claim leases alive (RC-6)
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
+
+    # ------------------------------------------------------------------
+    # Metrics
+    # ------------------------------------------------------------------
+
+    async def _metrics_loop(self) -> None:
+        """Refresh worker gauges on a timer (pod count + Redis Stream lag).
+
+        Prometheus exposition itself is served by a background HTTP server started
+        in worker_main; this loop only keeps the gauge values current.
+        """
+        interval = self._config.get("metrics", {}).get("gauge_refresh_interval", 15)
+        while not self._stop_event.is_set():
+            try:
+                await self._refresh_worker_metrics()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("worker metrics refresh failed")
+            await asyncio.sleep(interval)
+
+    async def _refresh_worker_metrics(self) -> None:
+        metrics.worker_pods.set(len(self._pods))
+        pending = 0
+        for hostname in list(self._assigned):
+            pending += await self._stream_pending(f"device:{hostname}:calls", f"workers-{hostname}")
+        metrics.worker_pending_calls.set(pending)
+        metrics.worker_assignments_lag.set(await self._stream_pending(_ASSIGNMENTS_STREAM, _WORKER_GROUP))
+
+    async def _stream_pending(self, stream: str, group: str) -> int:
+        """Count delivered-but-unacked entries for a consumer group (XPENDING summary).
+
+        Returns 0 on any error (missing stream/group, server differences) so a
+        metrics hiccup never disrupts the worker loop.
+        """
+        try:
+            info = await self._r.xpending(stream, group)
+        except Exception:
+            return 0
+        if isinstance(info, dict):
+            return int(info.get("pending", 0) or 0)
+        # Some clients return a [count, min, max, consumers] summary list.
+        try:
+            return int(info[0]) if info else 0
+        except (TypeError, IndexError, ValueError):
+            return 0
 
     # ------------------------------------------------------------------
     # Assignment consumer
@@ -239,7 +287,20 @@ class DeviceWorker:
             if pod is None:
                 logger.warning(f"No pod for {hostname}, discarding call {msg_id}")
                 return
+            _method = message.get("method", "?") if isinstance(message, dict) else "?"
+            _t = time.perf_counter()
             result = await pod.call_tool(message)
+            _dur = time.perf_counter() - _t
+            # Distributed-mode tool calls execute here on the worker; record where
+            # the work actually happens (the gateway only enqueues).
+            if result is None:
+                _status = "noresult"  # notification — no JSON-RPC response expected
+            elif isinstance(result, dict) and "error" in result:
+                _status = "error"
+            else:
+                _status = "ok"
+            metrics.tool_calls_total.labels(hostname=hostname, method=_method, status=_status).inc()
+            metrics.tool_call_duration_seconds.labels(hostname=hostname).observe(_dur)
             if result is not None:
                 await self._r.publish(f"session:{session_id}:results", json.dumps(result))
             # Mark the call as handled so the gateway's timeout watcher (F6)

@@ -106,7 +106,7 @@ def test_register_with_rate_limit_rps():
     )
     assert response.status_code == 200
 
-    metrics = client.get("/metrics").json()
+    metrics = client.get("/metrics/summary").json()
     assert "rate-test" in metrics.get("device_rate_limits", {})
     assert metrics["device_rate_limits"]["rate-test"]["rate_limit_rps"] == 5.0
 

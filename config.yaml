@@ -113,6 +113,17 @@ cors:
   # Example: ["https://my-llm-app.example.com", "https://app.anthropic.com"]
   allowed_origins: []
 
+metrics:
+  # Prometheus exposition is served on a DEDICATED port, separate from the API
+  # port — point a ServiceMonitor / scrape config at this port (named "metrics"),
+  # and restrict it with a NetworkPolicy rather than exposing it via the API LB.
+  # Run one process per pod (scale via replicas); no multiprocess mode required.
+  enabled: true
+  # Metrics port (env MCP_METRICS_PORT overrides). Workers reuse the same key.
+  port: 9100
+  # Seconds between device-fleet gauge refreshes (registered/active/reachable).
+  gauge_refresh_interval: 15
+
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR
   level: "INFO"

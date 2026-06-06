@@ -4,7 +4,7 @@
 """Tests for bulk device fetch (S2 finding F5).
 
 list_devices() did list_hostnames() then one get_device() per host — N+1 round
-trips on the /health, /metrics, and /devices hot paths. The Redis backend now
+trips on the /health, /metrics/summary, and /devices hot paths. The Redis backend now
 fetches all configs in a single pipeline.
 """
 

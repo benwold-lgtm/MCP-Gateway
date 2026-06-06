@@ -164,7 +164,9 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /dev
 | `GET` | `/devices/{hostname}/tools` | List a device's MCP tools |
 | `GET` | `/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
 | `POST` | `/devices/{hostname}/messages` | Send a JSON-RPC 2.0 message via SSE |
-| `GET` | `/metrics` | Reachability counts and per-device rate-limit state |
+| `GET` | `/metrics/summary` | Reachability counts and per-device rate-limit state (JSON, auth-protected) |
+
+Prometheus metrics are exposed separately on a **dedicated metrics port** (`metrics.port`, default `9100`) at `GET /metrics`, not on the API port — point a `ServiceMonitor`/scrape config at that port and restrict it with a NetworkPolicy. Set `metrics.enabled: false` (or `MCP_METRICS_ENABLED=0`) to disable.
 
 ### Register / update device payload
 
@@ -408,6 +410,22 @@ See [`docs/kubernetes-architecture.md`](docs/kubernetes-architecture.md) for the
 ---
 
 ## Observability
+
+### Prometheus metrics
+
+The gateway and each worker export Prometheus metrics on a **dedicated metrics port**
+(`metrics.port`, default `9100`) at `GET /metrics` — RED-style HTTP and tool-call
+metrics (route-template-labelled to stay low-cardinality), fleet gauges
+(`mcp_registered_devices`, `mcp_active_pods`, `mcp_active_sse_connections`), and the
+worker autoscaling signal `mcp_worker_pending_calls`. The gateway Deployments carry
+`prometheus.io/scrape` annotations; a `ServiceMonitor` example, full metric reference,
+scrape config, and Grafana starter queries are in
+[docs/observability.md](docs/observability.md#prometheus-metrics).
+
+```bash
+# Scrape locally (one process):
+curl -s localhost:9100/metrics | grep '^mcp_'
+```
 
 ### Log format
 

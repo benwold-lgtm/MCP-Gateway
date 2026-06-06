@@ -14,3 +14,27 @@ spec:
       protocol: TCP
       port: 8000
       targetPort: 8000
+    - name: metrics
+      protocol: TCP
+      port: 9100
+      targetPort: metrics
+---
+# Headless Service for the workers — they take no API traffic, but a Service with
+# a named metrics port lets a ServiceMonitor / Prometheus discover and scrape them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: device-mcp-worker-metrics
+  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-worker
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: device-mcp-worker
+  ports:
+    - name: metrics
+      protocol: TCP
+      port: 9100
+      targetPort: metrics

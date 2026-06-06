@@ -40,7 +40,7 @@ def test_register_and_metrics(client, mock_target_url):
     print(f"[+] Device status verified: {mock_dev}")
 
     # 3. Verify metrics endpoint returns correct counts
-    met_resp = client.get("/metrics")
+    met_resp = client.get("/metrics/summary")
     assert met_resp.status_code == 200
     metrics = met_resp.json()
     assert metrics.get("total_registered", 0) >= 1, f"Total registered mismatch: {metrics}"

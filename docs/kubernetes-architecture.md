@@ -20,7 +20,7 @@ flowchart TB
             SVC["Service: device-mcp-gateway\ntype: ClusterIP  ·  port: 8000"]
 
             subgraph GW_DEP["Deployment: device-mcp-gateway  (stateless — scale freely)"]
-                CTRL["FastAPI Control Plane  :8000\n─────────────────────────────────────\nPOST  /devices          register device\nGET   /devices/{n}/sse  open MCP stream\nPOST  /devices/{n}/messages  invoke tool\nGET   /health  ·  GET  /readyz  ·  GET  /metrics\nRate limiting (slowapi)  ·  CORS  ·  X-Request-Id"]
+                CTRL["FastAPI Control Plane  :8000\n─────────────────────────────────────\nPOST  /devices          register device\nGET   /devices/{n}/sse  open MCP stream\nPOST  /devices/{n}/messages  invoke tool\nGET   /health  ·  GET  /readyz  ·  GET  /metrics/summary\nProm /metrics on :9100 (dedicated port)\nRate limiting  ·  CORS  ·  X-Request-Id"]
             end
 
             PDB_GW["PodDisruptionBudget\ndevice-mcp-gateway-pdb\nminAvailable: 1"]

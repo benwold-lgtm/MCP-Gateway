@@ -73,5 +73,6 @@ def _defaults() -> dict:
         "transport": {"default": "sse"},
         "storage": {"db_path": "./data/devices.db"},
         "cors": {"allowed_origins": []},
+        "metrics": {"enabled": True, "port": 9100, "gauge_refresh_interval": 15},
         "logging": {"level": "INFO"},
     }

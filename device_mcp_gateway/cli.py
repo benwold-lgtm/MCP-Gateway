@@ -87,6 +87,7 @@ def worker_main() -> None:
     os.environ["MCP_CONFIG"] = args.config
 
     try:
+        from device_mcp_gateway import metrics
         from device_mcp_gateway.cfg import load_config, resolve_mode
         from device_mcp_gateway.shared.crypto import CredentialCodec
         from device_mcp_gateway.shared.redis_client import create_redis
@@ -131,6 +132,12 @@ def worker_main() -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+
+        # Workers have no API server, so expose Prometheus on the dedicated metrics
+        # port here (same pattern as the gateway). This also unlocks the
+        # redis-stream-lag signal the worker HPA wants.
+        if metrics.metrics_enabled(cfg):
+            metrics.start_metrics_server(metrics.metrics_port(cfg))
 
         async def _run() -> None:
             redis_client = await create_redis(cfg)

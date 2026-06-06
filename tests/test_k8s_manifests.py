@@ -42,3 +42,45 @@ def test_hpa_targets_both_deployments():
 def test_hpa_is_registered_in_kustomization():
     kustomization = yaml.safe_load((_K8S / "kustomization.yaml").read_text())
     assert "hpa.yaml" in kustomization["resources"]
+
+
+# --- F10 slice 2: metrics scrape config --------------------------------------
+
+
+def _deployment(path: Path) -> dict:
+    return next(d for d in _load_all(path) if d["kind"] == "Deployment")
+
+
+def _pod_template(dep: dict) -> dict:
+    return dep["spec"]["template"]
+
+
+def _container(dep: dict) -> dict:
+    return _pod_template(dep)["spec"]["containers"][0]
+
+
+def test_deployments_have_prometheus_scrape_annotations():
+    for fname in ("deployment.yaml", "worker-deployment.yaml"):
+        tmpl = _pod_template(_deployment(_K8S / fname))
+        annotations = tmpl["metadata"].get("annotations", {})
+        assert annotations.get("prometheus.io/scrape") == "true", fname
+        assert annotations.get("prometheus.io/port") == "9100", fname
+
+
+def test_containers_expose_named_metrics_port():
+    for fname in ("deployment.yaml", "worker-deployment.yaml"):
+        ports = _container(_deployment(_K8S / fname)).get("ports", [])
+        metrics_ports = [p for p in ports if p.get("name") == "metrics"]
+        assert metrics_ports and metrics_ports[0]["containerPort"] == 9100, fname
+
+
+def test_worker_metrics_service_exists():
+    services = [d for d in _load_all(_K8S / "service.yaml") if d["kind"] == "Service"]
+    by_name = {s["metadata"]["name"]: s for s in services}
+    worker_svc = by_name.get("device-mcp-worker-metrics")
+    assert worker_svc is not None, "worker metrics Service missing"
+    assert worker_svc["spec"]["selector"] == {"app": "device-mcp-worker"}
+    assert any(p["name"] == "metrics" and p["port"] == 9100 for p in worker_svc["spec"]["ports"])
+    # Gateway Service also exposes the metrics port.
+    gw_ports = by_name["device-mcp-gateway"]["spec"]["ports"]
+    assert any(p["name"] == "metrics" and p["port"] == 9100 for p in gw_ports)
