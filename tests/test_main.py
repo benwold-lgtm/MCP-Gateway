@@ -4,9 +4,17 @@
 import pytest
 
 import device_mcp_gateway.main as gw_main
+from device_mcp_gateway.rbac import ALL_SCOPES, Authenticator, Principal
 from fastapi.testclient import TestClient
 
 client = TestClient(gw_main.app)
+
+
+def _enable_admin_auth(monkeypatch, token="test-secret"):
+    """Swap in an enabled Authenticator with a single admin key (built directly so
+    ambient MCP_* env vars can't interfere)."""
+    admin = Principal(subject="key:test", scopes=ALL_SCOPES, auth_method="api_key")
+    monkeypatch.setattr(gw_main.app.state, "authenticator", Authenticator({token: admin}, enabled=True))
 
 
 def test_app_state_config_is_set():
@@ -32,31 +40,31 @@ def test_health_check():
 
 
 def test_health_does_not_require_auth(monkeypatch):
-    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "test-secret")
+    _enable_admin_auth(monkeypatch)
     response = client.get("/health")
     assert response.status_code == 200
 
 
 def test_auth_rejects_missing_token(monkeypatch):
-    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "test-secret")
+    _enable_admin_auth(monkeypatch)
     response = client.get("/devices")
     assert response.status_code == 401
 
 
 def test_auth_rejects_wrong_token(monkeypatch):
-    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "test-secret")
+    _enable_admin_auth(monkeypatch)
     response = client.get("/devices", headers={"Authorization": "Bearer wrong-token"})
     assert response.status_code == 401
 
 
 def test_auth_accepts_correct_token(monkeypatch):
-    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "test-secret")
+    _enable_admin_auth(monkeypatch)
     response = client.get("/devices", headers={"Authorization": "Bearer test-secret"})
     assert response.status_code == 200
 
 
 def test_auth_disabled_when_key_not_set(monkeypatch):
-    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "")
+    monkeypatch.setattr(gw_main.app.state, "authenticator", Authenticator({}, enabled=False))
     response = client.get("/devices")
     assert response.status_code == 200
 

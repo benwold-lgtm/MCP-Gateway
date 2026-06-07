@@ -148,7 +148,16 @@ The response arrives as a `message` event on the open SSE stream, not in the HTT
 
 ## API Reference
 
-All endpoints except `/health` and `/readyz` require `Authorization: Bearer <api-key>` when `gateway.api_key` is set.
+All endpoints except `/health` and `/readyz` require `Authorization: Bearer <api-key>` when any API key is configured.
+
+**Roles & scopes (RBAC).** Keys map to roles, and routes authorize on scopes:
+
+| Role | Scopes | Can |
+|------|--------|-----|
+| `admin` | `devices:read`, `devices:write`, `tools:call`, `metrics:read` | everything |
+| `viewer` | `devices:read`, `metrics:read` | read device state + `/metrics/summary`; **no** mutations or tool calls (403) |
+
+Configure keys via `gateway.api_key` (legacy single key = `admin`), `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY`, or a `gateway.rbac` list of `{name, key, role}` (see [config.yaml](config.yaml)). If no key is set anywhere, auth is disabled (all requests permitted). The authenticated principal is recorded as `subject` in audit logs. The seam (`authenticate()` → `Principal{subject, scopes}`) is built to swap to JWT/OIDC later without touching routes.
 
 Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /devices` — 60 req/min; `POST /messages` — 600 req/min. Returns 429 on excess.
 
@@ -456,7 +465,7 @@ Every tool dispatch emits a structured `audit` event with these fields:
 |-------|-------------|
 | `record.extra.event` | Always `"audit"` — use this to filter audit records |
 | `record.extra.hostname` | Registered device name |
-| `record.extra.caller` | Truncated bearer token prefix identifying the API caller |
+| `record.extra.subject` | Authenticated principal — `key:<name>`, or `anonymous` when auth is disabled |
 | `record.extra.method` | MCP JSON-RPC method (`"tools/call"`, `"tools/list"`, …) |
 | `record.extra.status` | `"ok"`, `"error"`, or `"dispatched"` (distributed mode) |
 | `record.extra.duration_ms` | Round-trip time in ms (embedded mode only) |

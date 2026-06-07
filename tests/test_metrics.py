@@ -101,7 +101,10 @@ def test_old_metrics_path_is_gone():
 
 
 def test_metrics_summary_requires_auth(monkeypatch):
-    monkeypatch.setattr(gw_main.app.state, "gateway_api_key", "secret-key")
+    from device_mcp_gateway.rbac import ALL_SCOPES, Authenticator, Principal
+
+    admin = Principal(subject="key:test", scopes=ALL_SCOPES, auth_method="api_key")
+    monkeypatch.setattr(gw_main.app.state, "authenticator", Authenticator({"secret-key": admin}, enabled=True))
     assert client.get("/metrics/summary").status_code == 401
     resp = client.get("/metrics/summary", headers={"Authorization": "Bearer secret-key"})
     assert resp.status_code == 200

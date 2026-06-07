@@ -16,19 +16,16 @@ registry.mode = "distributed":
 """
 
 import asyncio
-import hmac
 import json
 import os
 import re
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
-from typing import Optional
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Security
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 from sse_starlette import EventSourceResponse
 
@@ -45,6 +42,15 @@ from device_mcp_gateway.ratelimit import (
     client_ip_key_func,
     rate_limit,
 )
+from device_mcp_gateway.rbac import (
+    SCOPE_DEVICES_READ,
+    SCOPE_DEVICES_WRITE,
+    SCOPE_METRICS_READ,
+    SCOPE_TOOLS_CALL,
+    authenticate_request,
+    build_authenticator,
+    require_scope,
+)
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
@@ -52,28 +58,8 @@ from device_mcp_gateway.shared.registry_backend import (
     RedisRegistryBackend,
 )
 
-_http_bearer = HTTPBearer(auto_error=False)
-
 # Gateway instance ID — used to tag SSE sessions in distributed mode.
 _GATEWAY_ID = os.getenv("GATEWAY_ID", str(uuid.uuid4()))
-
-
-async def require_auth(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(_http_bearer),
-) -> None:
-    key = request.app.state.gateway_api_key
-    if not key:
-        request.state.auth_caller = "unauthenticated"
-        return
-    if credentials is None or not hmac.compare_digest(credentials.credentials, key):
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    # Store a non-secret fingerprint for audit logs (first 8 chars of the token).
-    request.state.auth_caller = f"bearer:{credentials.credentials[:8]}..."
 
 
 def _parse_rate_limit(data: dict) -> float | None:
@@ -171,7 +157,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     )
 
     _gateway_cfg = cfg.get("gateway", {})
-    gateway_api_key: str = os.getenv("MCP_GATEWAY_API_KEY") or _gateway_cfg.get("api_key") or ""
+    _authenticator = build_authenticator(cfg)
 
     try:
         _codec = CredentialCodec.from_config(cfg)
@@ -237,7 +223,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     _app = FastAPI(title="Device MCP Gateway", version=__version__)
     _app.state.config = cfg
-    _app.state.gateway_api_key = gateway_api_key
+    _app.state.authenticator = _authenticator
     _app.state.mode = _mode
     _app.state.redis = None
     _app.state.pubsub_redis = None
@@ -424,9 +410,14 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     # --- Protected routes ---
 
-    protected = APIRouter(dependencies=[Depends(require_auth)])
+    # Router-level: authenticate every protected request to a Principal. Each route
+    # then authorizes on a specific scope via require_scope(...).
+    protected = APIRouter(dependencies=[Depends(authenticate_request)])
 
-    @protected.post("/devices", dependencies=[Depends(rate_limit("60/minute", "devices_post"))])
+    @protected.post(
+        "/devices",
+        dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE)), Depends(rate_limit("60/minute", "devices_post"))],
+    )
     async def register_device(request: Request):
         data = await request.json()
         reg: Registry = request.app.state.registry
@@ -464,7 +455,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "spawn_error": device_cfg.spawn_error,
         }
 
-    @protected.put("/devices/{hostname}")
+    @protected.put("/devices/{hostname}", dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))])
     async def update_device(hostname: str, request: Request):
         reg: Registry = request.app.state.registry
         existing = await reg.get_device(hostname)
@@ -504,7 +495,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "spawn_error": device_cfg.spawn_error,
         }
 
-    @protected.get("/devices")
+    @protected.get("/devices", dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))])
     async def list_devices(request: Request):
         reg: Registry = request.app.state.registry
         devices = await reg.list_devices()
@@ -523,7 +514,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             ]
         }
 
-    @protected.get("/devices/{hostname}")
+    @protected.get("/devices/{hostname}", dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))])
     async def get_device(hostname: str, request: Request):
         reg: Registry = request.app.state.registry
         device = await reg.get_device(hostname)
@@ -541,7 +532,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "spawn_error": device.spawn_error,
         }
 
-    @protected.get("/devices/{hostname}/tools")
+    @protected.get("/devices/{hostname}/tools", dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))])
     async def get_device_tools(hostname: str, request: Request):
         reg: Registry = request.app.state.registry
         device = await reg.get_device(hostname)
@@ -568,7 +559,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     # --- SSE endpoints (mode-aware) ---
 
-    @protected.get("/devices/{hostname}/sse")
+    @protected.get("/devices/{hostname}/sse", dependencies=[Depends(require_scope(SCOPE_TOOLS_CALL))])
     async def device_sse_stream(
         request: Request,
         hostname: str,
@@ -629,7 +620,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
             return EventSourceResponse(_counted_stream())
 
-    @protected.post("/devices/{hostname}/messages", dependencies=[Depends(rate_limit("600/minute", "messages"))])
+    @protected.post(
+        "/devices/{hostname}/messages",
+        dependencies=[Depends(require_scope(SCOPE_TOOLS_CALL)), Depends(rate_limit("600/minute", "messages"))],
+    )
     async def device_sse_message(
         hostname: str,
         request: Request,
@@ -650,7 +644,8 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="session_id is required")
 
         payload = await request.json()
-        _caller = getattr(request.state, "auth_caller", "unknown")
+        _principal = getattr(request.state, "principal", None)
+        _subject = _principal.subject if _principal else "unknown"
         _rid = getattr(request.state, "request_id", "-")
 
         if mode == "distributed":
@@ -682,7 +677,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             logger.bind(
                 event="audit",
                 hostname=hostname,
-                caller=_caller,
+                subject=_subject,
                 method=payload.get("method", "?"),
                 status="dispatched",
                 rid=_rid,
@@ -705,7 +700,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             logger.bind(
                 event="audit",
                 hostname=hostname,
-                caller=_caller,
+                subject=_subject,
                 method=payload.get("method", "?"),
                 status=_status,
                 duration_ms=round(_dur, 1),
@@ -713,13 +708,13 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             ).info("tool dispatch")
             return response
 
-    @protected.delete("/devices/{hostname}")
+    @protected.delete("/devices/{hostname}", dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))])
     async def unregister_device(hostname: str, request: Request):
         reg: Registry = request.app.state.registry
         await reg.deregister_device(hostname)
         return {"status": "removed", "hostname": hostname}
 
-    @protected.get("/metrics/summary")
+    @protected.get("/metrics/summary", dependencies=[Depends(require_scope(SCOPE_METRICS_READ))])
     async def get_metrics_summary(request: Request):
         # Human-readable JSON snapshot on the API port (auth-protected; F15 will
         # scope-gate this to metrics:read). Prometheus exposition is served

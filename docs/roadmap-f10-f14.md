@@ -52,7 +52,7 @@ Sliced for incremental delivery:
    model, full metric reference, plain-Prometheus + ServiceMonitor scrape config, Grafana
    PromQL starters, prometheus-adapter/KEDA note) + README metrics section.
 
-**F10 complete.** Next: **F15** (Principal/scopes auth seam).
+**F10 complete. F15 complete.** Next: **F14** (scaffold the `device-mcp-gateway-ui` repo).
 
 **Deps:** add `prometheus-client`; regenerate `requirements.txt`.
 
@@ -86,7 +86,14 @@ returns the JSON; the gauge refresher reflects device counts.
 
 ---
 
-## F15 — RBAC via a Principal/scopes seam (UI enabler; security win on its own)
+## F15 — RBAC via a Principal/scopes seam (UI enabler; security win on its own) — ✅ DONE
+
+**Implemented** in `device_mcp_gateway/rbac.py`: `Principal{subject, scopes, auth_method}`,
+`Authenticator` over static API keys, `build_authenticator(cfg)`, `authenticate_request`
+(router dep) + `require_scope(scope)` (route dep). Routes gated on `devices:read` /
+`devices:write` / `tools:call` / `metrics:read`; audit logs now carry `subject`.
+Back-compat: legacy single key = admin; no keys = auth disabled (anonymous, full access).
+Swapping to JWT/OIDC changes only `Authenticator`/`authenticate_request`.
 
 Today: one gateway API key for everything, and auth resolves to a stringly-typed
 `request.state.auth_caller`. Add scope-based authz without breaking single-key setups,

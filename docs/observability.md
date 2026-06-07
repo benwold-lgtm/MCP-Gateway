@@ -199,7 +199,7 @@ Each JSON log record is one line:
     "extra": {
       "event": "audit",
       "hostname": "array-1",
-      "caller": "bearer:abc12345...",
+      "subject": "key:ops-dashboard",
       "method": "tools/call",
       "status": "ok",
       "duration_ms": 42.3,
@@ -229,7 +229,7 @@ All structured fields added via `logger.bind()` appear under `record.extra`.
 |-------|-------------|-------------|
 | `event` | `record.extra.event` | `"audit"` for tool dispatch events; absent for general logs |
 | `hostname` | `record.extra.hostname` | Registered device name (e.g. `"array-1"`) |
-| `caller` | `record.extra.caller` | Truncated bearer token prefix identifying the API caller |
+| `subject` | `record.extra.subject` | Authenticated principal — `key:<name>` for an API key, or `anonymous` when auth is disabled |
 | `method` | `record.extra.method` | MCP JSON-RPC method (e.g. `"tools/call"`, `"tools/list"`) |
 | `status` | `record.extra.status` | `"ok"`, `"error"`, or `"dispatched"` (distributed mode) |
 | `duration_ms` | `record.extra.duration_ms` | Tool call round-trip time in milliseconds (embedded mode only) |
@@ -303,7 +303,7 @@ data:
                 message: record.message
                 event: record.extra.event
                 hostname: record.extra.hostname
-                caller: record.extra.caller
+                subject: record.extra.subject
                 method: record.extra.method
                 status: record.extra.status
                 duration_ms: record.extra.duration_ms

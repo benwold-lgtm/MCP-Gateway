@@ -2,8 +2,21 @@
 
 gateway:
   # Require Authorization: Bearer <token> on all API routes (leave empty to disable).
-  # Override with MCP_GATEWAY_API_KEY environment variable.
+  # Override with MCP_GATEWAY_API_KEY environment variable. This single key maps to
+  # the "admin" role (full access) — today's behaviour, unchanged.
   api_key: ""
+  # Scoped API keys (RBAC). Each key maps to a role; routes authorize on scopes:
+  #   admin  → devices:read, devices:write, tools:call, metrics:read (full access)
+  #   viewer → devices:read, metrics:read (read-only; no device mutation or tool calls)
+  # `name` becomes the audit-log subject ("key:<name>"). Env shortcuts also exist:
+  # MCP_ADMIN_KEY and MCP_VIEWER_KEY. If no keys are set anywhere, auth is disabled.
+  # rbac:
+  #   - name: ops-dashboard
+  #     key: "change-me-viewer-token"
+  #     role: viewer
+  #   - name: admin-cli
+  #     key: "change-me-admin-token"
+  #     role: admin
   # Fernet key for encrypting device credentials in SQLite.
   # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   # Override with MCP_SECRET_KEY environment variable.
