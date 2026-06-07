@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: Elastic-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Ben Wold. All rights reserved.
-# Licensed under the Elastic License 2.0. See LICENSE in the project root for details.
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """Tests for the shared credential codec and end-to-end credential encryption.
 
 Regression coverage for S2 finding F1: in distributed mode the gateway must

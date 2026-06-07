@@ -546,3 +546,16 @@ make check         # lint + typecheck + test
 ```
 
 All tests use a local mock target API — no real devices or Redis required.
+
+## License
+
+[PolyForm Noncommercial License 1.0.0](LICENSE) — you may use, modify, and share this
+software for **any noncommercial purpose** (evaluation, research, personal and
+nonprofit/government use). Commercial use is not granted by this license.
+
+**Commercial licensing:** a separate commercial license is available. Contact
+benwold@gmail.com to discuss commercial use.
+
+**Contributions:** by submitting a contribution you agree it is licensed under the same
+terms and that the maintainer may also license it commercially (so the project can offer
+commercial licenses that include your contribution).

@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: Elastic-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Ben Wold. All rights reserved.
-# Licensed under the Elastic License 2.0. See LICENSE in the project root for details.
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """Tests for the config loader's robustness (S2 finding F11).
 
 load_config crashed on malformed YAML and returned None for an empty file

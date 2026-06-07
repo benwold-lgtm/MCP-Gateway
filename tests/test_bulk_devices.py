@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: Elastic-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Ben Wold. All rights reserved.
-# Licensed under the Elastic License 2.0. See LICENSE in the project root for details.
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """Tests for bulk device fetch (S2 finding F5).
 
 list_devices() did list_hostnames() then one get_device() per host — N+1 round

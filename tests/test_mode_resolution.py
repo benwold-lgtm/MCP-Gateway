@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: Elastic-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Ben Wold. All rights reserved.
-# Licensed under the Elastic License 2.0. See LICENSE in the project root for details.
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """Tests for registry-mode resolution and the split-brain guard (S2 finding F7).
 
 The gateway and worker must agree on the mode. MCP_REGISTRY_MODE overrides the

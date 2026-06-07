@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: Elastic-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Ben Wold. All rights reserved.
-# Licensed under the Elastic License 2.0. See LICENSE in the project root for details.
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """Tests for the async rate limiter (S2 finding F4).
 
 Replaces slowapi (which made blocking Redis calls on the event loop). The limiter
