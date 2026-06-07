@@ -52,7 +52,9 @@ Sliced for incremental delivery:
    model, full metric reference, plain-Prometheus + ServiceMonitor scrape config, Grafana
    PromQL starters, prometheus-adapter/KEDA note) + README metrics section.
 
-**F10 complete. F15 complete.** Next: **F14** (scaffold the `device-mcp-gateway-ui` repo).
+**F10 complete. F15 complete. F14 scaffold complete** (`device-mcp-gateway-ui` repo).
+All three roadmap items delivered. Remaining work is incremental UI phases (monitoring,
+logs, live updates) tracked in that repo's README.
 
 **Deps:** add `prometheus-client`; regenerate `requirements.txt`.
 
@@ -130,7 +132,14 @@ all scopes; auth-disabled unchanged; audit log carries `subject`.
 
 ---
 
-## F14 — Sidecar UI (separate repo / deployment)
+## F14 — Sidecar UI (separate repo / deployment) — ✅ DONE (scaffold)
+
+**Scaffolded** as a separate repo `device-mcp-gateway-ui` (sibling dir): FastAPI **BFF**
+(session auth, role gating, gateway/Prometheus/Loki proxy) + React/Vite/TS **SPA**
+(login, device list, admin register/remove), Dockerfiles, K8s manifests (own namespace,
+Deployments/Services/Ingress, NetworkPolicies), docker-compose, README. Gateway-side
+enabler added here: `GET /admin/overview` (aggregate fleet snapshot, `devices:read`).
+BFF tests pass; SPA typechecks in a Node env (no Node toolchain on the build host).
 
 Lives outside this repo (e.g. `device-mcp-gateway-ui`). Gateway gains only small enablers.
 

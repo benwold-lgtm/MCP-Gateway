@@ -716,9 +716,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     @protected.get("/metrics/summary", dependencies=[Depends(require_scope(SCOPE_METRICS_READ))])
     async def get_metrics_summary(request: Request):
-        # Human-readable JSON snapshot on the API port (auth-protected; F15 will
-        # scope-gate this to metrics:read). Prometheus exposition is served
-        # separately on the dedicated metrics port — see metrics.start_metrics_server.
+        # Human-readable JSON snapshot on the API port (scope-gated to metrics:read).
+        # Prometheus exposition is served separately on the dedicated metrics port —
+        # see metrics.start_metrics_server.
         reg: Registry = request.app.state.registry
         mode = request.app.state.mode
         devices = await reg.list_devices()
@@ -736,6 +736,36 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             metrics["device_rate_limits"] = {d.hostname: {"rate_limit_rps": d.rate_limit_rps} for d in devices}
 
         return metrics
+
+    @protected.get("/admin/overview", dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))])
+    async def admin_overview(request: Request):
+        # Single-call aggregate for the UI/BFF (F14): fleet counts + the device list
+        # in one round-trip, so the dashboard's landing screen isn't N+1 requests.
+        reg: Registry = request.app.state.registry
+        mode = request.app.state.mode
+        devices = await reg.list_devices()
+        reachable_count = sum(1 for d in devices if d.reachable)
+        return {
+            "mode": mode,
+            "counts": {
+                "total": len(devices),
+                "active_pods": sum(1 for d in devices if d.pod_active),
+                "reachable": reachable_count,
+                "unreachable": len(devices) - reachable_count,
+            },
+            "devices": [
+                {
+                    "hostname": d.hostname,
+                    "base_url": d.base_url,
+                    "transport": d.transport,
+                    "reachable": d.reachable,
+                    "pod_active": d.pod_active,
+                    "last_check": d.last_check,
+                    "rate_limit_rps": d.rate_limit_rps,
+                }
+                for d in devices
+            ],
+        }
 
     _app.include_router(protected)
     return _app

@@ -174,6 +174,7 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /dev
 | `GET` | `/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
 | `POST` | `/devices/{hostname}/messages` | Send a JSON-RPC 2.0 message via SSE |
 | `GET` | `/metrics/summary` | Reachability counts and per-device rate-limit state (JSON, auth-protected) |
+| `GET` | `/admin/overview` | Aggregate fleet counts + device list in one call (UI/BFF enabler; `devices:read`) |
 
 Prometheus metrics are exposed separately on a **dedicated metrics port** (`metrics.port`, default `9100`) at `GET /metrics`, not on the API port — point a `ServiceMonitor`/scrape config at that port and restrict it with a NetworkPolicy. Set `metrics.enabled: false` (or `MCP_METRICS_ENABLED=0`) to disable.
 

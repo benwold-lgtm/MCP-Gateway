@@ -69,6 +69,16 @@ def test_auth_disabled_when_key_not_set(monkeypatch):
     assert response.status_code == 200
 
 
+def test_admin_overview_aggregate():
+    # F14 UI enabler: fleet counts + device list in one call.
+    resp = client.get("/admin/overview")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "mode" in data
+    assert set(data["counts"]) == {"total", "active_pods", "reachable", "unreachable"}
+    assert isinstance(data["devices"], list)
+
+
 def test_register_http_transport_returns_400():
     response = client.post(
         "/devices",
