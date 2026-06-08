@@ -37,3 +37,6 @@ pip-delete-this-directory.txt
 # Runtime data — generated files, not source
 /devices.db
 /data/
+
+#temporary files
+3rd*.txt

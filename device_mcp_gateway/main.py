@@ -52,6 +52,7 @@ from device_mcp_gateway.rbac import (
     require_scope,
 )
 from device_mcp_gateway.registry.server import Registry
+from device_mcp_gateway.schemas import DeviceListResponse, OverviewResponse
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
     MemoryRegistryBackend,
@@ -495,7 +496,11 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "spawn_error": device_cfg.spawn_error,
         }
 
-    @protected.get("/devices", dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))])
+    @protected.get(
+        "/devices",
+        response_model=DeviceListResponse,
+        dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))],
+    )
     async def list_devices(request: Request):
         reg: Registry = request.app.state.registry
         devices = await reg.list_devices()
@@ -737,7 +742,11 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
         return metrics
 
-    @protected.get("/admin/overview", dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))])
+    @protected.get(
+        "/admin/overview",
+        response_model=OverviewResponse,
+        dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))],
+    )
     async def admin_overview(request: Request):
         # Single-call aggregate for the UI/BFF (F14): fleet counts + the device list
         # in one round-trip, so the dashboard's landing screen isn't N+1 requests.
