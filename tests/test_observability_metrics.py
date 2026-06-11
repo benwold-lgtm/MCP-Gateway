@@ -150,7 +150,9 @@ async def test_circuit_breaker_open_increments_counter():
 
     resp = await pod._mcp._tool_manager._tools["get_item"].fn(item_id=1)
 
-    assert resp["status_code"] == 503
+    assert resp["ok"] is False  # normalized envelope (F-39)
+    assert resp["status"] == 503
+    assert resp["error"]["type"] == "circuit_open"
     assert _counter(metrics.circuit_breaker_opens_total, hostname="dev-cb") == before + 1
 
 

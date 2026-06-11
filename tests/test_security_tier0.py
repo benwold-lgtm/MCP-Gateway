@@ -278,5 +278,8 @@ async def test_oversized_response_is_capped():
     with patch("httpx.AsyncClient.request", fake_request):
         pod = DevicePod(hostname="dev", manifest=manifest, transport="sse", base_url="http://dev.local")
         result = await pod._tool_dispatch["big"]()
-    assert result["status_code"] == 502
-    assert "too large" in result["error"]
+    # Normalized error envelope (F-39): ok=False, stable error.type, status carries 502.
+    assert result["ok"] is False
+    assert result["status"] == 502
+    assert result["error"]["type"] == "response_too_large"
+    assert "too large" in result["error"]["message"]
