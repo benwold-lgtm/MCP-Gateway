@@ -392,11 +392,16 @@ Pre-built manifests live in [`deploy/kubernetes/`](deploy/kubernetes/). The mani
 
 ```bash
 # Create namespace and secrets (never store secrets in the ConfigMap)
+# Distributed mode requires an API key (F-23) and an authenticated Redis (F-24);
+# the gateway/worker refuse to start otherwise.
 kubectl create namespace mcp-gateway
+REDIS_PW=$(openssl rand -hex 24)
 kubectl create secret generic gateway-secrets \
   --namespace=mcp-gateway \
   --from-literal=api-key=$(openssl rand -hex 32) \
-  --from-literal=secret-key=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+  --from-literal=secret-key=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())") \
+  --from-literal=redis-password="$REDIS_PW" \
+  --from-literal=redis-url="redis://:$REDIS_PW@redis:6379/0"   # rediss:// when Redis terminates TLS
 
 # Customise before deploying:
 #   deploy/kubernetes/ingress.yaml   — set your hostname

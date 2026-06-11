@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 import httpx
+import jsonschema
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 from pybreaker import CircuitBreaker, CircuitBreakerError
@@ -23,6 +24,76 @@ from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.pods.sse_server import SseTransport
 from device_mcp_gateway.pods.rate_limiter import TokenBucket
 from device_mcp_gateway.core.translator import McpManifest, McpTool
+
+# Headers a tool argument must never be able to set on the upstream request (Tier-0 F-25).
+# Without this, an `in: header` parameter could overwrite the device's auth header or
+# smuggle routing/cache headers, since untrusted header params were merged over auth.
+_RESERVED_HEADERS = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "host",
+        "content-length",
+        "content-type",
+        "connection",
+        "transfer-encoding",
+        "te",
+        "trailer",
+        "upgrade",
+        "via",
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    }
+)
+
+# Cap the upstream response body the pod will buffer/return to the LLM (Tier-0 F-27).
+# An unbounded body is both a memory-DoS vector and an oversized prompt-injection channel.
+_MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MiB
+
+
+def _sanitize_header_params(items: dict[str, Any]) -> dict[str, str]:
+    """Drop reserved headers and reject CRLF in values (Tier-0 F-25)."""
+    safe: dict[str, str] = {}
+    for k, v in items.items():
+        if k.lower() in _RESERVED_HEADERS:
+            logger.warning(f"Dropping reserved header param '{k}' from tool call")
+            continue
+        sv = str(v)
+        if "\r" in sv or "\n" in sv:
+            logger.warning(f"Dropping header param '{k}' with CRLF in its value")
+            continue
+        safe[k] = sv
+    return safe
+
+
+def _validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> str | None:
+    """Validate tool-call arguments against the tool's JSON schema (Tier-0 F-28).
+
+    Returns an error string if the arguments violate the schema, else None. If the
+    schema itself is not a valid JSON Schema (some flattened specs aren't), validation
+    is skipped (logged) rather than blocking a legitimate call.
+    """
+    try:
+        jsonschema.Draft202012Validator.check_schema(schema)
+    except jsonschema.exceptions.SchemaError:
+        logger.warning("Tool input schema is not valid JSON Schema; skipping argument validation")
+        return None
+    try:
+        validator = jsonschema.Draft202012Validator(schema)
+        errors = sorted(validator.iter_errors(arguments), key=lambda e: list(e.path))
+    except Exception:
+        logger.warning("Argument validation raised on this schema; skipping (fail-open)")
+        return None
+    if errors:
+        e = errors[0]
+        loc = "/".join(str(p) for p in e.path) or "(root)"
+        return f"{loc}: {e.message}"
+    return None
 
 
 class DevicePod:
@@ -82,6 +153,8 @@ class DevicePod:
     def _register_tools(self) -> None:
         """Register all MCP tools from the manifest as async callables."""
         self._tool_dispatch: dict[str, Any] = {}
+        # name → JSON input schema, for server-side argument validation (Tier-0 F-28).
+        self._tool_schemas: dict[str, dict[str, Any]] = {t.name: t.schema for t in self.manifest.tools}
         _get_client = self._client  # shared client for all tool closures
         # Capture once so all tool closures share the same per-pod circuit breaker
         # without it appearing in the function signature (Pydantic would warn on it).
@@ -103,7 +176,7 @@ class DevicePod:
                 path_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "path"}
                 body_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "body"}
                 query_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "query"}
-                extra_headers = {k: str(v) for k, v in kwargs.items() if tool.param_locations.get(k) == "header"}
+                header_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "header"}
                 # Params with no declared location fall back to method-appropriate defaults
                 unlocated = {k: v for k, v in kwargs.items() if k not in tool.param_locations}
                 if tool.method in ("POST", "PUT", "PATCH"):
@@ -112,8 +185,10 @@ class DevicePod:
                     query_params.update(unlocated)
 
                 url = f"{base_url}{tool.path}".format_map(path_params)
-                headers = await auth.get_headers() if auth else {}
-                headers.update(extra_headers)
+                # Start from sanitized, untrusted header params, then apply auth LAST so a
+                # tool argument can never override the device's auth header (Tier-0 F-25).
+                headers = _sanitize_header_params(header_params)
+                headers.update(await auth.get_headers() if auth else {})
 
                 async def _call():
                     c = _get_client()
@@ -137,6 +212,16 @@ class DevicePod:
                         resp = await _call()
                     if resp.status_code == 204 or not resp.content:
                         return {"status": resp.status_code, "body": None}
+                    # Bound the body we buffer/return to the LLM (Tier-0 F-27): an oversized
+                    # response is a memory-DoS vector and a large prompt-injection channel.
+                    if len(resp.content) > _MAX_RESPONSE_BYTES:
+                        return {
+                            "error": (
+                                f"Device response too large ({len(resp.content)} bytes > "
+                                f"{_MAX_RESPONSE_BYTES} limit)"
+                            ),
+                            "status_code": 502,
+                        }
                     ct = resp.headers.get("content-type", "")
                     if "json" in ct:
                         try:
@@ -219,6 +304,23 @@ class DevicePod:
                     "id": msg_id,
                     "error": {"code": -32601, "message": f"Tool not found: {tool_name}"},
                 }
+            # Validate arguments against the tool's declared JSON schema before dispatch
+            # (Tier-0 F-28) so malformed/over-posted params don't reach the upstream.
+            if not isinstance(arguments, dict):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32602, "message": "Invalid params: 'arguments' must be an object"},
+                }
+            schema = self._tool_schemas.get(tool_name)
+            if schema is not None:
+                arg_error = _validate_arguments(schema, arguments)
+                if arg_error:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {"code": -32602, "message": f"Invalid params: {arg_error}"},
+                    }
             try:
                 result = await handler(**arguments)
                 return {
@@ -251,6 +353,14 @@ class DevicePod:
                     "error": {"code": -32602, "message": f"Unknown resource URI: {uri}"},
                 }
             path = uri[len(prefix) :]
+            # Reject path traversal / off-API escapes (Tier-0 F-29): the path is appended to
+            # base_url, so '..' or a scheme/host-relative path could read off the intended API.
+            if path and (".." in path or not path.startswith("/")):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32602, "message": f"Invalid resource path in URI: {uri}"},
+                }
             if self._rate_limiter:
                 await self._rate_limiter.acquire()
             headers = await self.auth.get_headers() if self.auth else {}

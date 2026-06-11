@@ -16,6 +16,13 @@ import httpx
 from fastapi import FastAPI, Request
 import uvicorn
 
+# Tests register devices against loopback / TEST-NET / .local hosts, which the Tier-0
+# SSRF policy (F-02) blocks by default. Opt the whole suite into private targets here —
+# this runs while conftest is imported, before pytest collects any test module (and thus
+# before device_mcp_gateway.main's module-level app is built). Tests that assert the
+# policy *rejects* a target clear this env var themselves.
+os.environ.setdefault("MCP_ALLOW_PRIVATE_TARGETS", "true")
+
 # Dedicated test DB so integration tests never touch app data (db 0).
 TEST_REDIS_URL = os.getenv("MCP_TEST_REDIS_URL", "redis://localhost:6379/15")
 

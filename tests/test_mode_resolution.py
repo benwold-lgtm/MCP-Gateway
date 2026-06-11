@@ -32,8 +32,13 @@ def test_create_app_honors_mode_env_override(monkeypatch):
 
     monkeypatch.setenv("MCP_REGISTRY_MODE", "distributed")
     monkeypatch.delenv("MCP_SECRET_KEY", raising=False)
-    # Config file says embedded; env forces distributed. With plaintext allowed
-    # the app builds and reports the overridden mode.
-    cfg = {"registry": {"mode": "embedded"}, "gateway": {"allow_plaintext_credentials": True}}
+    # Config file says embedded; env forces distributed. With plaintext + the Tier-0
+    # security gates overridden (anonymous auth + insecure Redis) the app builds and
+    # reports the overridden mode. (Those gates are exercised in test_credentials.py.)
+    cfg = {
+        "registry": {"mode": "embedded"},
+        "gateway": {"allow_plaintext_credentials": True, "allow_anonymous": True},
+        "redis": {"allow_insecure": True},
+    }
     app = create_app(override_config=cfg)
     assert app.state.mode == "distributed"

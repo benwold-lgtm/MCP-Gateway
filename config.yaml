@@ -10,6 +10,10 @@ gateway:
   #   viewer → devices:read, metrics:read (read-only; no device mutation or tool calls)
   # `name` becomes the audit-log subject ("key:<name>"). Env shortcuts also exist:
   # MCP_ADMIN_KEY and MCP_VIEWER_KEY. If no keys are set anywhere, auth is disabled.
+  # In DISTRIBUTED mode the gateway refuses to start with auth disabled (no keys ⇒ every
+  # request is ANONYMOUS with full access). For a trusted local network only, set
+  # allow_anonymous: true to override. Embedded mode keeps the permissive single-operator default.
+  allow_anonymous: false
   # rbac:
   #   - name: ops-dashboard
   #     key: "change-me-viewer-token"
@@ -82,7 +86,13 @@ registry:
 redis:
   # Redis connection URL. Used when registry.mode = "distributed".
   # Override with MCP_REDIS_URL environment variable.
+  # Redis is the entire distributed control plane (registry, tool-call streams, claims,
+  # leader locks). Distributed mode REQUIRES an authenticated Redis: the URL must carry a
+  # password — redis://:<password>@host:6379/0 — and ideally TLS (rediss://...). The gateway
+  # and workers refuse to start against an unauthenticated Redis. For a trusted local network
+  # only, set allow_insecure: true to override.
   url: "redis://localhost:6379/0"
+  allow_insecure: false
   socket_timeout: 5
   # Command connection pool size per gateway/worker process.
   max_connections: 20
@@ -140,6 +150,14 @@ cors:
   # Use ["*"] only in development; set specific origins in production.
   # Example: ["https://my-llm-app.example.com", "https://app.anthropic.com"]
   allowed_origins: []
+
+security:
+  # SSRF policy (Tier-0 F-02): device base_url/spec_url are fetched server-side, so by
+  # default the gateway refuses targets that resolve to internal/loopback/link-local/
+  # private addresses (e.g. cloud metadata 169.254.169.254). Set true ONLY for a trusted
+  # internal device fleet where devices legitimately live on private addresses.
+  # Env override: MCP_ALLOW_PRIVATE_TARGETS=true.
+  allow_private_targets: false
 
 metrics:
   # Prometheus exposition is served on a DEDICATED port, separate from the API

@@ -63,8 +63,14 @@ spec:
                   name: gateway-secrets
                   key: secret-key
                   optional: true
+            # Authenticated Redis URL incl. password (Tier-0 F-24) — see deployment.yaml.
+            # The worker refuses to start against an unauthenticated Redis unless
+            # redis.allow_insecure: true.
             - name: MCP_REDIS_URL
-              value: redis://redis:6379/0
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: redis-url
             # Use the pod name as WORKER_ID for uniqueness across replicas
             - name: WORKER_ID
               valueFrom:

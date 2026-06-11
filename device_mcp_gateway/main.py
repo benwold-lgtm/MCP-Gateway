@@ -54,6 +54,7 @@ from device_mcp_gateway.rbac import (
 )
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.schemas import DeviceListResponse, OverviewResponse
+from device_mcp_gateway.security.url_policy import UrlPolicyError, validate_target_url
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
     MemoryRegistryBackend,
@@ -234,6 +235,39 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "will be stored as plaintext. Set MCP_SECRET_KEY to a Fernet key. "
             'Generate one: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
         )
+
+    # Auth fail-open gate (Tier-0 F-23): distributed mode must not run with auth disabled —
+    # no keys means every request is served as ANONYMOUS with full access. build_authenticator
+    # already warns in embedded/local-dev; here we hard-fail the production (distributed) path.
+    if _mode == "distributed" and not _authenticator.enabled and not _gateway_cfg.get("allow_anonymous", False):
+        raise RuntimeError(
+            "Refusing to start in distributed mode with authentication disabled: no API keys are "
+            "configured, so every request would be served as ANONYMOUS with full access. Configure at "
+            "least one key (MCP_GATEWAY_API_KEY / MCP_ADMIN_KEY / gateway.rbac) or, for a trusted local "
+            "network only, set gateway.allow_anonymous: true to override."
+        )
+
+    # Redis control-plane authn gate (Tier-0 F-24): distributed mode keeps all shared state in
+    # Redis; refuse an unauthenticated Redis (no password) unless redis.allow_insecure is set.
+    if _mode == "distributed":
+        from device_mcp_gateway.shared.redis_client import assert_redis_secure
+
+        assert_redis_secure(cfg)
+
+    # SSRF policy for device target URLs (Tier-0 F-02). base_url/spec_url are fetched
+    # server-side, so reject internal/loopback/link-local targets unless explicitly allowed
+    # (security.allow_private_targets, or the MCP_ALLOW_PRIVATE_TARGETS env override).
+    _allow_private_targets = bool(cfg.get("security", {}).get("allow_private_targets", False)) or os.getenv(
+        "MCP_ALLOW_PRIVATE_TARGETS", ""
+    ).lower() in ("1", "true", "yes")
+
+    def _check_target_url(url: str | None, field: str) -> None:
+        if not url:
+            return
+        try:
+            validate_target_url(url, allow_private=_allow_private_targets)
+        except UrlPolicyError as exc:
+            raise HTTPException(status_code=400, detail=f"Rejected {field}: {exc}")
 
     def _parse_auth(data: dict) -> AbstractAuth | None:
         auth_type = (
@@ -496,6 +530,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         if not hostname or not base_url:
             raise HTTPException(status_code=400, detail="hostname and base_url required")
         _validate_hostname(hostname)
+        _check_target_url(base_url, "base_url")
 
         existing = await reg.get_device(hostname)
         if existing:
@@ -505,6 +540,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         transport = data.get("transport") or cfg.get("transport", {}).get("default", "sse")
         _validate_transport(transport)
         spec_url = data.get("spec_url")
+        _check_target_url(spec_url, "spec_url")
         rate_limit_rps = _parse_rate_limit(data)
 
         device_cfg = await reg.register_device(
@@ -534,6 +570,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         data = await request.json()
         base_url = data.get("base_url") or existing.base_url
         spec_url = data.get("spec_url", existing.spec_url)
+        # Re-validate target URLs on update (a PUT can change base_url/spec_url) — Tier-0 F-02.
+        _check_target_url(base_url, "base_url")
+        _check_target_url(spec_url, "spec_url")
 
         _AUTH_KEYS = {"auth_type", "auth", "api_key"}
         if _AUTH_KEYS & data.keys():
