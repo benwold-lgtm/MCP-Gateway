@@ -16,6 +16,7 @@ registry.mode = "distributed":
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -25,7 +26,7 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from loguru import logger
 from sse_starlette import EventSourceResponse
 
@@ -96,7 +97,7 @@ def _validate_hostname(hostname: str) -> None:
         )
 
 
-async def _watch_tool_call_timeout(redis, session_router, session_id, request_id, msg_id, timeout):
+async def _watch_tool_call_timeout(redis, session_router, session_id, request_id, msg_id, timeout, hostname="?"):
     """Emit a JSON-RPC timeout error on the SSE stream if no worker responds.
 
     Cross-replica safe: the worker sets result:{request_id} in Redis when it
@@ -108,6 +109,7 @@ async def _watch_tool_call_timeout(redis, session_router, session_id, request_id
         await asyncio.sleep(timeout)
         if await redis.get(f"result:{request_id}"):
             return  # worker handled it
+        metrics.tool_call_timeouts_total.labels(hostname=hostname).inc()
         await session_router.publish_result(
             session_id,
             {
@@ -122,16 +124,64 @@ async def _watch_tool_call_timeout(redis, session_router, session_id, request_id
         logger.warning(f"tool-call timeout watcher failed for request {request_id}")
 
 
+async def _count_live_workers(redis) -> int:
+    """Count workers with a live heartbeat (distributed mode).
+
+    `workers:active` can retain ids of crashed workers that never deregistered, so
+    membership alone overstates the fleet — gate on the heartbeat key, which the
+    worker refreshes and which expires on death. Used as a degraded signal in
+    /health (SRE #7): a gateway with zero live workers still serves read endpoints,
+    but tool calls will time out, and operators/UI should see that.
+    """
+    ids = await redis.smembers("workers:active")
+    if not ids:
+        return 0
+    pipe = redis.pipeline()
+    for wid in ids:
+        pipe.exists(f"worker:{wid}:heartbeat")
+    return sum(1 for present in await pipe.execute() if present)
+
+
+_GAUGE_LEADER_LOCK = "gateway:gauge-leader"
+
+
+async def _acquire_gauge_leadership(redis, leader_id: str, ttl: int) -> bool:
+    """Claim/refresh the gauge-refresh leader lock (SRE O4).
+
+    SET NX to take it; if we already hold it, refresh the TTL so leadership is
+    sticky while this replica is alive but lapses soon after it dies, letting
+    another replica take over. Mirrors the worker reconciler's election.
+    """
+    if await redis.set(_GAUGE_LEADER_LOCK, leader_id, nx=True, ex=ttl):
+        return True
+    if (await redis.get(_GAUGE_LEADER_LOCK)) == leader_id:
+        await redis.expire(_GAUGE_LEADER_LOCK, ttl)
+        return True
+    return False
+
+
 async def _refresh_device_gauges(app: FastAPI, interval: float) -> None:
     """Periodically refresh device-fleet gauges from the registry.
 
     Prometheus collection is synchronous, but ``list_devices()`` is async, so we
     cannot compute these inside a collector — we poll on a timer instead.
+
+    Leader-gated (SRE O4): in distributed mode every gateway replica runs this
+    loop, so without gating each would do a full ``list_devices()`` every cycle
+    (×replicas Redis load). Only the lock holder computes the fleet gauges; the
+    others idle and stand ready to take over if the leader dies. Consequence: the
+    fleet gauges are populated on one replica at a time, so aggregate them with
+    ``max()`` across replicas in Prometheus. Embedded mode (no Redis) is a single
+    process, so it always refreshes.
     """
+    redis = getattr(app.state, "redis", None)
+    leader_id = uuid.uuid4().hex
+    lock_ttl = max(int(interval * 2), 30)
     while True:
         try:
             reg = app.state.registry
-            if reg is not None:
+            is_leader = redis is None or await _acquire_gauge_leadership(redis, leader_id, lock_ttl)
+            if reg is not None and is_leader:
                 devices = await reg.list_devices()
                 metrics.registered_devices.set(len(devices))
                 metrics.active_pods.set(sum(1 for d in devices if d.pod_active))
@@ -231,6 +281,11 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.session_router = None
     # Strong refs to fire-and-forget timeout watchers so they aren't GC'd.
     _app.state.bg_tasks = set()
+    # Short-TTL cache for the UI read aggregate (SRE O4) so a polling dashboard
+    # doesn't trigger a fresh list_devices() on every request. Per-replica; ETag is
+    # a content hash so it's stable across replicas.
+    _read_cache_ttl: float = cfg.get("gateway", {}).get("read_cache_ttl", 5)
+    _app.state.overview_cache = {"ts": 0.0, "etag": "", "body": None}
 
     # --- Rate limiting (async; per-client-IP) ---
     # Key function honours X-Forwarded-For only behind a trusted proxy.
@@ -376,13 +431,26 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         devices = await reg.list_devices()
         active = sum(1 for d in devices if d.pod_active)
 
-        return {
+        payload = {
             "status": "healthy",
             "mode": mode,
             "active_pods": active,
             "registered_devices": len(devices),
             "version": cfg.get("server", {}).get("version", __version__),
         }
+
+        # Distributed mode: expose worker-fleet liveness as a degraded signal (SRE
+        # #7). Stays HTTP 200 (this is the liveness target — a worker outage must
+        # not restart the gateway), but flips status to "degraded" with a count so
+        # the UI/operators can see that tool calls have no workers to serve them.
+        if mode == "distributed":
+            redis = request.app.state.redis
+            live_workers = await _count_live_workers(redis) if redis is not None else 0
+            payload["live_workers"] = live_workers
+            if live_workers == 0:
+                payload["status"] = "degraded"
+
+        return payload
 
     @_app.get("/readyz", dependencies=[Depends(rate_limit("300/minute", "readyz"))])
     async def readiness_check(request: Request):
@@ -661,6 +729,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                 session_id=effective_id,
                 gateway_id=_GATEWAY_ID,
                 message=payload,
+                rid=_rid,
             )
             # Guard against a lost call (no worker consuming): if no result is
             # marked within the timeout, emit an error event on the SSE stream
@@ -675,6 +744,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                         request_id,
                         payload.get("id"),
                         _timeout,
+                        hostname,
                     )
                 )
                 request.app.state.bg_tasks.add(_watcher)
@@ -750,31 +820,47 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     async def admin_overview(request: Request):
         # Single-call aggregate for the UI/BFF (F14): fleet counts + the device list
         # in one round-trip, so the dashboard's landing screen isn't N+1 requests.
-        reg: Registry = request.app.state.registry
-        mode = request.app.state.mode
-        devices = await reg.list_devices()
-        reachable_count = sum(1 for d in devices if d.reachable)
-        return {
-            "mode": mode,
-            "counts": {
-                "total": len(devices),
-                "active_pods": sum(1 for d in devices if d.pod_active),
-                "reachable": reachable_count,
-                "unreachable": len(devices) - reachable_count,
-            },
-            "devices": [
-                {
-                    "hostname": d.hostname,
-                    "base_url": d.base_url,
-                    "transport": d.transport,
-                    "reachable": d.reachable,
-                    "pod_active": d.pod_active,
-                    "last_check": d.last_check,
-                    "rate_limit_rps": d.rate_limit_rps,
-                }
-                for d in devices
-            ],
-        }
+        # Served from a short-TTL per-replica cache with an ETag (SRE O4) so a
+        # polling dashboard doesn't hit Redis (list_devices) on every request and
+        # can short-circuit with a 304 when nothing changed.
+        cache = request.app.state.overview_cache
+        now = time.monotonic()
+        if cache["body"] is None or (now - cache["ts"]) >= _read_cache_ttl:
+            reg: Registry = request.app.state.registry
+            mode = request.app.state.mode
+            devices = await reg.list_devices()
+            reachable_count = sum(1 for d in devices if d.reachable)
+            body = {
+                "mode": mode,
+                "counts": {
+                    "total": len(devices),
+                    "active_pods": sum(1 for d in devices if d.pod_active),
+                    "reachable": reachable_count,
+                    "unreachable": len(devices) - reachable_count,
+                },
+                "devices": [
+                    {
+                        "hostname": d.hostname,
+                        "base_url": d.base_url,
+                        "transport": d.transport,
+                        "reachable": d.reachable,
+                        "pod_active": d.pod_active,
+                        "last_check": d.last_check,
+                        "rate_limit_rps": d.rate_limit_rps,
+                    }
+                    for d in devices
+                ],
+            }
+            etag = '"' + hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()[:16] + '"'
+            cache.update(ts=now, etag=etag, body=body)
+
+        etag = cache["etag"]
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        return JSONResponse(
+            content=cache["body"],
+            headers={"ETag": etag, "Cache-Control": f"max-age={int(_read_cache_ttl)}"},
+        )
 
     _app.include_router(protected)
     return _app

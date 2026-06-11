@@ -145,8 +145,14 @@ class AbstractRegistryBackend(ABC):
         session_id: str,
         gateway_id: str,
         message: dict,
+        rid: str = "",
     ) -> None:
-        """Push a tool-call message onto the device's Redis Stream."""
+        """Push a tool-call message onto the device's Redis Stream.
+
+        `rid` is the gateway's X-Request-Id correlation id; it rides along on the
+        stream so the worker can bind it in its audit log, giving one trace id
+        across the gateway→worker hop (SRE O2).
+        """
         ...
 
 
@@ -206,6 +212,7 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
         session_id: str,
         gateway_id: str,
         message: dict,
+        rid: str = "",
     ) -> None:
         pass  # no-op; embedded mode routes calls in-process
 
@@ -217,6 +224,10 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
 _DEVICES_SET = "devices:all"
 _ASSIGNMENTS_STREAM = "device:assignments"
 _WORKER_GROUP = "workers"
+# Cap a device's pending tool-call stream so a backlog (slow/crashed worker, no
+# consumer) can't grow Redis without bound (SRE #4). Approximate trimming keeps
+# XADD O(1); the real backpressure is the worker's per-device concurrency cap.
+_CALL_STREAM_MAXLEN = 10_000
 
 
 class RedisRegistryBackend(AbstractRegistryBackend):
@@ -274,9 +285,10 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         pipe = self._r.pipeline()
         pipe.delete(f"device:{hostname}:config")
         pipe.delete(f"device:{hostname}:manifest")
-        # Drop the tool-call stream too, or it lingers in Redis after the
-        # device is gone and accumulates over churn (RC-4).
+        # Drop the tool-call stream and its dead-letter stream too, or they linger
+        # in Redis after the device is gone and accumulate over churn (RC-4, SRE #4).
         pipe.delete(f"device:{hostname}:calls")
+        pipe.delete(f"device:{hostname}:calls:dead")
         pipe.srem(_DEVICES_SET, hostname)
         await pipe.execute()
 
@@ -309,6 +321,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         session_id: str,
         gateway_id: str,
         message: dict,
+        rid: str = "",
     ) -> None:
         await self._r.xadd(
             f"device:{hostname}:calls",
@@ -316,6 +329,9 @@ class RedisRegistryBackend(AbstractRegistryBackend):
                 "request_id": request_id,
                 "session_id": session_id,
                 "gateway_id": gateway_id,
+                "rid": rid,
                 "message": json.dumps(message),
             },
+            maxlen=_CALL_STREAM_MAXLEN,
+            approximate=True,
         )

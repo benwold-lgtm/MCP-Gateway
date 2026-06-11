@@ -154,8 +154,8 @@ sequenceDiagram
 
 | Probe | Path | Behaviour |
 |-------|------|-----------|
-| **Liveness** | `GET /health` | Returns 200 unconditionally if the process is running. K8s restarts on failure. |
-| **Readiness** | `GET /readyz` | Pings Redis (`await redis.ping()`). Returns 503 if Redis is unreachable. K8s stops routing traffic until the probe passes. |
+| **Liveness** | `GET /health` | Returns 200 if the process is running. In distributed mode it also reports `live_workers` and flips `status` to `"degraded"` (still 200) when no worker has a live heartbeat — a signal for the UI/operators, deliberately **not** a restart trigger (SRE #7). |
+| **Readiness** | `GET /readyz` | Pings Redis (`await redis.ping()`). Returns 503 if Redis is unreachable. K8s stops routing traffic until the probe passes. **Does not** gate on worker availability — a worker outage must not pull every gateway out of the LB and break read-only endpoints. |
 
 ### Worker probes
 
@@ -179,6 +179,8 @@ livenessProbe:
 
 The heartbeat key is written by the worker's internal heartbeat loop with a TTL of `2 × health_check_interval`. A missing key means the loop has stalled — K8s will restart the pod after 3 consecutive failures (90 s).
 
+The heartbeat is **gated on consumer-loop health** (SRE #8): the loop withholds the heartbeat (and stops refreshing device-claim leases) if a critical loop — the assignment consumer, health loop, or reconciler — has crashed, or if the assignment consumer has not made progress within `2 × health_check_interval`. So a worker whose process is alive but whose consumers are wedged now fails liveness (gets restarted) **and** lets its claims lapse so the reconciler reassigns its devices, instead of looking healthy while doing nothing.
+
 ### PodDisruptionBudgets
 
 Both gateway and worker have a PDB with `minAvailable: 1`. This prevents node drains and cluster upgrades from taking down all replicas simultaneously. Rolling updates (during which one pod is replaced at a time) proceed normally as long as `replicas ≥ 2`.
@@ -189,10 +191,67 @@ Both gateway and worker have a PDB with `minAvailable: 1`. This prevents node dr
 
 `terminationGracePeriodSeconds: 120`. On SIGTERM:
 1. A `preStop: sleep 5` hook runs first, giving Kubernetes time to stop routing new assignments to this worker.
-2. SIGTERM fires; the worker cancels its heartbeat, assignment consumer, and health loop.
-3. In-flight tool calls are cancelled after the grace period expires.
+2. SIGTERM fires; the worker stops accepting new work — it cancels the background loops (heartbeat, assignment consumer, health, reconciler) and the per-device call consumers, so no new tool calls are dispatched.
+3. **In-flight tool calls are drained** (SRE #6): the worker waits up to `registry.shutdown_drain_timeout` (default 25 s) for active calls to finish before cancelling any stragglers, then tears down pods and deregisters from `workers:active`.
 
-> Future improvement: the shutdown handler should drain `_call_tasks` (wait for in-flight httpx calls to complete) before cancelling them, reducing the chance of mid-call interruption.
+> Keep `terminationGracePeriodSeconds` comfortably above `shutdown_drain_timeout` (120 s vs 25 s here) so the drain completes before Kubernetes force-kills the pod.
+
+---
+
+## Redis availability & durability
+
+In distributed mode Redis is the **single source of truth and a single point of failure** (SRE #9). It carries *all* shared state on the hot path:
+
+- the device registry (`device:{h}:config`, `devices:all`),
+- the assignment, per-device call, and **per-session result streams**,
+- the shared rate limiter, device **claim leases**, and the **reconciler leader lock**.
+
+**Failure behaviour.** If Redis is unreachable, gateways fail `GET /readyz` (Redis `PING`) and are pulled from the load balancer; workers retry their stream reads until it returns. No split-brain occurs because claims and the reconciler lock are Redis keys — when Redis is down, nothing is assigned or reassigned. Recovery is automatic once Redis is back.
+
+**Durability.** The provided `redis.yaml` runs `--appendonly yes`, so the AOF persists the registry and every stream across a restart. Because tool-call results are now **Redis Streams** rather than fire-and-forget pub/sub (SRE #3), a clean restart **no longer loses in-flight results** — a reconnecting gateway re-reads the session's result stream from where it left off. Only writes within the last `appendfsync` window (default `everysec` → ≤ 1 s) can be lost on an unclean crash.
+
+**Production recommendation.** The single-node StatefulSet is fine for dev and small deployments but has no failover. For production, run **Redis Sentinel** (HA with automatic failover) or **Redis Cluster**, and point `MCP_REDIS_URL` at the Sentinel/Cluster endpoint. Size the command and pub/sub connection pools (`redis.max_connections`, `redis.pubsub_max_connections`) for your gateway/worker replica count and expected concurrent SSE streams.
+
+---
+
+## Observability
+
+Each gateway and worker pod exposes Prometheus metrics on a dedicated port (`:9100`, separate from the `:8000` API). The UI/BFF and operators should treat **Prometheus and the read APIs as the observability surface — not pod log files** (see "UI/BFF sourcing" below).
+
+### Failure-mode metrics (SRE O1)
+
+Sites that previously only logged a failure now also increment a counter, so request loss/shedding is visible in metrics:
+
+| Metric | Type | Incremented when |
+|--------|------|------------------|
+| `mcp_tool_call_timeouts_total{hostname}` | counter | the gateway's F6 watcher fires — no worker set `result:{id}` before the deadline |
+| `mcp_sse_messages_dropped_total{hostname}` | counter | an embedded-mode SSE client queue is full and a response is dropped |
+| `mcp_dead_letter_total{hostname}` | counter | an undeliverable tool call is moved to `device:{h}:calls:dead` |
+| `mcp_circuit_breaker_opens_total{hostname}` | counter | a device pod's circuit breaker rejects a call |
+
+### Worker backlog & HPA signal (SRE #5)
+
+`mcp_worker_pending_calls` counts **delivered-but-unacked** (in-flight) work, but the per-device concurrency cap (SRE #5) holds excess work **undelivered** in the stream, where XPENDING can't see it. `mcp_worker_undelivered_calls` exposes that never-read backlog (XINFO GROUPS lag). **Sum the two for total work waiting → the recommended worker HPA signal.**
+
+### Fleet gauges are leader-gated (SRE O4)
+
+`mcp_registered_devices`, `mcp_active_pods`, and `mcp_reachable_devices` are fleet-wide. To avoid every gateway replica running a full `list_devices()` each cycle (×replicas Redis load), only the replica holding the `gateway:gauge-leader` lock computes them. **Consequence:** these gauges are populated on one replica at a time — aggregate them with `max()` across replicas in Prometheus. (Embedded mode is a single process and always refreshes.) The `/admin/overview` read aggregate is likewise served from a short-TTL per-replica cache with an `ETag` (`gateway.read_cache_ttl`, default 5 s) so a polling UI doesn't trigger a fresh `list_devices()` per request.
+
+### End-to-end tracing (SRE O2)
+
+The gateway assigns each request an `X-Request-Id` (generated if absent) and logs it as `rid`. That `rid` is now propagated as a field on the tool-call stream and bound into the **worker's** audit log lines, so a single id traces a call across the gateway→worker hop. Filter logs in both pods by `rid=<value>` to follow one invocation end to end.
+
+### Per-call latency: Prometheus, not logs (SRE O3)
+
+In distributed mode tool calls execute on the worker, so the **gateway's** audit log carries no `duration_ms` for them — that field is emitted by the gateway only in embedded mode. The worker does log `duration_ms`, but in a separate pod a gateway sidecar cannot read. The mode-independent source of per-call latency is the worker's Prometheus histogram **`mcp_tool_call_duration_seconds{hostname}`**. **Contract for the UI/BFF:** source distributed-mode latency from Prometheus (e.g. `histogram_quantile` over `mcp_tool_call_duration_seconds_bucket`), not from gateway logs.
+
+### UI/BFF log sourcing (SRE O5)
+
+If the UI runs as a gateway-pod sidecar, do **not** make it depend on tailing `logs/gateway.log`: that file rotates (50 MB × 5) and, more importantly, **worker logs — tool execution, latency, dead-letters — live in a different pod the sidecar cannot see**. The supported sourcing model is:
+
+- **Metrics** (RED, failure-mode counters, latency histogram) from each pod's `:9100` Prometheus endpoint, aggregated by a Prometheus server;
+- **Fleet/device state** from the gateway read APIs (`GET /admin/overview`, `GET /metrics/summary`, `GET /devices`);
+- **Structured logs**, if needed, shipped from *all* pods (gateway and worker) to a central log store and queried by `rid` — never read from one pod's local file.
 
 ---
 
