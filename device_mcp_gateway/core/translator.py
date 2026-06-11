@@ -39,6 +39,32 @@ def _sanitize_text(text: str | None, max_len: int = _MAX_DESC_LEN) -> str:
     return cleaned
 
 
+# Request-body content types we know how to encode (F-40), in selection priority.
+# An operation may declare several; we pick one for the single MCP tool callable.
+JSON_CONTENT = "application/json"
+FORM_CONTENT = "application/x-www-form-urlencoded"
+MULTIPART_CONTENT = "multipart/form-data"
+_CONTENT_PRIORITY = (JSON_CONTENT, FORM_CONTENT, MULTIPART_CONTENT)
+
+
+@dataclass
+class RequestBodySpec:
+    """How a tool's request body should be encoded for the upstream call (F-40).
+
+    Captured from the OpenAPI ``requestBody`` so the adapter (``core.adapter``) can
+    pick the right wire encoding — JSON, form-urlencoded, multipart, or a raw body —
+    instead of always sending ``json=``.
+    """
+
+    content_type: str = JSON_CONTENT
+    # Body field names whose OpenAPI schema is `format: binary` (multipart file parts).
+    binary_fields: set[str] = field(default_factory=set)
+    # True when the body is a single scalar/binary value (no object properties) sent
+    # raw — e.g. application/octet-stream or text/plain. The lone field is `raw_field`.
+    raw: bool = False
+    raw_field: str | None = None
+
+
 @dataclass
 class McpTool:
     """MCP tool representation."""
@@ -50,6 +76,7 @@ class McpTool:
     path: str
     tags: list[str] = field(default_factory=list)
     param_locations: dict[str, str] = field(default_factory=dict)
+    request_body: RequestBodySpec | None = None
 
 
 @dataclass
@@ -162,7 +189,7 @@ class SpecTranslator:
         name = _sanitize_name(op_id or f"{method}_{path}")
         # Tool description is device-supplied and shown to the LLM → untrusted (F-26).
         description = _sanitize_text(op.get("summary") or op.get("description") or f"{method} {path}")
-        parameters, required, locations = self._build_parameter_schema(op)
+        parameters, required, locations, body_spec = self._build_parameter_schema(op)
         tags = op.get("tags", [])
         return McpTool(
             name=name,
@@ -172,6 +199,7 @@ class SpecTranslator:
             path=path,
             tags=tags,
             param_locations=locations,
+            request_body=body_spec,
         )
 
     def _resolve_ref(self, ref: str) -> dict:
@@ -258,7 +286,9 @@ class SpecTranslator:
             result["required"] = list(dict.fromkeys(req))
         return result
 
-    def _build_parameter_schema(self, op: dict) -> tuple[dict[str, Any], list[str], dict[str, str]]:
+    def _build_parameter_schema(
+        self, op: dict
+    ) -> tuple[dict[str, Any], list[str], dict[str, str], RequestBodySpec | None]:
         """Extract JSON-serializable parameter schema and per-param locations from an operation."""
         params: dict[str, Any] = {}
         locations: dict[str, str] = {}
@@ -287,17 +317,65 @@ class SpecTranslator:
         body = op.get("requestBody", {})
         if "$ref" in body:
             body = self._resolve_ref(body["$ref"])
+        body_spec: RequestBodySpec | None = None
         if body:
             content = body.get("content", {})
-            for _ctype, cschema in content.items():
-                if cschema and "schema" in cschema:
-                    body_schema = self._resolve_schema(cschema["schema"])
-                    for k, v in body_schema.get("properties", {}).items():
-                        params[k] = self._resolve_schema(v)
-                        locations[k] = "body"
-                    req += list(body_schema.get("required", []))
+            ctype = self._select_content_type(content)
+            if ctype is not None:
+                body_spec = self._build_body_spec(ctype, content[ctype], params, locations, req)
 
-        return params, req, locations
+        return params, req, locations, body_spec
+
+    @staticmethod
+    def _select_content_type(content: dict[str, Any]) -> str | None:
+        """Pick one request-body content type (a tool is a single callable) — F-40.
+
+        Prefers JSON, then form, then multipart; otherwise the first declared type
+        (treated as a raw body). Returns None when no content schema is present.
+        """
+        if not content:
+            return None
+        for known in _CONTENT_PRIORITY:
+            if known in content:
+                return known
+        return next(iter(content))
+
+    def _build_body_spec(
+        self,
+        ctype: str,
+        media: dict[str, Any],
+        params: dict[str, Any],
+        locations: dict[str, str],
+        req: list[str],
+    ) -> RequestBodySpec:
+        """Flatten the chosen request body into tool params and describe its encoding (F-40)."""
+        schema = self._resolve_schema(media["schema"]) if media and "schema" in media else {}
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+
+        # Object body → flatten each property into a body parameter (existing behaviour),
+        # tracking which properties are binary so multipart sends them as file parts.
+        if props:
+            binary: set[str] = set()
+            for k, v in props.items():
+                resolved = self._resolve_schema(v)
+                params[k] = resolved
+                locations[k] = "body"
+                if self._is_binary_schema(resolved):
+                    binary.add(k)
+            req += list(schema.get("required", []))
+            return RequestBodySpec(content_type=ctype, binary_fields=binary)
+
+        # Non-object body (e.g. application/octet-stream or text/plain with a scalar
+        # schema): expose a single `body` parameter sent raw rather than dropping it.
+        raw_field = "body"
+        params.setdefault(raw_field, {**schema, "description": schema.get("description", "Raw request body")})
+        locations[raw_field] = "body"
+        return RequestBodySpec(content_type=ctype, raw=True, raw_field=raw_field)
+
+    @staticmethod
+    def _is_binary_schema(schema: dict[str, Any]) -> bool:
+        """True for an OpenAPI `string` schema with `format: binary`/`byte` (a file part)."""
+        return schema.get("type") == "string" and schema.get("format") in ("binary", "byte")
 
     # ---- Resource Building ----
 

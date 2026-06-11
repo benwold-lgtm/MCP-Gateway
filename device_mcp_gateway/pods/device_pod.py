@@ -9,7 +9,6 @@ Pods are spawned/teared by the Registry based on device health and spec availabi
 """
 
 import asyncio
-import base64
 import json
 from typing import Any
 
@@ -21,6 +20,13 @@ from pybreaker import CircuitBreaker, CircuitBreakerError
 
 from device_mcp_gateway import metrics
 from device_mcp_gateway.auth.base import AbstractAuth
+from device_mcp_gateway.core.adapter import (
+    ERR_CIRCUIT_OPEN,
+    ERR_CONNECTION,
+    ERR_INTERNAL,
+    ERR_TIMEOUT,
+    DeviceAdapter,
+)
 from device_mcp_gateway.pods.sse_server import SseTransport
 from device_mcp_gateway.pods.rate_limiter import TokenBucket
 from device_mcp_gateway.core.translator import McpManifest, McpTool
@@ -137,6 +143,8 @@ class DevicePod:
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self.sse_transport: SseTransport | None = None
+        # Per-device request-encoder + response-normalizer seam (F-49 / F-39 / F-40).
+        self._adapter = DeviceAdapter(max_response_bytes=_MAX_RESPONSE_BYTES)
         self._register_tools()
 
     def _client(self) -> httpx.AsyncClient:
@@ -159,6 +167,7 @@ class DevicePod:
         # Capture once so all tool closures share the same per-pod circuit breaker
         # without it appearing in the function signature (Pydantic would warn on it).
         _pod_breaker = self._breaker
+        _adapter = self._adapter  # request encoder + response normalizer (F-49)
         for tool in self.manifest.tools:
             # Build a callable closure per tool. All closure variables are bound
             # via default-argument so each iteration captures its own snapshot.
@@ -189,6 +198,13 @@ class DevicePod:
                 # tool argument can never override the device's auth header (Tier-0 F-25).
                 headers = _sanitize_header_params(header_params)
                 headers.update(await auth.get_headers() if auth else {})
+                # Encode the body per the operation's declared content type (F-40): JSON,
+                # form, multipart, or raw — instead of always sending json=.
+                body_kwargs = _adapter.encode_body(tool, body_params)
+                # A raw body carries its own content-type header; merge it under auth.
+                body_headers = body_kwargs.pop("headers", None)
+                if body_headers:
+                    headers = {**body_headers, **headers}
 
                 async def _call():
                     c = _get_client()
@@ -196,8 +212,8 @@ class DevicePod:
                         method=tool.method,
                         url=url,
                         headers=headers,
-                        json=body_params if tool.method in ("POST", "PUT", "PATCH") else None,
                         params=query_params or None,
+                        **body_kwargs,
                     )
                     # Only raise on 5xx — device-side failures trip the breaker.
                     # 4xx are client/LLM errors and should not affect circuit state.
@@ -210,38 +226,26 @@ class DevicePod:
                     # (call_async requires Tornado and is not usable in asyncio contexts).
                     with _pod_breaker.calling():
                         resp = await _call()
-                    if resp.status_code == 204 or not resp.content:
-                        return {"status": resp.status_code, "body": None}
-                    # Bound the body we buffer/return to the LLM (Tier-0 F-27): an oversized
-                    # response is a memory-DoS vector and a large prompt-injection channel.
-                    if len(resp.content) > _MAX_RESPONSE_BYTES:
-                        return {
-                            "error": (
-                                f"Device response too large ({len(resp.content)} bytes > "
-                                f"{_MAX_RESPONSE_BYTES} limit)"
-                            ),
-                            "status_code": 502,
-                        }
-                    ct = resp.headers.get("content-type", "")
-                    if "json" in ct:
-                        try:
-                            return {"status": resp.status_code, "body": resp.json()}
-                        except Exception:
-                            pass
-                    if ct.startswith("text/"):
-                        return {"status": resp.status_code, "body": resp.text}
-                    return {"status": resp.status_code, "body": base64.b64encode(resp.content).decode()}
+                    # Normalize into the uniform result envelope (F-39): 4xx becomes an
+                    # error rather than a fake success; the body cap (F-27) lives here too.
+                    return _adapter.build_result(resp)
                 except CircuitBreakerError:
                     logger.warning(f"Circuit breaker open for pod {base_url}")
                     metrics.circuit_breaker_opens_total.labels(hostname=self.hostname).inc()
-                    return {
-                        "error": "Device unavailable: circuit breaker open (too many recent failures)",
-                        "status_code": 503,
-                    }
+                    return _adapter.error_envelope(
+                        ERR_CIRCUIT_OPEN,
+                        "Device unavailable: circuit breaker open (too many recent failures)",
+                        status=503,
+                    )
                 except httpx.HTTPStatusError as e:
-                    return {"error": str(e), "status_code": e.response.status_code}
+                    # 5xx (raised above so it trips the breaker) → normalized error envelope.
+                    return _adapter.normalize_http_error(e.response)
+                except httpx.TimeoutException as e:
+                    return _adapter.error_envelope(ERR_TIMEOUT, f"Device request timed out: {e}", status=504)
+                except httpx.RequestError as e:
+                    return _adapter.error_envelope(ERR_CONNECTION, f"Device request failed: {e}", status=502)
                 except Exception as e:
-                    return {"error": str(e)}
+                    return _adapter.error_envelope(ERR_INTERNAL, str(e))
 
             # Store in local dispatch dict; FastMCP's **kwargs handling would
             # require a 'kwargs' key in arguments, so we bypass call_tool() and
