@@ -119,9 +119,81 @@ def test_distributed_allow_plaintext_override_starts(monkeypatch):
     from device_mcp_gateway.main import create_app
 
     monkeypatch.delenv("MCP_SECRET_KEY", raising=False)
+    # Also override the Tier-0 auth + Redis gates so this test isolates the plaintext path.
     cfg = {
         "registry": {"mode": "distributed"},
-        "gateway": {"secret_key": "", "allow_plaintext_credentials": True},
+        "gateway": {"secret_key": "", "allow_plaintext_credentials": True, "allow_anonymous": True},
+        "redis": {"allow_insecure": True},
+    }
+    app = create_app(override_config=cfg)  # must not raise
+    assert app.state.mode == "distributed"
+
+
+# --- Tier-0 F-23: fail-open auth gate ---------------------------------------
+
+
+def _distributed_secure_base(**gateway):
+    """A distributed cfg that passes the secret + Redis gates, so only auth is under test."""
+    cfg = {
+        "registry": {"mode": "distributed"},
+        "gateway": {"allow_plaintext_credentials": True, **gateway},
+        "redis": {"allow_insecure": True},
+    }
+    return cfg
+
+
+def test_distributed_without_auth_refuses_to_start(monkeypatch):
+    from device_mcp_gateway.main import create_app
+
+    for k in ("MCP_GATEWAY_API_KEY", "MCP_ADMIN_KEY", "MCP_VIEWER_KEY", "MCP_SECRET_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    with pytest.raises(RuntimeError, match="authentication disabled"):
+        create_app(override_config=_distributed_secure_base())
+
+
+def test_distributed_allow_anonymous_override_starts(monkeypatch):
+    from device_mcp_gateway.main import create_app
+
+    for k in ("MCP_GATEWAY_API_KEY", "MCP_ADMIN_KEY", "MCP_VIEWER_KEY", "MCP_SECRET_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    app = create_app(override_config=_distributed_secure_base(allow_anonymous=True))  # must not raise
+    assert app.state.mode == "distributed"
+
+
+def test_distributed_with_api_key_starts_without_anonymous(monkeypatch):
+    from device_mcp_gateway.main import create_app
+
+    monkeypatch.delenv("MCP_SECRET_KEY", raising=False)
+    app = create_app(override_config=_distributed_secure_base(api_key="some-admin-key"))  # must not raise
+    assert app.state.mode == "distributed"
+
+
+# --- Tier-0 F-24: unauthenticated-Redis gate --------------------------------
+
+
+def test_distributed_insecure_redis_refuses_to_start(monkeypatch):
+    from device_mcp_gateway.main import create_app
+
+    monkeypatch.delenv("MCP_REDIS_URL", raising=False)
+    monkeypatch.delenv("MCP_SECRET_KEY", raising=False)
+    cfg = {
+        "registry": {"mode": "distributed"},
+        "gateway": {"allow_plaintext_credentials": True, "allow_anonymous": True},
+        "redis": {"url": "redis://localhost:6379/0"},  # no password, no allow_insecure
+    }
+    with pytest.raises(RuntimeError, match="unauthenticated Redis"):
+        create_app(override_config=cfg)
+
+
+def test_distributed_redis_with_password_starts(monkeypatch):
+    from device_mcp_gateway.main import create_app
+
+    monkeypatch.delenv("MCP_REDIS_URL", raising=False)
+    monkeypatch.delenv("MCP_SECRET_KEY", raising=False)
+    cfg = {
+        "registry": {"mode": "distributed"},
+        "gateway": {"allow_plaintext_credentials": True, "allow_anonymous": True},
+        "redis": {"url": "redis://:s3cret@localhost:6379/0"},
     }
     app = create_app(override_config=cfg)  # must not raise
     assert app.state.mode == "distributed"

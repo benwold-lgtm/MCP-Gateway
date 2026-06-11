@@ -133,6 +133,16 @@ def worker_main() -> None:
             )
             sys.exit(1)
 
+        # Redis control-plane authn gate (Tier-0 F-24): the worker consumes tool calls from
+        # Redis; refuse an unauthenticated Redis unless redis.allow_insecure is set.
+        from device_mcp_gateway.shared.redis_client import assert_redis_secure
+
+        try:
+            assert_redis_secure(cfg)
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
         # Workers have no API server, so expose Prometheus on the dedicated metrics
         # port here (same pattern as the gateway). This also unlocks the
         # redis-stream-lag signal the worker HPA wants.

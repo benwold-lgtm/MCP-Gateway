@@ -261,7 +261,7 @@ If the UI runs as a gateway-pod sidecar, do **not** make it depend on tailing `l
 |------|------|---------|
 | `Namespace` | `mcp-gateway` | Isolates all resources |
 | `ConfigMap` | `gateway-config` | Non-secret `config.yaml` (mode: distributed, Redis URL, registry settings) |
-| `Secret` | `gateway-secrets` | `api-key` and `secret-key` — injected as env vars; **never in ConfigMap** |
+| `Secret` | `gateway-secrets` | `api-key`, `secret-key`, `redis-password`, `redis-url` — injected as env vars; **never in ConfigMap**. Distributed mode requires the api-key (F-23) and an authenticated `redis-url` (F-24). |
 | `StatefulSet` | `redis` | Single Redis 7 instance with AOF persistence |
 | `Service` | `redis` | ClusterIP on port 6379; accessible to gateway and worker pods |
 | `PersistentVolumeClaim` | `redis-data` | Persists Redis AOF data across pod restarts |
@@ -326,11 +326,16 @@ In distributed mode, the gateway immediately returns `{ pod_active: false }` —
 #    deploy/kubernetes/worker-deployment.yaml — adjust replicas and resources
 
 # 2. Create namespace and secrets
+#    Distributed mode REQUIRES an API key (else the gateway refuses to start — Tier-0 F-23)
+#    and an authenticated Redis (redis-password + a redis-url that carries it — Tier-0 F-24).
 kubectl create namespace mcp-gateway
+REDIS_PW=$(openssl rand -hex 24)
 kubectl create secret generic gateway-secrets \
   --namespace=mcp-gateway \
   --from-literal=api-key=$(openssl rand -hex 32) \
-  --from-literal=secret-key=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+  --from-literal=secret-key=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())") \
+  --from-literal=redis-password="$REDIS_PW" \
+  --from-literal=redis-url="redis://:$REDIS_PW@redis:6379/0"   # use rediss:// when Redis terminates TLS
 
 # 3. Deploy everything
 kubectl apply -k deploy/kubernetes/

@@ -35,7 +35,25 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
-          args: ["redis-server", "--appendonly", "yes"]
+          # Require AUTH (Tier-0 F-24): the gateway/worker refuse to connect to an
+          # unauthenticated Redis. The password comes from the gateway-secrets secret
+          # (key: redis-password) and is expanded into --requirepass. For in-transit
+          # protection, additionally terminate TLS (rediss://) — e.g. via a sidecar or
+          # a managed Redis — and point MCP_REDIS_URL at it.
+          args: ["redis-server", "--appendonly", "yes", "--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: redis-password
+            # redis-cli (used by the liveness/readiness probes) reads REDISCLI_AUTH
+            # automatically, so the `redis-cli ping` probes authenticate without a flag.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: redis-password
           ports:
             - name: redis
               containerPort: 6379

@@ -10,12 +10,33 @@ Converts an OpenAPI spec dict into:
   - MCP Prompts (natural-language descriptions of what the device does)
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
 from openapi_spec_validator import validate as _validate_openapi_spec
 from openapi_spec_validator.validation.exceptions import OpenAPISpecValidatorError
+
+# Device-supplied spec text (summaries/descriptions/titles) becomes LLM-facing tool
+# metadata, so it is untrusted (Tier-0 F-26 — schema poisoning / indirect prompt
+# injection). Strip control chars, Unicode bidi overrides, and zero-width characters —
+# all used to hide injected instructions — and length-cap. This removes obfuscation
+# vectors and bounds size; it does not (and cannot, in the gateway) neutralize plain
+# semantic injection, so the LLM client should still treat tool descriptions as
+# untrusted, device-provided content.
+_UNSAFE_TEXT_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f" "\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+_MAX_DESC_LEN = 1024
+
+
+def _sanitize_text(text: str | None, max_len: int = _MAX_DESC_LEN) -> str:
+    """Strip obfuscation characters and cap length on untrusted spec text (Tier-0 F-26)."""
+    if not text:
+        return ""
+    cleaned = _UNSAFE_TEXT_RE.sub("", text)
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1].rstrip() + "…"
+    return cleaned
 
 
 @dataclass
@@ -92,8 +113,8 @@ class SpecTranslator:
             server_version=info.get("version", "v1"),
             hostname=hostname,
             metadata={
-                "title": info.get("title", hostname),
-                "description": info.get("description", ""),
+                "title": _sanitize_text(info.get("title", hostname)),
+                "description": _sanitize_text(info.get("description", "")),
                 "openapi_version": spec.get("openapi", "?"),
             },
         )
@@ -139,7 +160,8 @@ class SpecTranslator:
         """Convert a single OpenAPI operation into an MCP tool."""
         op_id = op.get("operationId", "")
         name = _sanitize_name(op_id or f"{method}_{path}")
-        description = op.get("summary") or op.get("description") or f"{method} {path}"
+        # Tool description is device-supplied and shown to the LLM → untrusted (F-26).
+        description = _sanitize_text(op.get("summary") or op.get("description") or f"{method} {path}")
         parameters, required, locations = self._build_parameter_schema(op)
         tags = op.get("tags", [])
         return McpTool(
@@ -281,7 +303,7 @@ class SpecTranslator:
 
     def _build_resource(self, path: str, op: dict, hostname: str) -> McpResource | None:
         """Convert a GET operation into a read-only MCP resource."""
-        desc = op.get("description", "") or op.get("summary", "") or f"Resource at {path}"
+        desc = _sanitize_text(op.get("description", "") or op.get("summary", "") or f"Resource at {path}")
         uri = f"device://{hostname}{path}"
         name = _sanitize_name(path)
         return McpResource(

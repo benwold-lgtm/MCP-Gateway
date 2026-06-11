@@ -57,8 +57,15 @@ spec:
                   name: gateway-secrets
                   key: secret-key
                   optional: true
+            # Authenticated Redis URL incl. password (Tier-0 F-24), e.g.
+            # redis://:<password>@redis:6379/0 (or rediss://… for TLS). Kept in the
+            # secret so the password isn't in the manifest. The gateway refuses to
+            # start against an unauthenticated Redis unless redis.allow_insecure: true.
             - name: MCP_REDIS_URL
-              value: redis://redis:6379/0
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: redis-url
             - name: GATEWAY_ID
               valueFrom:
                 fieldRef:
