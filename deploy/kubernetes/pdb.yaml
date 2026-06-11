@@ -18,8 +18,9 @@ spec:
       app: device-mcp-gateway
 ---
 # Worker PDB: ensures at least 1 worker remains available to service tool calls
-# and health checks. Devices owned by an evicted worker are reassigned to
-# surviving workers via Redis Stream XAUTOCLAIM after the heartbeat TTL expires.
+# and health checks. When a worker is evicted, its per-device claim leases lapse;
+# the leader-elected reconciler then republishes those devices' assignments to a
+# surviving worker, and in-flight calls are recovered via Redis Stream XAUTOCLAIM.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

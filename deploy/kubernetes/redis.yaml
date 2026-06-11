@@ -1,6 +1,21 @@
 ---
 # Redis StatefulSet + Service for distributed mode shared state.
-# For production, replace with Redis Sentinel or Redis Cluster.
+#
+# ⚠️  SINGLE POINT OF FAILURE (SRE #9). This single replica is the hot path for
+# ALL distributed-mode state: device registry, assignment/call/result streams,
+# the shared rate limiter, device claims, and the reconciler leader lock. If it
+# is unavailable the gateway returns 503 on /readyz (pulled from the LB) and
+# workers retry until it returns.
+#
+# Production: run Redis Sentinel (HA failover) or Redis Cluster instead of this
+# single node, and point MCP_REDIS_URL at the Sentinel/Cluster endpoint.
+#
+# Durability: --appendonly yes (below) persists the AOF, so the registry and all
+# streams — including per-session result streams (SRE #3) — survive a restart.
+# Tool-call results are Redis Streams (not the old fire-and-forget pub/sub), so a
+# clean restart no longer loses in-flight results; only writes in the last
+# appendfsync window (default everysec → ≤1s) can be lost on an unclean crash.
+# See docs/kubernetes-architecture.md → "Redis availability & durability".
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

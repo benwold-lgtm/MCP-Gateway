@@ -17,6 +17,8 @@ from typing import Any, AsyncGenerator
 
 from loguru import logger
 
+from device_mcp_gateway import metrics
+
 _SENTINEL = object()
 
 
@@ -52,16 +54,26 @@ class SseTransport:
             logger.warning(f"Failed to enqueue endpoint event for {session_id}")
         return q
 
-    async def send_to_client(self, session_id: str, message: Any) -> None:
-        """Enqueue a JSON-RPC message for delivery to a specific client."""
+    async def send_to_client(self, session_id: str, message: Any) -> bool:
+        """Enqueue a JSON-RPC message for delivery to a specific client.
+
+        Returns True if the message was enqueued, False if it could not be
+        delivered (unknown session, or the client's queue is full because it has
+        stopped consuming). The caller surfaces a False as an error rather than
+        letting the response vanish silently (SRE #10).
+        """
         q = self._clients.get(session_id)
-        if q:
-            if isinstance(message, dict):
-                message = {"event": "message", "data": json.dumps(message)}
-            try:
-                q.put_nowait(message)
-            except asyncio.QueueFull:
-                logger.warning(f"SSE queue full for client {session_id}, dropping message")
+        if q is None:
+            return False
+        if isinstance(message, dict):
+            message = {"event": "message", "data": json.dumps(message)}
+        try:
+            q.put_nowait(message)
+            return True
+        except asyncio.QueueFull:
+            logger.warning(f"SSE queue full for client {session_id}; backpressure, message not delivered")
+            metrics.sse_messages_dropped_total.labels(hostname=self.hostname).inc()
+            return False
 
     async def event_stream(self, session_id: str) -> AsyncGenerator[Any, None]:
         """Yield SSE events from the client's queue.
@@ -94,7 +106,15 @@ class SseTransport:
         try:
             result = await self._handler(message)
             if result is not None:
-                await self.send_to_client(session_id, result)
+                delivered = await self.send_to_client(session_id, result)
+                if not delivered:
+                    # The response could not be queued to the client's stream
+                    # (gone or not consuming). Tell the POST caller instead of
+                    # dropping the JSON-RPC response silently (SRE #10).
+                    return {
+                        "error": "SSE stream backpressure: response could not be delivered",
+                        "status_code": 503,
+                    }
             return {"status": "accepted"}
         except Exception as e:
             logger.error(f"SSE message handling error: {e}")

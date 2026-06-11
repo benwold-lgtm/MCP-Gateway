@@ -11,9 +11,14 @@ Each worker process:
   4. Runs a health loop (WorkerHealthLoop) for assigned devices
   5. Publishes tool-call results to session:{session_id}:results pub/sub
 
-A worker registers itself in Redis with a heartbeat key (TTL = 2 × health_interval).
-If the heartbeat expires, the gateway and other workers can detect the failure and
-republish pending assignments via XAUTOCLAIM.
+A worker registers itself in Redis with a heartbeat key (TTL = 2 × health_interval)
+and refreshes a per-device claim lease while it owns a pod. When a worker dies, its
+claims lapse; a leader-elected reconciler (one worker at a time) detects devices with
+no live claim, clears the stale ownership the dead worker left, and republishes their
+assignments so a live worker takes over (SRE #1/#2). In-flight tool calls the dead
+worker had read but not acked are recovered by the new owner via XAUTOCLAIM on the
+device call stream. Recovery does not depend on the dead worker restarting with the
+same WORKER_ID.
 """
 
 from __future__ import annotations
@@ -33,11 +38,30 @@ from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
+from device_mcp_gateway.shared.session_router import SessionRouter
 from device_mcp_gateway.worker.health import WorkerHealthLoop, _manifest_to_dict
 
 _ASSIGNMENTS_STREAM = "device:assignments"
 _WORKER_GROUP = "workers"
 _HEARTBEAT_INTERVAL = 10  # seconds
+# Leader lock: exactly one worker runs the reconciler sweep at a time (SRE #1/#2).
+_RECONCILER_LOCK = "reconciler:leader"
+# Bound for a device's dead-letter stream (undeliverable tool calls, SRE #4).
+_DLQ_MAXLEN = 1_000
+
+
+def _decode_fields(fields: dict) -> dict:
+    """Return stream-entry fields with str keys/values.
+
+    Real Redis with decode_responses=True already yields str; fakeredis returns
+    bytes for stream fields. Normalising here lets _dispatch_call read fields the
+    same way whether they came from XREADGROUP or XAUTOCLAIM, under either client.
+    """
+    out = {}
+    for k, v in fields.items():
+        out[k.decode() if isinstance(k, bytes) else k] = v.decode() if isinstance(v, bytes) else v
+    return out
+
 
 _spec_executor = ProcessPoolExecutor(max_workers=2)
 
@@ -80,6 +104,10 @@ class DeviceWorker:
         self._r = redis_client
         self._codec = codec or CredentialCodec(None)
         self._backend: AbstractRegistryBackend | None = None
+        # Route tool-call results through the durable per-session results stream
+        # (SRE #3) instead of fire-and-forget pub/sub, so a result isn't lost when
+        # the subscribing gateway replica is briefly not reading.
+        self._session_router = SessionRouter(redis_client)
 
         self._pods: dict[str, DevicePod] = {}
         self._assigned: set[str] = set()
@@ -95,6 +123,28 @@ class DeviceWorker:
         # TTL for the per-call "result seen" marker the gateway's timeout watcher
         # checks (F6). Outlives the tool-call timeout so the watcher always sees it.
         self._result_marker_ttl = max(config.get("registry", {}).get("tool_call_timeout", 30) * 2, 60)
+        # How often the (leader-elected) reconciler sweeps for orphaned devices (SRE #1/#2).
+        self._reconcile_interval = config.get("registry", {}).get("reconcile_interval", 30)
+        # Only reclaim call-stream entries idle longer than this, so XAUTOCLAIM
+        # never steals a call still in-flight on a healthy owner. Comfortably
+        # above the tool-call timeout.
+        self._reclaim_min_idle_ms = max(config.get("registry", {}).get("tool_call_timeout", 30), 30) * 1000
+        # Cap concurrent in-flight tool calls per device (SRE #5). The consume loop
+        # blocks on this when saturated rather than spawning unbounded tasks/outbound
+        # requests, so a burst becomes visible stream lag instead of worker OOM.
+        self._max_calls_per_device = config.get("registry", {}).get("max_concurrent_calls_per_device", 20)
+        # Seconds to let in-flight tool calls finish on shutdown before cancelling,
+        # so a rolling update doesn't error every active call (SRE #6).
+        self._drain_timeout = config.get("registry", {}).get("shutdown_drain_timeout", 25)
+        # In-flight dispatch tasks, tracked so shutdown can drain them (SRE #6).
+        self._inflight_calls: set[asyncio.Task] = set()
+        # Liveness (SRE #8): the heartbeat is withheld when a critical loop has
+        # crashed or the assignment consumer has stalled, so K8s liveness fails and
+        # the reconciler reassigns this worker's devices instead of it looking alive
+        # while doing nothing.
+        self._assignment_progress = time.monotonic()
+        self._critical_tasks: list[asyncio.Task] = []
+        self._liveness_staleness = max(config.get("registry", {}).get("health_check_interval", 30) * 2, 60)
         # _health is initialised in run() after the backend is available
         self._health: WorkerHealthLoop | None = None
 
@@ -130,24 +180,49 @@ class DeviceWorker:
             except (NotImplementedError, RuntimeError):
                 pass  # Windows / some test runners
 
-        tasks = [
-            asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
-            asyncio.create_task(self._consume_assignments(), name="assignments"),
-            asyncio.create_task(self._health.run_forever(self._assigned), name="health"),  # type: ignore[union-attr]
-            asyncio.create_task(self._metrics_loop(), name="metrics"),
-        ]
+        assert self._health is not None  # set just above in run()
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
+        assignments_task = asyncio.create_task(self._consume_assignments(), name="assignments")
+        health_task = asyncio.create_task(self._health.run_forever(self._assigned), name="health")
+        metrics_task = asyncio.create_task(self._metrics_loop(), name="metrics")
+        reconcile_task = asyncio.create_task(self._reconcile_loop(), name="reconcile")
+        tasks = [heartbeat_task, assignments_task, health_task, metrics_task, reconcile_task]
+        # Loops whose unexpected exit means this worker can no longer do its job;
+        # the heartbeat is withheld if any has crashed (SRE #8).
+        self._critical_tasks = [assignments_task, health_task, reconcile_task]
         try:
             await self._stop_event.wait()
         finally:
+            # Stop accepting new work first (background loops + per-device consumers),
+            # then let in-flight tool calls finish before tearing down pods (SRE #6),
+            # so a rolling update doesn't error every active call.
             for t in tasks:
                 t.cancel()
             for t in list(self._call_tasks.values()):
                 t.cancel()
             await asyncio.gather(*tasks, *self._call_tasks.values(), return_exceptions=True)
+            await self._drain_inflight_calls()
             await self._shutdown_pods()
             await self._r.srem("workers:active", self._id)
             await self._health.close()
             logger.info(f"Worker {self._id} shut down")
+
+    async def _drain_inflight_calls(self) -> None:
+        """Wait for in-flight tool calls to finish, up to _drain_timeout (SRE #6).
+
+        Called after the consume loops are cancelled, so no new calls start. Calls
+        still running past the timeout are cancelled so shutdown can't hang.
+        """
+        pending = [t for t in self._inflight_calls if not t.done()]
+        if not pending:
+            return
+        logger.info(f"Draining {len(pending)} in-flight tool call(s) (timeout {self._drain_timeout}s)")
+        _done, still = await asyncio.wait(pending, timeout=self._drain_timeout)
+        if still:
+            logger.warning(f"{len(still)} tool call(s) did not finish in {self._drain_timeout}s; cancelling")
+            for t in still:
+                t.cancel()
+            await asyncio.gather(*still, return_exceptions=True)
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -160,9 +235,114 @@ class DeviceWorker:
         ttl = self._config.get("registry", {}).get("health_check_interval", 30) * 2
         key = f"worker:{self._id}:heartbeat"
         while not self._stop_event.is_set():
-            await self._r.set(key, str(time.time()), ex=ttl)
-            await self._refresh_claims()  # keep device-claim leases alive (RC-6)
+            if self._loops_healthy():
+                # Re-assert set membership each beat so a worker pruned during its
+                # startup race (added before its first heartbeat) re-registers.
+                await self._r.sadd("workers:active", self._id)
+                await self._r.set(key, str(time.time()), ex=ttl)
+                await self._refresh_claims()  # keep device-claim leases alive (RC-6)
+            else:
+                # Withhold the heartbeat AND the claim refresh so K8s liveness fails
+                # (pod restarts) and, meanwhile, the leases lapse so the reconciler
+                # reassigns this worker's devices (SRE #8).
+                logger.error("Worker loops unhealthy — withholding heartbeat and claim refresh (SRE #8)")
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
+
+    def _loops_healthy(self) -> bool:
+        """True unless a critical loop crashed or the assignment consumer stalled."""
+        if self._stop_event.is_set():
+            return True  # shutting down — not a failure
+        for t in self._critical_tasks:
+            if t.done():
+                logger.error(f"Critical worker loop '{t.get_name()}' exited unexpectedly")
+                return False
+        if time.monotonic() - self._assignment_progress > self._liveness_staleness:
+            logger.error("Assignment consumer has not progressed; worker appears stalled")
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Reconciler (leader-elected) — SRE #1/#2
+    # ------------------------------------------------------------------
+
+    async def _reconcile_loop(self) -> None:
+        """Periodically heal orphaned devices. One worker leads at a time.
+
+        Pre-fix, a worker death left its devices dark forever: recovery relied on
+        the dead worker restarting with the same WORKER_ID (in K8s the pod name
+        changes, so it never did), and nothing republished the assignment. This
+        sweep makes failure self-healing without depending on the dead worker.
+        """
+        lock_ttl = max(self._reconcile_interval * 2, 60)
+        while not self._stop_event.is_set():
+            try:
+                if await self._acquire_leadership(lock_ttl):
+                    await self._reconcile_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Reconciler cycle failed")
+            await asyncio.sleep(self._reconcile_interval)
+
+    async def _acquire_leadership(self, ttl: int) -> bool:
+        """Claim/refresh the reconciler leader lock. Only the leader sweeps.
+
+        SET NX to take it; if we already hold it, refresh the TTL so leadership is
+        sticky while we're alive but lapses soon after we die, letting another
+        worker take over.
+        """
+        key = _RECONCILER_LOCK
+        if await self._r.set(key, self._id, nx=True, ex=ttl):
+            return True
+        if (await self._r.get(key)) == self._id:
+            await self._r.expire(key, ttl)
+            return True
+        return False
+
+    async def _reconcile_once(self) -> None:
+        """Republish 'assign' for every device with no live claim.
+
+        A live owner keeps claim:{hostname} refreshed via its heartbeat; when a
+        worker dies the lease lapses within ~claim_ttl. A lapsed claim therefore
+        means no worker is running the pod — so we clear the stale pod_active/
+        worker_id the dead owner left in Redis and republish an assignment for a
+        live worker to pick up (its _spawn_pod re-acquires the now-free claim).
+
+        Idempotent: a device that already has a live claim is skipped, and
+        _spawn_pod re-checks the claim, so a duplicate assign can't double-run a pod.
+        Also re-homes devices that went unreachable (and were unassigned), so they
+        recover once the target comes back.
+        """
+        assert self._backend is not None, "backend not initialised — call run() first"
+        hostnames = await self._backend.list_hostnames()
+        reassigned = 0
+        for hostname in hostnames:
+            if await self._r.get(f"claim:{hostname}") is not None:
+                continue  # a live worker holds the claim
+            cfg = await self._backend.get_device(hostname)
+            if cfg is None:
+                continue  # raced with deregistration
+            if cfg.pod_active or cfg.worker_id:
+                # Ownership left stale by a dead worker — make Redis reflect reality.
+                await self._backend.update_device_fields(hostname, pod_active=False, worker_id=None)
+            await self._backend.publish_assignment("assign", hostname)
+            reassigned += 1
+            logger.info(f"Reconciler reassigned orphaned device {hostname}")
+        if reassigned:
+            logger.info(f"Reconciler reassigned {reassigned} orphaned device(s) this cycle")
+        await self._prune_dead_workers()
+
+    async def _prune_dead_workers(self) -> None:
+        """Drop crashed workers (no live heartbeat) from workers:active (SRE #7/#8).
+
+        A worker that crashes never deregisters, so the set otherwise grows without
+        bound and overstates the fleet. Live workers re-assert membership each
+        heartbeat, so a worker pruned during its brief startup race re-registers.
+        """
+        for wid in await self._r.smembers("workers:active"):
+            if not await self._r.exists(f"worker:{wid}:heartbeat"):
+                await self._r.srem("workers:active", wid)
+                logger.info(f"Pruned dead worker {wid} from workers:active")
 
     # ------------------------------------------------------------------
     # Metrics
@@ -187,9 +367,16 @@ class DeviceWorker:
     async def _refresh_worker_metrics(self) -> None:
         metrics.worker_pods.set(len(self._pods))
         pending = 0
+        undelivered = 0
         for hostname in list(self._assigned):
-            pending += await self._stream_pending(f"device:{hostname}:calls", f"workers-{hostname}")
+            stream, group = f"device:{hostname}:calls", f"workers-{hostname}"
+            pending += await self._stream_pending(stream, group)
+            undelivered += await self._stream_lag(stream, group)
         metrics.worker_pending_calls.set(pending)
+        # Never-read backlog held off by the per-device concurrency cap (SRE #5):
+        # without this, a saturated worker shows low pending while work piles up
+        # undelivered in the stream, hiding the backlog from the HPA.
+        metrics.worker_undelivered_calls.set(undelivered)
         metrics.worker_assignments_lag.set(await self._stream_pending(_ASSIGNMENTS_STREAM, _WORKER_GROUP))
 
     async def _stream_pending(self, stream: str, group: str) -> int:
@@ -210,12 +397,37 @@ class DeviceWorker:
         except (TypeError, IndexError, ValueError):
             return 0
 
+    async def _stream_lag(self, stream: str, group: str) -> int:
+        """Count entries added to the stream but not yet delivered to ``group``
+        (XINFO GROUPS ``lag``). Returns 0 on any error or when Redis can't compute
+        the lag, so a metrics hiccup never disrupts the worker loop (SRE #5)."""
+        try:
+            groups = await self._r.xinfo_groups(stream)
+        except Exception:
+            return 0
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            name = g.get("name")
+            if isinstance(name, bytes):
+                name = name.decode()
+            if name == group:
+                lag = g.get("lag")
+                try:
+                    return int(lag) if lag is not None else 0
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+
     # ------------------------------------------------------------------
     # Assignment consumer
     # ------------------------------------------------------------------
 
     async def _consume_assignments(self) -> None:
         while not self._stop_event.is_set():
+            # Mark loop progress for the liveness check (SRE #8). This loop blocks
+            # ≤2s per iteration, so a stale timestamp means it's wedged.
+            self._assignment_progress = time.monotonic()
             try:
                 results = await self._r.xreadgroup(
                     _WORKER_GROUP,
@@ -258,8 +470,21 @@ class DeviceWorker:
             if "BUSYGROUP" not in str(exc):
                 logger.warning(f"xgroup_create {stream}: {exc}")
 
+        # Per-device concurrency cap (SRE #5). Awaiting this in the consume loop
+        # applies backpressure: when slots are exhausted we stop reading new
+        # entries, so they remain delivered-unacked (visible as stream lag) rather
+        # than piling up as unbounded in-memory tasks.
+        sem = asyncio.Semaphore(self._max_calls_per_device)
+
         while not self._stop_event.is_set() and hostname in self._assigned:
             try:
+                # First, reclaim entries a previous owner (typically a dead worker)
+                # delivered into the group's PEL but never acked, so in-flight calls
+                # at crash time aren't stranded forever (SRE #1). Only entries idle
+                # longer than _reclaim_min_idle_ms are taken, so this never steals a
+                # call still running on a healthy owner.
+                await self._reclaim_pending(hostname, stream, group, sem)
+
                 results = await self._r.xreadgroup(
                     group,
                     self._id,
@@ -271,23 +496,105 @@ class DeviceWorker:
                     continue
                 for _s, messages in results:
                     for msg_id, fields in messages:
-                        asyncio.create_task(self._dispatch_call(hostname, stream, group, msg_id, fields))
+                        await self._schedule_dispatch(sem, hostname, stream, group, msg_id, _decode_fields(fields))
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception(f"Call consumer error for {hostname}; retrying")
                 await asyncio.sleep(1)
 
+    async def _schedule_dispatch(
+        self, sem: asyncio.Semaphore, hostname: str, stream: str, group: str, msg_id: str, fields: dict
+    ) -> None:
+        """Acquire a per-device slot, then dispatch on a tracked task (SRE #5/#6).
+
+        The acquire blocks the caller (the consume loop) when the device is at its
+        concurrency cap — that is the backpressure. The task is tracked in
+        _inflight_calls so shutdown can drain it, and releases the slot when done.
+        """
+        await sem.acquire()
+        task = asyncio.create_task(self._dispatch_guarded(sem, hostname, stream, group, msg_id, fields))
+        self._inflight_calls.add(task)
+        task.add_done_callback(self._inflight_calls.discard)
+
+    async def _dispatch_guarded(
+        self, sem: asyncio.Semaphore, hostname: str, stream: str, group: str, msg_id: str, fields: dict
+    ) -> None:
+        try:
+            await self._dispatch_call(hostname, stream, group, msg_id, fields)
+        finally:
+            sem.release()
+
+    async def _reclaim_pending(self, hostname: str, stream: str, group: str, sem: asyncio.Semaphore) -> None:
+        """XAUTOCLAIM idle pending entries to this worker and dispatch them.
+
+        Recovers tool calls a now-dead worker had read (moving them into its PEL)
+        but never acked before crashing. The new owner — assigned by the
+        reconciler (SRE #2) — runs this and picks the stranded calls up. Tolerant
+        of XAUTOCLAIM being unavailable or transient errors: a reclaim hiccup must
+        never break the consume loop.
+        """
+        try:
+            claimed = await self._r.xautoclaim(
+                stream, group, self._id, min_idle_time=self._reclaim_min_idle_ms, start_id="0-0", count=10
+            )
+        except Exception as exc:
+            logger.debug(f"xautoclaim {stream}: {exc}")
+            return
+        # redis-py returns (next_cursor, claimed_messages[, deleted_ids]).
+        messages = claimed[1] if isinstance(claimed, (list, tuple)) and len(claimed) >= 2 else []
+        for msg_id, fields in messages:
+            mid = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+            logger.info(f"Reclaimed stranded call {mid} for {hostname}")
+            await self._schedule_dispatch(sem, hostname, stream, group, mid, _decode_fields(fields))
+
+    async def _dead_letter(self, hostname: str, fields: dict, reason: str) -> None:
+        """Move an undeliverable tool call to the device's dead-letter stream (SRE #4).
+
+        Bounded so it can't grow without limit. Failure to dead-letter is logged
+        but never propagated — it must not break dispatch/ack.
+        """
+        try:
+            payload = {k: str(v) for k, v in fields.items()}
+            payload["reason"] = reason
+            payload["ts"] = str(time.time())
+            await self._r.xadd(f"device:{hostname}:calls:dead", payload, maxlen=_DLQ_MAXLEN, approximate=True)
+            metrics.dead_letter_total.labels(hostname=hostname).inc()
+        except Exception:
+            logger.exception(f"Failed to dead-letter call for {hostname}")
+
     async def _dispatch_call(self, hostname: str, stream: str, group: str, msg_id: str, fields: dict) -> None:
         session_id = fields.get("session_id", "")
         request_id = fields.get("request_id", "")
+        # X-Request-Id from the gateway (SRE O2): bind it in the worker's audit log
+        # so one trace id spans the gateway dispatch and the worker execution.
+        rid = fields.get("rid", "-")
         try:
             message = json.loads(fields.get("message", "{}"))
+            _method = message.get("method", "?") if isinstance(message, dict) else "?"
             pod = self._pods.get(hostname)
             if pod is None:
-                logger.warning(f"No pod for {hostname}, discarding call {msg_id}")
+                # No pod to serve this call (e.g. a pod-replace window). Dead-letter
+                # it instead of dropping silently, and tell the client rather than
+                # letting it hang to the F6 timeout (SRE #4).
+                logger.warning(f"No pod for {hostname}; dead-lettering call {msg_id}")
+                await self._dead_letter(hostname, fields, "no active pod")
+                msg_id_val = message.get("id") if isinstance(message, dict) else None
+                if session_id and msg_id_val is not None:
+                    await self._session_router.publish_result(
+                        session_id,
+                        {
+                            "jsonrpc": "2.0",
+                            "id": msg_id_val,
+                            "error": {"code": -32001, "message": f"No active pod for {hostname}; call not served"},
+                        },
+                    )
+                if request_id:
+                    await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
+                logger.bind(event="audit", hostname=hostname, method=_method, status="dead_letter", rid=rid).info(
+                    "tool dispatch"
+                )
                 return
-            _method = message.get("method", "?") if isinstance(message, dict) else "?"
             _t = time.perf_counter()
             result = await pod.call_tool(message)
             _dur = time.perf_counter() - _t
@@ -302,13 +609,23 @@ class DeviceWorker:
             metrics.tool_calls_total.labels(hostname=hostname, method=_method, status=_status).inc()
             metrics.tool_call_duration_seconds.labels(hostname=hostname).observe(_dur)
             if result is not None:
-                await self._r.publish(f"session:{session_id}:results", json.dumps(result))
+                await self._session_router.publish_result(session_id, result)
             # Mark the call as handled so the gateway's timeout watcher (F6)
             # stands down even when the result reached a different gateway replica.
             if request_id:
                 await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
+            # Distributed-mode audit log with execution latency (SRE O2/O3): the
+            # gateway only logs "dispatched", so per-call latency lives here.
+            logger.bind(
+                event="audit",
+                hostname=hostname,
+                method=_method,
+                status=_status,
+                duration_ms=round(_dur * 1000, 1),
+                rid=rid,
+            ).info("tool dispatch")
         except Exception:
-            logger.exception(f"Tool call dispatch error for {hostname} session {session_id}")
+            logger.exception(f"Tool call dispatch error for {hostname} session {session_id} rid={rid}")
         finally:
             await self._r.xack(stream, group, msg_id)
 

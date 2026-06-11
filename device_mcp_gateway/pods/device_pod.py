@@ -18,6 +18,7 @@ from loguru import logger
 from mcp.server.fastmcp import FastMCP
 from pybreaker import CircuitBreaker, CircuitBreakerError
 
+from device_mcp_gateway import metrics
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.pods.sse_server import SseTransport
 from device_mcp_gateway.pods.rate_limiter import TokenBucket
@@ -147,6 +148,7 @@ class DevicePod:
                     return {"status": resp.status_code, "body": base64.b64encode(resp.content).decode()}
                 except CircuitBreakerError:
                     logger.warning(f"Circuit breaker open for pod {base_url}")
+                    metrics.circuit_breaker_opens_total.labels(hostname=self.hostname).inc()
                     return {
                         "error": "Device unavailable: circuit breaker open (too many recent failures)",
                         "status_code": 503,

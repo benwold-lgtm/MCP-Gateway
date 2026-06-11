@@ -2,15 +2,24 @@
 # Copyright (c) 2026 Ben Wold. All rights reserved.
 # Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """
-SSE session registry and result routing via Redis pub/sub.
+SSE session registry and result routing via a durable per-session Redis Stream.
 
 In distributed mode every gateway instance is stateless with respect to
 SSE clients.  When a client opens a stream on Gateway A and a tool call
 arrives at Gateway B, the result still reaches the client because:
 
-  Worker → PUBLISH session:{id}:results <json-rpc-response>
-         → Redis fan-out
-         → Gateway A (subscribed to session:{id}:results) → SSE event
+  Worker → XADD session:{id}:results <json-rpc-response>
+         → Redis Stream (durable, buffered)
+         → Gateway A (XREAD BLOCK on session:{id}:results) → SSE event
+
+A Stream rather than pub/sub (SRE #3): pub/sub is fire-and-forget, so a result
+published while the single subscribing gateway was mid-restart, briefly
+disconnected, or between reads was lost — and because the worker had already
+marked the call handled, the F6 timeout watcher stood down too, leaving the
+client to hang. A Stream buffers undelivered entries and lets the reader start
+from id "0", so results that arrive between register() and subscribe() are not
+missed. The stream is bounded (MAXLEN) and carries the session TTL so abandoned
+sessions can't leak.
 
 Session keys carry a TTL so abandoned sessions expire automatically.
 """
@@ -25,6 +34,32 @@ from loguru import logger
 
 _SESSION_TTL = 86_400  # 24 h — refreshed periodically while the stream is active
 _REFRESH_THROTTLE = 60.0  # min seconds between TTL refreshes on a busy stream
+# Cap a session's buffered results so a client that stops reading can't grow the
+# stream without bound. Approximate trimming keeps XADD O(1).
+_RESULTS_MAXLEN = 1000
+# Block this long on each XREAD before looping. Short enough that client
+# disconnect (task cancellation) and shutdown are observed promptly; long enough
+# to avoid a busy spin. sse-starlette sends its own keep-alive pings meanwhile.
+_XREAD_BLOCK_MS = 5_000
+
+
+def _results_key(session_id: str) -> str:
+    return f"session:{session_id}:results"
+
+
+def _field(fields: dict, name: str) -> str | None:
+    """Read a stream-entry field tolerant of str or bytes keys/values.
+
+    Real Redis with decode_responses=True yields str keys/values; fakeredis does
+    not decode stream fields, so the same entry comes back with bytes keys. Accept
+    both so the unit suite (fakeredis) and production (real Redis) agree.
+    """
+    val = fields.get(name)
+    if val is None:
+        val = fields.get(name.encode())
+    if isinstance(val, bytes):
+        val = val.decode()
+    return val
 
 
 class _RefreshThrottle:
@@ -79,39 +114,63 @@ class SessionRouter:
         return h or None
 
     async def refresh(self, session_id: str, ttl: int = _SESSION_TTL) -> None:
-        await self._r.expire(f"session:{session_id}", ttl)
+        # Keep the session hash and its results stream on the same TTL so neither
+        # outlives the other.
+        pipe = self._r.pipeline()
+        pipe.expire(f"session:{session_id}", ttl)
+        pipe.expire(_results_key(session_id), ttl)
+        await pipe.execute()
 
     async def delete(self, session_id: str) -> None:
-        await self._r.delete(f"session:{session_id}")
+        pipe = self._r.pipeline()
+        pipe.delete(f"session:{session_id}")
+        pipe.delete(_results_key(session_id))
+        await pipe.execute()
         logger.debug(f"Session deleted: session_id={session_id}")
 
     async def subscribe(self, session_id: str) -> AsyncGenerator[dict, None]:
-        """Yield JSON-RPC response dicts published to this session's channel.
+        """Yield JSON-RPC response dicts from this session's durable results stream.
 
-        Uses a dedicated pub/sub connection so the main Redis client is free
-        for command traffic.  Exits when the generator is cancelled (client
-        disconnect).
+        Reads via XREAD BLOCK on a dedicated connection (so the command client
+        stays free) starting from id "0", so results buffered between register()
+        and this call are not missed. Exits when the generator is cancelled
+        (client disconnect).
         """
-        channel = f"session:{session_id}:results"
+        key = _results_key(session_id)
+        last_id = "0"  # read from the start so nothing buffered pre-subscribe is lost
         throttle = _RefreshThrottle(_REFRESH_THROTTLE)
-        async with self._ps.pubsub() as ps:
-            await ps.subscribe(channel)
-            logger.debug(f"Subscribed to {channel}")
-            try:
-                async for msg in ps.listen():
-                    if msg["type"] == "message":
-                        # Throttle TTL refreshes so a busy stream doesn't issue
-                        # one EXPIRE per message (RC-3).
-                        if throttle.ready(time.monotonic()):
-                            await self.refresh(session_id)
+        logger.debug(f"Reading results stream {key}")
+        try:
+            while True:
+                resp = await self._ps.xread({key: last_id}, count=10, block=_XREAD_BLOCK_MS)
+                if not resp:
+                    continue  # block elapsed with no new entries — loop (allows cancellation)
+                # Throttle TTL refreshes so a busy stream doesn't issue one EXPIRE
+                # per message (RC-3).
+                if throttle.ready(time.monotonic()):
+                    await self.refresh(session_id)
+                for _stream, entries in resp:
+                    for msg_id, fields in entries:
+                        last_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                        raw = _field(fields, "data")
+                        if raw is None:
+                            logger.warning(f"Results entry on {key} missing 'data' field: {fields!r}")
+                            continue
                         try:
-                            yield json.loads(msg["data"])
+                            yield json.loads(raw)
                         except json.JSONDecodeError:
-                            logger.warning(f"Non-JSON message on {channel}: {msg['data']!r}")
-            finally:
-                logger.debug(f"Unsubscribed from {channel}")
+                            logger.warning(f"Non-JSON entry on {key}: {raw!r}")
+        finally:
+            logger.debug(f"Stopped reading results stream {key}")
 
     async def publish_result(self, session_id: str, result: dict) -> None:
-        """Publish a JSON-RPC result to the session's pub/sub channel."""
-        channel = f"session:{session_id}:results"
-        await self._r.publish(channel, json.dumps(result))
+        """Append a JSON-RPC result to the session's durable results stream.
+
+        XADD + EXPIRE in one pipeline so the stream is bounded in size (MAXLEN)
+        and lifetime (TTL) regardless of whether a gateway ever drains it.
+        """
+        key = _results_key(session_id)
+        pipe = self._r.pipeline()
+        pipe.xadd(key, {"data": json.dumps(result)}, maxlen=_RESULTS_MAXLEN, approximate=True)
+        pipe.expire(key, _SESSION_TTL)
+        await pipe.execute()

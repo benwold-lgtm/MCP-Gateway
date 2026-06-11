@@ -147,3 +147,97 @@ async def test_dispatch_sets_result_marker(real_redis):
     await worker._dispatch_call("dev1", "device:dev1:calls", "g", msg_id, fields)
 
     assert await real_redis.get("result:req1") == "1"
+
+
+async def test_dispatch_dead_letters_when_no_pod(real_redis):
+    """No pod for the device → the call is dead-lettered, the client is told, and
+    the original is acked. Exercises XADD/XACK/XPENDING against real Redis (SRE #4)."""
+    worker = DeviceWorker(worker_id="w1", config={}, redis_client=real_redis)
+    stream, group = "device:dev1:calls", "workers-dev1"
+    await real_redis.xgroup_create(stream, group, id="0", mkstream=True)
+    msg_id = await real_redis.xadd(stream, {"x": "1"})
+    await real_redis.xreadgroup(group, "w1", {stream: ">"}, count=10)  # into PEL
+
+    fields = {
+        "session_id": "s1",
+        "request_id": "req1",
+        "message": json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call"}),
+    }
+    await worker._dispatch_call("dev1", stream, group, msg_id, fields)
+
+    assert await real_redis.xlen("device:dev1:calls:dead") == 1
+    assert await real_redis.get("result:req1") == "1"
+    assert (await real_redis.xpending(stream, group))["pending"] == 0
+
+
+# --- Reconciler end-to-end (real RedisRegistryBackend) — SRE #1/#2 ----------
+
+
+async def test_reconciler_heals_orphaned_device(real_redis):
+    """A device whose owning worker died (claim lease lapsed, stale pod_active in
+    Redis) is healed: ownership cleared and an 'assign' republished on the real
+    assignments stream. Exercises the RedisRegistryBackend path fakeredis can't."""
+    backend = RedisRegistryBackend(real_redis)
+    await backend.initialize()
+    await backend.set_device(
+        "dev1", DeviceConfig(hostname="dev1", base_url="http://dev1", pod_active=True, worker_id="dead-worker")
+    )
+    worker = DeviceWorker(worker_id="live", config={}, redis_client=real_redis)
+    worker._backend = backend
+
+    assert await real_redis.get("claim:dev1") is None  # lease lapsed
+
+    await worker._reconcile_once()
+
+    cfg = await backend.get_device("dev1")
+    assert cfg is not None and cfg.pod_active is False and cfg.worker_id is None
+
+    entries = await real_redis.xrange("device:assignments")
+    actions = [(f.get("action"), f.get("hostname")) for _id, f in entries]
+    assert ("assign", "dev1") in actions
+
+
+async def test_reconciler_skips_device_with_live_claim(real_redis):
+    backend = RedisRegistryBackend(real_redis)
+    await backend.initialize()
+    await backend.set_device(
+        "dev1", DeviceConfig(hostname="dev1", base_url="http://dev1", pod_active=True, worker_id="live")
+    )
+    await real_redis.set("claim:dev1", "live", ex=60)
+    worker = DeviceWorker(worker_id="live", config={}, redis_client=real_redis)
+    worker._backend = backend
+
+    await worker._reconcile_once()
+
+    entries = await real_redis.xrange("device:assignments")
+    actions = [(f.get("action"), f.get("hostname")) for _id, f in entries]
+    assert ("assign", "dev1") not in actions
+    cfg = await backend.get_device("dev1")
+    assert cfg is not None and cfg.pod_active is True
+
+
+# --- Durable SSE result delivery (real Redis stream) — SRE #3 ---------------
+
+
+async def test_result_published_before_subscribe_survives(real_redis):
+    """A result appended before the gateway starts reading is still delivered —
+    the failure mode the pre-#3 pub/sub path could not survive."""
+    import redis.asyncio as aioredis
+    from tests.conftest import TEST_REDIS_URL
+
+    pubsub_client = aioredis.from_url(TEST_REDIS_URL, decode_responses=True)
+    try:
+        router = SessionRouter(real_redis, pubsub_client=pubsub_client)
+        await router.publish_result("s1", {"ok": True})  # arrives before any reader
+
+        received = []
+
+        async def _consume():
+            async for msg in router.subscribe("s1"):
+                received.append(msg)
+                break
+
+        await asyncio.wait_for(asyncio.create_task(_consume()), timeout=3)
+        assert received == [{"ok": True}]
+    finally:
+        await pubsub_client.aclose()

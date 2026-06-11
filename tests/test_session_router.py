@@ -62,6 +62,73 @@ async def test_delete_removes_session():
     assert await router.get("sess3") is None
 
 
+# --- SRE #3: durable result delivery via a per-session stream ---------------
+
+
+@pytest.mark.asyncio
+async def test_result_published_before_subscribe_is_not_lost():
+    """The durability guarantee (SRE #3): a result appended before the gateway
+    starts reading is still delivered. Fire-and-forget pub/sub dropped it."""
+    router = _router()
+    await router.publish_result("s1", {"n": 1})  # lands before any reader attaches
+
+    received = []
+
+    async def _consume():
+        async for msg in router.subscribe("s1"):
+            received.append(msg)
+            break
+
+    await asyncio.wait_for(asyncio.create_task(_consume()), timeout=2)
+    assert received == [{"n": 1}]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_reads_results_in_order():
+    router = _router()
+    for i in range(3):
+        await router.publish_result("s2", {"i": i})
+
+    received = []
+
+    async def _consume():
+        async for msg in router.subscribe("s2"):
+            received.append(msg)
+            if len(received) >= 3:
+                break
+
+    await asyncio.wait_for(asyncio.create_task(_consume()), timeout=2)
+    assert received == [{"i": 0}, {"i": 1}, {"i": 2}]
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_results_stream():
+    router = _router()
+    await router.publish_result("s3", {"n": 1})
+    assert await router._r.exists("session:s3:results") == 1
+    await router.delete("s3")
+    assert await router._r.exists("session:s3:results") == 0
+
+
+@pytest.mark.asyncio
+async def test_results_stream_is_bounded():
+    """A client that never reads can't grow the stream without bound (MAXLEN)."""
+    from device_mcp_gateway.shared.session_router import _RESULTS_MAXLEN
+
+    router = _router()
+    for i in range(_RESULTS_MAXLEN + 500):
+        await router.publish_result("s4", {"i": i})
+    assert await router._r.xlen("session:s4:results") <= _RESULTS_MAXLEN
+
+
+@pytest.mark.asyncio
+async def test_publish_result_sets_ttl_on_stream():
+    """The results stream carries the session TTL so an abandoned session can't leak."""
+    router = _router()
+    await router.publish_result("s5", {"n": 1})
+    assert await router._r.ttl("session:s5:results") > 0
+
+
 # --- RC-3: throttle TTL refresh on busy streams ----------------------------
 
 

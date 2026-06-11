@@ -34,6 +34,11 @@ __all__ = [
     "worker_pods",
     "worker_pending_calls",
     "worker_assignments_lag",
+    "worker_undelivered_calls",
+    "tool_call_timeouts_total",
+    "sse_messages_dropped_total",
+    "dead_letter_total",
+    "circuit_breaker_opens_total",
     "metrics_port",
     "metrics_enabled",
     "start_metrics_server",
@@ -115,6 +120,39 @@ worker_pending_calls = Gauge(
 worker_assignments_lag = Gauge(
     "mcp_worker_assignments_lag",
     "Pending entries in this worker's assignments consumer group.",
+)
+# Undelivered (never-read) tool-call backlog across this worker's device streams
+# (XINFO GROUPS lag). worker_pending_calls counts delivered-but-unacked (in-flight)
+# work; this counts work not yet read — held back by the per-device concurrency cap
+# (SRE #5). Sum the two for total work waiting → the recommended worker HPA signal.
+worker_undelivered_calls = Gauge(
+    "mcp_worker_undelivered_calls",
+    "Tool-call stream entries not yet delivered to this worker's consumer group "
+    "(never-read backlog). Add to mcp_worker_pending_calls for total work waiting.",
+)
+
+# --- Failure-mode counters (SRE O1) ------------------------------------------
+# Counters at the exact sites where requests fail or are shed, so failures are
+# visible in Prometheus instead of only in logs.
+tool_call_timeouts_total = Counter(
+    "mcp_tool_call_timeouts_total",
+    "Tool calls that hit the gateway's no-worker-responded timeout (F6).",
+    ["hostname"],
+)
+sse_messages_dropped_total = Counter(
+    "mcp_sse_messages_dropped_total",
+    "SSE responses dropped because a client's queue was full (embedded mode).",
+    ["hostname"],
+)
+dead_letter_total = Counter(
+    "mcp_dead_letter_total",
+    "Tool calls moved to a device's dead-letter stream because they were undeliverable.",
+    ["hostname"],
+)
+circuit_breaker_opens_total = Counter(
+    "mcp_circuit_breaker_opens_total",
+    "Tool calls rejected because a device pod's circuit breaker was open.",
+    ["hostname"],
 )
 
 
