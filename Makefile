@@ -1,4 +1,4 @@
-.PHONY: install test test-integration test-fast lint format typecheck build run worker clean
+.PHONY: install test test-integration test-fast lint format typecheck security build run worker clean
 
 install:
 	pip install -e ".[dev]"
@@ -21,11 +21,17 @@ lint:
 typecheck:
 	mypy device_mcp_gateway/
 
+# Static security scan — same invocation as the CI security job. Flags Medium+
+# severity issues (B104 bind-all, etc.); annotate true false-positives with # nosec.
+security:
+	bandit -r device_mcp_gateway -ll
+
 format:
 	black device_mcp_gateway/ tests/
 	isort device_mcp_gateway/ tests/
 
-check: lint typecheck test
+# Local mirror of the CI gates — run before every push.
+check: lint typecheck security test
 
 build:
 	docker build -t device-mcp-gateway:local .

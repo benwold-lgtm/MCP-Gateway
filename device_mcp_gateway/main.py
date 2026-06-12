@@ -31,7 +31,7 @@ from loguru import logger
 from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway import __version__
-from device_mcp_gateway.cfg import load_config, resolve_mode
+from device_mcp_gateway.cfg import load_config, resolve_mode, warn_unsafe_settings
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
@@ -253,6 +253,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         from device_mcp_gateway.shared.redis_client import assert_redis_secure
 
         assert_redis_secure(cfg)
+
+    # Surface permissive-by-default postures loudly at startup (Tier-1 F-53): open auth,
+    # wildcard CORS, bind-all + no auth. Non-fatal — the hard refusals are the Tier-0 gates.
+    warn_unsafe_settings(cfg, _mode, _authenticator.enabled)
 
     # SSRF policy for device target URLs (Tier-0 F-02). base_url/spec_url are fetched
     # server-side, so reject internal/loopback/link-local targets unless explicitly allowed
