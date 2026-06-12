@@ -160,7 +160,7 @@ def warn_unsafe_settings(cfg: dict[str, Any], mode: str, auth_enabled: bool) -> 
     the Tier-0 distributed-mode gates); returns the warning strings for testing.
     """
     warnings: list[str] = []
-    host = cfg.get("server", {}).get("host", "0.0.0.0")
+    host = cfg.get("server", {}).get("host", "0.0.0.0")  # nosec B104 — default fallback for a read, not a bind
     origins = cfg.get("cors", {}).get("allowed_origins", []) or []
 
     if not auth_enabled:
@@ -173,7 +173,7 @@ def warn_unsafe_settings(cfg: dict[str, Any], mode: str, auth_enabled: bool) -> 
             "cors.allowed_origins contains '*' (wildcard) while credentials are allowed — any origin "
             "can call the API from a browser. Set explicit origins for anything but local development."
         )
-    if host in ("0.0.0.0", "::") and not auth_enabled:
+    if host in ("0.0.0.0", "::") and not auth_enabled:  # nosec B104 — detecting bind-all to warn, not binding
         warnings.append(
             f"binding {host} (all interfaces) with authentication disabled — the API is reachable and "
             "unauthenticated on every network interface. Bind 127.0.0.1 or enable auth."
