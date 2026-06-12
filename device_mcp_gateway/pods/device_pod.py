@@ -241,9 +241,10 @@ class DevicePod:
                         ERR_INTERNAL, f"Path template error for {tool.path}: missing/invalid {exc}", status=500
                     )
                 # Start from sanitized, untrusted header params, then apply auth LAST so a
-                # tool argument can never override the device's auth header (Tier-0 F-25).
+                # tool argument can never override the device's credentials (Tier-0 F-25).
+                # Auth may live in a header, query param, or cookie (F-43).
                 headers = _sanitize_header_params(header_params)
-                headers.update(await auth.get_headers() if auth else {})
+                auth_material = await auth.apply() if auth else None
                 # Encode the body per the operation's declared content type (F-40): JSON,
                 # form, multipart, or raw — instead of always sending json=.
                 body_kwargs = _adapter.encode_body(tool, body_params)
@@ -251,6 +252,12 @@ class DevicePod:
                 body_headers = body_kwargs.pop("headers", None)
                 if body_headers:
                     headers = {**body_headers, **headers}
+                cookies = None
+                if auth_material:
+                    headers.update(auth_material.headers)
+                    if auth_material.params:
+                        query_params = {**query_params, **auth_material.params}
+                    cookies = auth_material.cookies or None
 
                 async def _send():
                     return await _get_client().request(
@@ -258,6 +265,7 @@ class DevicePod:
                         url=url,
                         headers=headers,
                         params=query_params or None,
+                        cookies=cookies,
                         **body_kwargs,
                     )
 
@@ -399,9 +407,15 @@ class DevicePod:
                 return rpc_error(RPC_INVALID_PARAMS, msg_id, message=f"Invalid resource path in URI: {uri}")
             if self._rate_limiter:
                 await self._rate_limiter.acquire()
-            headers = await self.auth.get_headers() if self.auth else {}
+            auth_material = await self.auth.apply() if self.auth else None
+            headers = auth_material.headers if auth_material else {}
             try:
-                resp = await self._client().get(f"{self.base_url}{path}", headers=headers)
+                resp = await self._client().get(
+                    f"{self.base_url}{path}",
+                    headers=headers,
+                    params=(auth_material.params or None) if auth_material else None,
+                    cookies=(auth_material.cookies or None) if auth_material else None,
+                )
                 resp.raise_for_status()
                 ct = resp.headers.get("content-type", "")
                 text = json.dumps(resp.json()) if "json" in ct else resp.text
