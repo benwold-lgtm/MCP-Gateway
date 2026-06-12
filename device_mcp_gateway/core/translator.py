@@ -77,6 +77,9 @@ class McpTool:
     tags: list[str] = field(default_factory=list)
     param_locations: dict[str, str] = field(default_factory=dict)
     request_body: RequestBodySpec | None = None
+    # MCP-arg-name -> upstream wire name, only for params renamed to resolve a
+    # cross-location name collision (F-04). Empty for the common no-collision case.
+    param_wire_names: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -189,7 +192,7 @@ class SpecTranslator:
         name = _sanitize_name(op_id or f"{method}_{path}")
         # Tool description is device-supplied and shown to the LLM → untrusted (F-26).
         description = _sanitize_text(op.get("summary") or op.get("description") or f"{method} {path}")
-        parameters, required, locations, body_spec = self._build_parameter_schema(op)
+        parameters, required, locations, body_spec, wire_names = self._build_parameter_schema(op)
         tags = op.get("tags", [])
         return McpTool(
             name=name,
@@ -200,6 +203,7 @@ class SpecTranslator:
             tags=tags,
             param_locations=locations,
             request_body=body_spec,
+            param_wire_names=wire_names,
         )
 
     def _resolve_ref(self, ref: str) -> dict:
@@ -288,17 +292,32 @@ class SpecTranslator:
 
     def _build_parameter_schema(
         self, op: dict
-    ) -> tuple[dict[str, Any], list[str], dict[str, str], RequestBodySpec | None]:
-        """Extract JSON-serializable parameter schema and per-param locations from an operation."""
+    ) -> tuple[dict[str, Any], list[str], dict[str, str], RequestBodySpec | None, dict[str, str]]:
+        """Extract JSON-serializable parameter schema and per-param locations from an operation.
+
+        Params are exposed as one flat ``properties`` object, but OpenAPI allows the same
+        name in two locations (e.g. ``id`` in path *and* body). To avoid last-write-wins
+        silently dropping one (F-04), colliding names are disambiguated: path params keep
+        their bare name (the ``{placeholder}`` must match literally), and a colliding
+        query/header/body param is suffixed (``id__query``). ``wire_names`` maps the
+        renamed MCP arg back to the upstream wire name so the call routes correctly.
+        """
         params: dict[str, Any] = {}
         locations: dict[str, str] = {}
         req: list[str] = []
+        wire_names: dict[str, str] = {}
 
+        # Collect non-body params, then process path-first so they claim their bare names.
+        collected: list[tuple[dict, str, str]] = []
         for raw_param in op.get("parameters", []):
             param = raw_param
             if "$ref" in raw_param:
                 param = self._resolve_ref(raw_param["$ref"])
                 if not param:
+                    logger.warning(
+                        f"Dropping a parameter with an unresolvable $ref '{raw_param['$ref']}' — "
+                        "the generated tool will be missing it"
+                    )
                     continue
             pname = param.get("name", "")
             if not pname:
@@ -306,25 +325,50 @@ class SpecTranslator:
             pin = param.get("in", "query")
             if pin in ("body", "cookie"):
                 continue
-            raw_schema = param.get("schema", {})
-            resolved = self._resolve_schema(raw_schema)
+            collected.append((param, pname, pin))
+
+        collected.sort(key=lambda t: 0 if t[2] == "path" else 1)
+        for param, pname, pin in collected:
+            resolved = self._resolve_schema(param.get("schema", {}))
             param_desc = param.get("description", resolved.get("description", ""))
-            params[pname] = {**resolved, "description": param_desc}
-            locations[pname] = pin
+            key = self._claim_param(pname, pin, locations, wire_names)
+            params[key] = {**resolved, "description": param_desc}
+            locations[key] = pin
             if param.get("required"):
-                req.append(pname)
+                req.append(key)
 
         body = op.get("requestBody", {})
         if "$ref" in body:
-            body = self._resolve_ref(body["$ref"])
+            ref = body["$ref"]
+            body = self._resolve_ref(ref)
+            if not body:
+                logger.warning(f"Request body $ref '{ref}' is unresolvable — the generated tool will expose no body")
         body_spec: RequestBodySpec | None = None
         if body:
             content = body.get("content", {})
             ctype = self._select_content_type(content)
             if ctype is not None:
-                body_spec = self._build_body_spec(ctype, content[ctype], params, locations, req)
+                body_spec = self._build_body_spec(ctype, content[ctype], params, locations, req, wire_names)
 
-        return params, req, locations, body_spec
+        return params, req, locations, body_spec, wire_names
+
+    @staticmethod
+    def _claim_param(name: str, pin: str, locations: dict[str, str], wire_names: dict[str, str]) -> str:
+        """Return the property key for a param, disambiguating cross-location collisions (F-04)."""
+        if name not in locations:
+            return name
+        if locations[name] == pin:
+            # Same name + same location is an invalid spec; keep last, but make it visible.
+            logger.warning(f"Duplicate '{pin}' parameter '{name}'; later definition overrides earlier")
+            return name
+        key = f"{name}__{pin}"
+        n = 2
+        while key in locations:
+            key = f"{name}__{pin}_{n}"
+            n += 1
+        wire_names[key] = name
+        logger.warning(f"Parameter name '{name}' appears in multiple locations; exposing the '{pin}' one as '{key}'")
+        return key
 
     @staticmethod
     def _select_content_type(content: dict[str, Any]) -> str | None:
@@ -347,6 +391,7 @@ class SpecTranslator:
         params: dict[str, Any],
         locations: dict[str, str],
         req: list[str],
+        wire_names: dict[str, str],
     ) -> RequestBodySpec:
         """Flatten the chosen request body into tool params and describe its encoding (F-40)."""
         schema = self._resolve_schema(media["schema"]) if media and "schema" in media else {}
@@ -356,18 +401,22 @@ class SpecTranslator:
         # tracking which properties are binary so multipart sends them as file parts.
         if props:
             binary: set[str] = set()
+            required = set(schema.get("required", []))
             for k, v in props.items():
                 resolved = self._resolve_schema(v)
-                params[k] = resolved
-                locations[k] = "body"
+                # A body field name may collide with a path/query param — disambiguate (F-04).
+                key = self._claim_param(k, "body", locations, wire_names)
+                params[key] = resolved
+                locations[key] = "body"
                 if self._is_binary_schema(resolved):
-                    binary.add(k)
-            req += list(schema.get("required", []))
+                    binary.add(key)
+                if k in required:
+                    req.append(key)
             return RequestBodySpec(content_type=ctype, binary_fields=binary)
 
         # Non-object body (e.g. application/octet-stream or text/plain with a scalar
         # schema): expose a single `body` parameter sent raw rather than dropping it.
-        raw_field = "body"
+        raw_field = self._claim_param("body", "body", locations, wire_names)
         params.setdefault(raw_field, {**schema, "description": schema.get("description", "Raw request body")})
         locations[raw_field] = "body"
         return RequestBodySpec(content_type=ctype, raw=True, raw_field=raw_field)

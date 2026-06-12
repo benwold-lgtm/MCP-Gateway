@@ -78,18 +78,22 @@ class DeviceAdapter:
                 return {}
             return {"content": self._as_bytes(value), "headers": {"content-type": spec.content_type}}
 
+        # Map any collision-renamed body fields back to their upstream wire name (F-04).
+        wire = tool.param_wire_names
+
         if spec.content_type == FORM_CONTENT:
             # application/x-www-form-urlencoded — httpx sets the header from data=.
-            return {"data": body_params}
+            return {"data": {wire.get(k, k): v for k, v in body_params.items()}}
 
         if spec.content_type == MULTIPART_CONTENT:
             files: dict[str, Any] = {}
             data: dict[str, Any] = {}
             for k, v in body_params.items():
+                name = wire.get(k, k)
                 if k in spec.binary_fields:
-                    files[k] = self._as_bytes(v)
+                    files[name] = self._as_bytes(v)
                 else:
-                    data[k] = v
+                    data[name] = v
             kwargs: dict[str, Any] = {}
             if files:
                 kwargs["files"] = files
@@ -101,7 +105,7 @@ class DeviceAdapter:
             return kwargs
 
         # application/json and any unknown/JSON-ish type.
-        return {"json": body_params}
+        return {"json": {wire.get(k, k): v for k, v in body_params.items()}}
 
     @staticmethod
     def _as_bytes(value: Any) -> bytes:

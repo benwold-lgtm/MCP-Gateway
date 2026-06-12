@@ -11,6 +11,7 @@ Pods are spawned/teared by the Registry based on device health and spec availabi
 import asyncio
 import json
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import jsonschema
@@ -198,11 +199,16 @@ class DevicePod:
                 if rate_limiter:
                     await rate_limiter.acquire()
 
-                # Split kwargs by declared parameter location
+                # Split kwargs by declared parameter location. Collision-renamed args map
+                # back to their upstream wire name for query/header (F-04); body fields are
+                # mapped inside the adapter, and path params are never renamed.
+                def _wire(name: str) -> str:
+                    return tool.param_wire_names.get(name, name)
+
                 path_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "path"}
                 body_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "body"}
-                query_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "query"}
-                header_params = {k: v for k, v in kwargs.items() if tool.param_locations.get(k) == "header"}
+                query_params = {_wire(k): v for k, v in kwargs.items() if tool.param_locations.get(k) == "query"}
+                header_params = {_wire(k): v for k, v in kwargs.items() if tool.param_locations.get(k) == "header"}
                 # Params with no declared location fall back to method-appropriate defaults
                 unlocated = {k: v for k, v in kwargs.items() if k not in tool.param_locations}
                 if tool.method in ("POST", "PUT", "PATCH"):
@@ -210,7 +216,16 @@ class DevicePod:
                 else:
                     query_params.update(unlocated)
 
-                url = f"{base_url}{tool.path}".format_map(path_params)
+                # URL-encode each path param so a value like '../admin' or 'a/b' can't traverse
+                # or inject extra path segments (Tier-1 F-04). Format only the path template —
+                # base_url is concatenated raw so a literal '{' in it isn't mis-parsed.
+                encoded_path = {k: quote(str(v), safe="") for k, v in path_params.items()}
+                try:
+                    url = base_url + tool.path.format_map(encoded_path)
+                except (KeyError, IndexError, ValueError) as exc:
+                    return _adapter.error_envelope(
+                        ERR_INTERNAL, f"Path template error for {tool.path}: missing/invalid {exc}", status=500
+                    )
                 # Start from sanitized, untrusted header params, then apply auth LAST so a
                 # tool argument can never override the device's auth header (Tier-0 F-25).
                 headers = _sanitize_header_params(header_params)
