@@ -1,0 +1,176 @@
+# Prometheus recording rules (SLIs) + alerting rules (SLO burn-rate + operational)
+# for the Device MCP Gateway (F-14). Consumed by the Prometheus Operator
+# (PrometheusRule CRD). If you don't run the operator, lift the `groups:` blocks
+# into a plain `rule_files:` entry in your prometheus.yml — the rule expressions
+# are operator-independent.
+#
+# SLO targets are STARTING POINTS — tune after a load baseline exists (Phase-0 gap).
+# See docs/observability.md "SLOs & error budgets" for the rationale and the
+# upstream-4xx caveat on the success-rate SLI.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: device-mcp-gateway-slo
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+    role: alert-rules
+spec:
+  groups:
+    # -----------------------------------------------------------------------
+    # Recording rules — the SLIs, computed once so dashboards and burn-rate
+    # alerts share one definition. Names follow Prometheus SLO conventions
+    # (slo:<sli>:ratio_rate<window>).
+    # -----------------------------------------------------------------------
+    - name: mcp-gateway.sli
+      interval: 30s
+      rules:
+        # Tool-call success rate = ok / (ok + error). `noresult` (notifications,
+        # no JSON-RPC response expected) is excluded from both halves.
+        # CAVEAT: `error` currently lumps upstream client-fault 4xx in with
+        # server/dispatch faults — the status label isn't fine-grained enough to
+        # split them yet (documented limitation; needs a finer tool_calls label).
+        - record: slo:tool_call_success:ratio_rate5m
+          expr: |
+            sum(rate(mcp_tool_calls_total{status="ok"}[5m]))
+            /
+            clamp_min(sum(rate(mcp_tool_calls_total{status=~"ok|error"}[5m])), 1e-9)
+        - record: slo:tool_call_success:ratio_rate30m
+          expr: |
+            sum(rate(mcp_tool_calls_total{status="ok"}[30m]))
+            /
+            clamp_min(sum(rate(mcp_tool_calls_total{status=~"ok|error"}[30m])), 1e-9)
+        - record: slo:tool_call_success:ratio_rate1h
+          expr: |
+            sum(rate(mcp_tool_calls_total{status="ok"}[1h]))
+            /
+            clamp_min(sum(rate(mcp_tool_calls_total{status=~"ok|error"}[1h])), 1e-9)
+        - record: slo:tool_call_success:ratio_rate6h
+          expr: |
+            sum(rate(mcp_tool_calls_total{status="ok"}[6h]))
+            /
+            clamp_min(sum(rate(mcp_tool_calls_total{status=~"ok|error"}[6h])), 1e-9)
+
+        # Dispatch reliability = a dispatched call eventually gets a result or an
+        # explicit error, never a silent hang. Failures = timeouts + dead-letters.
+        - record: slo:dispatch_reliability:ratio_rate5m
+          expr: |
+            1 - (
+              (sum(rate(mcp_tool_call_timeouts_total[5m])) + sum(rate(mcp_dead_letter_total[5m])))
+              /
+              clamp_min(sum(rate(mcp_tool_calls_total[5m])) + sum(rate(mcp_tool_call_timeouts_total[5m])) + sum(rate(mcp_dead_letter_total[5m])), 1e-9)
+            )
+        - record: slo:dispatch_reliability:ratio_rate1h
+          expr: |
+            1 - (
+              (sum(rate(mcp_tool_call_timeouts_total[1h])) + sum(rate(mcp_dead_letter_total[1h])))
+              /
+              clamp_min(sum(rate(mcp_tool_calls_total[1h])) + sum(rate(mcp_tool_call_timeouts_total[1h])) + sum(rate(mcp_dead_letter_total[1h])), 1e-9)
+            )
+
+        # Tool-call latency p99 (worker-attributed; the gateway only enqueues).
+        - record: slo:tool_call_latency:p99_5m
+          expr: |
+            histogram_quantile(0.99, sum(rate(mcp_tool_call_duration_seconds_bucket[5m])) by (le))
+
+    # -----------------------------------------------------------------------
+    # SLO burn-rate alerts — multi-window (fast + slow) so a sharp outage pages
+    # quickly while a slow leak still trips before the budget is gone, without
+    # flapping. Targets: 99.5% success, 99.9% dispatch reliability over 28d.
+    # Burn-rate thresholds follow the Google SRE multi-window guidance.
+    # -----------------------------------------------------------------------
+    - name: mcp-gateway.slo-burn
+      rules:
+        - alert: MCPToolCallErrorBudgetBurnFast
+          # 14.4x burn over 1h (and confirmed over 5m) ⇒ ~2% of 28d budget in 1h.
+          expr: |
+            (1 - slo:tool_call_success:ratio_rate1h) > (14.4 * 0.005)
+            and
+            (1 - slo:tool_call_success:ratio_rate5m) > (14.4 * 0.005)
+          for: 2m
+          labels:
+            severity: page
+            slo: tool_call_success
+          annotations:
+            summary: "Tool-call error budget burning fast (>14.4x)"
+            description: "Success SLI {{ $value | humanizePercentage }} below the 99.5% target; at this rate the 28d budget is gone in ~2 days."
+        - alert: MCPToolCallErrorBudgetBurnSlow
+          # 6x burn over 6h (and confirmed over 30m) ⇒ slow leak.
+          expr: |
+            (1 - slo:tool_call_success:ratio_rate6h) > (6 * 0.005)
+            and
+            (1 - slo:tool_call_success:ratio_rate30m) > (6 * 0.005)
+          for: 15m
+          labels:
+            severity: ticket
+            slo: tool_call_success
+          annotations:
+            summary: "Tool-call error budget burning slowly (>6x)"
+            description: "Sustained success below target over 6h — investigate before the budget is exhausted."
+        - alert: MCPDispatchReliabilityLow
+          expr: slo:dispatch_reliability:ratio_rate1h < 0.999
+          for: 10m
+          labels:
+            severity: page
+            slo: dispatch_reliability
+          annotations:
+            summary: "Dispatch reliability below 99.9%"
+            description: "Calls are timing out or dead-lettering ({{ $value | humanizePercentage }}) — a dispatched call is failing to get a result or explicit error."
+
+    # -----------------------------------------------------------------------
+    # Operational alerts — the failure modes that are otherwise silent.
+    # -----------------------------------------------------------------------
+    - name: mcp-gateway.operational
+      rules:
+        - alert: MCPNoLiveWorkers
+          # The worker metrics series vanish when no worker is scraping (distributed
+          # mode) — i.e. nothing is consuming tool calls.
+          expr: absent(mcp_worker_pods)
+          for: 2m
+          labels:
+            severity: page
+          annotations:
+            summary: "No live MCP workers"
+            description: "No worker is exposing metrics — tool calls in distributed mode will hang until the gateway timeout. Check the worker Deployment."
+        - alert: MCPReconcilerLeaderAbsent
+          # No worker holds reconciler leadership ⇒ orphaned-device recovery stalls.
+          expr: sum(mcp_reconciler_leader) == 0
+          for: 5m
+          labels:
+            severity: page
+          annotations:
+            summary: "No reconciler leader elected"
+            description: "No worker holds the reconciler lease for >5m; orphaned devices (dead-worker claims) won't be reassigned."
+        - alert: MCPDeadLetterGrowing
+          expr: sum(rate(mcp_dead_letter_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: ticket
+          annotations:
+            summary: "Tool calls are dead-lettering"
+            description: "Undeliverable tool calls are being moved to device:*:calls:dead at {{ $value }}/s — inspect the DLQ and the affected device(s)."
+        - alert: MCPUndeliveredBacklogNearMaxlen
+          # Undelivered calls approaching the stream MAXLEN (10k) ⇒ silent-eviction risk.
+          expr: max(mcp_worker_undelivered_calls) > 8000
+          for: 5m
+          labels:
+            severity: page
+          annotations:
+            summary: "Call-stream backlog approaching MAXLEN"
+            description: "A device's undelivered call backlog ({{ $value }}) is nearing the 10k MAXLEN; older accepted calls will be silently trimmed. Scale workers or check for a stuck consumer."
+        - alert: MCPAdmissionShedding
+          # F-06 fast-fail firing ⇒ the gateway is actively rejecting load.
+          expr: sum(rate(mcp_calls_rejected_overload_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: ticket
+          annotations:
+            summary: "Gateway shedding tool calls (429)"
+            description: "Admission control is rejecting calls at {{ $value }}/s because a device's backlog is over the watermark — workers aren't keeping up."
+        - alert: MCPCircuitBreakersOpen
+          expr: sum(rate(mcp_circuit_breaker_opens_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: ticket
+          annotations:
+            summary: "Device circuit breakers opening"
+            description: "Tool calls are being rejected by open circuit breakers at {{ $value }}/s — an upstream device is failing."

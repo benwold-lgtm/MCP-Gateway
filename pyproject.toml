@@ -44,6 +44,12 @@ dev = [
     "pre-commit>=3.5.0",
     "fakeredis>=2.26"
 ]
+# Optional distributed tracing (F-14). Install with: pip install '.[otel]'
+otel = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
 
 [project.scripts]
 device-mcp = "device_mcp_gateway.cli:main"

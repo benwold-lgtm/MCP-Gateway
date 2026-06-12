@@ -46,6 +46,12 @@ process-global registry needs no multiprocess mode.
 | `mcp_worker_pods` | gauge | — | worker | DevicePods running on this worker. |
 | `mcp_worker_pending_calls` | gauge | — | worker | Delivered-but-unacked tool calls across this worker's device streams — the **Redis-stream-lag** signal for the worker HPA. |
 | `mcp_worker_assignments_lag` | gauge | — | worker | Pending entries in this worker's assignments consumer group. |
+| `mcp_worker_undelivered_calls` | gauge | — | worker | Tool-call stream entries not yet delivered to this worker's group (never-read backlog). Nears the 10k MAXLEN ⇒ silent-eviction risk. |
+| `mcp_reconciler_leader` | gauge | — | worker | `1` on the worker holding the reconciler lease, else `0`. `sum == 0` ⇒ orphaned-device recovery stalled (F-14). |
+| `mcp_dead_letter_total` | counter | `hostname` | worker | Tool calls moved to a device's dead-letter stream because they were undeliverable. |
+| `mcp_tool_call_timeouts_total` | counter | `hostname` | gateway | Calls that hit the no-worker-responded timeout (F6). |
+| `mcp_calls_rejected_overload_total` | counter | `hostname` | gateway | Calls fast-failed with 429 because the device backlog exceeded the admission watermark (F-06). |
+| `mcp_circuit_breaker_opens_total` | counter | `hostname` | gateway/worker | Calls rejected because a device pod's circuit breaker was open. |
 
 The standard `prometheus_client` process/runtime collectors (`process_*`,
 `python_gc_*`) are also exported.
@@ -165,6 +171,63 @@ External/Object metric) or **KEDA** (`prometheus` scaler). The
 `device-mcp-worker` HPA in [`deploy/kubernetes/hpa.yaml`](../deploy/kubernetes/hpa.yaml)
 ships with the External-metric block commented out; uncomment it once the adapter is
 installed.
+
+---
+
+## SLOs & error budgets
+
+Recording rules (the SLIs) and burn-rate + operational alerts ship as a
+`PrometheusRule` in [`deploy/kubernetes/prometheus-rules.yaml`](../deploy/kubernetes/prometheus-rules.yaml)
+(consumed by the Prometheus Operator; lift the `groups:` into a `rule_files:` entry
+if you don't run the operator). The targets below are **starting points** — tune them
+after a load baseline exists.
+
+| SLI | Definition (recording rule) | Starting SLO |
+|-----|-----------------------------|--------------|
+| Tool-call success rate | `slo:tool_call_success:ratio_rate5m` = `ok / (ok + error)` from `mcp_tool_calls_total` (excludes `noresult`) | **99.5%** over 28d |
+| Dispatch reliability | `slo:dispatch_reliability:ratio_rate5m` = `1 − (timeouts + dead_letters) / dispatched` | **99.9%** over 28d |
+| Tool-call latency p99 | `slo:tool_call_latency:p99_5m` from `mcp_tool_call_duration_seconds_bucket` | tune to baseline |
+
+**Caveat on success rate:** the `status` label on `mcp_tool_calls_total` is
+`ok` / `error` / `noresult`; `error` currently lumps upstream *client-fault* 4xx in
+with server/dispatch faults, so the success SLI is slightly pessimistic. Splitting
+them needs a finer status label — tracked as a future refinement.
+
+**Burn-rate alerts** use the multi-window Google-SRE method: a fast window (1h, 14.4×
+burn) pages on a sharp outage, a slow window (6h, 6×) tickets on a slow leak — both
+gated by a shorter confirmation window so a blip doesn't flap.
+
+**Operational alerts** (the otherwise-silent failure modes): no live workers
+(`absent(mcp_worker_pods)`), no reconciler leader (`sum(mcp_reconciler_leader) == 0`),
+DLQ growing (`rate(mcp_dead_letter_total[5m]) > 0`), undelivered backlog nearing the
+10k stream MAXLEN (`max(mcp_worker_undelivered_calls) > 8000` — silent-eviction risk),
+admission shedding (`rate(mcp_calls_rejected_overload_total[5m]) > 0`, F-06), and
+circuit breakers opening.
+
+---
+
+## Distributed Tracing (OpenTelemetry)
+
+**Off by default.** Tracing is a no-op until you both install the extra and enable it:
+
+```bash
+pip install '.[otel]'
+```
+```yaml
+tracing:
+  enabled: true
+  otlp_endpoint: "http://otel-collector:4318/v1/traces"   # OTLP/HTTP
+  service_name: "device-mcp-gateway"
+  sample_ratio: 1.0
+```
+
+When on, a tool call is **one trace end to end**: the gateway opens an
+`mcp.tool_dispatch` span and injects its W3C `traceparent` into the Redis call-stream
+entry; the worker extracts it and runs the `mcp.tool_call` execution span as a child.
+The existing correlation id (`rid`) is attached as the `mcp.rid` span attribute, so a
+trace links straight back to the JSON logs. Spans export to any OTLP/HTTP collector
+(e.g. an OpenTelemetry Collector sidecar). Setup failures or a missing extra downgrade
+to disabled with a warning — they never block startup or add latency when off.
 
 ---
 

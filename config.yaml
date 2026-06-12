@@ -196,6 +196,19 @@ metrics:
   # Seconds between device-fleet gauge refreshes (registered/active/reachable).
   gauge_refresh_interval: 15
 
+# Optional distributed tracing (OpenTelemetry → OTLP/HTTP). OFF by default and a
+# no-op unless the [otel] extra is installed (pip install '.[otel]'). When on, a
+# tool call is one trace across gateway → Redis → worker; the request id (rid) is
+# attached as a span attribute. F-14.
+tracing:
+  enabled: false
+  # OTLP/HTTP traces endpoint of your collector (e.g. an OTel Collector sidecar).
+  otlp_endpoint: "http://localhost:4318/v1/traces"
+  # service.name reported to the collector. The gateway/worker append their role.
+  service_name: "device-mcp-gateway"
+  # Head sampling ratio 0.0–1.0 (1.0 = sample every trace).
+  sample_ratio: 1.0
+
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR
   level: "INFO"

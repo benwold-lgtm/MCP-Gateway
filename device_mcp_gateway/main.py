@@ -39,6 +39,7 @@ from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
 from device_mcp_gateway import metrics
+from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.logging_setup import setup_logging
 from device_mcp_gateway.ratelimit import (
     InMemoryRateLimiter,
@@ -320,6 +321,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # ---------------------------------------------------------------------------
 
     _app = FastAPI(title="Device MCP Gateway", version=__version__)
+    # Configure optional OTel tracing once at startup (no-op unless tracing.enabled
+    # and the [otel] extra is installed). F-14.
+    tracing.init_tracing(cfg, "mcp-gateway")
     _app.state.config = cfg
     _app.state.authenticator = _authenticator
     _app.state.mode = _mode
@@ -804,14 +808,23 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                     headers={"Retry-After": "1"},
                 )
             request_id = str(uuid.uuid4())
-            await _backend.publish_tool_call(
-                hostname=hostname,
-                request_id=request_id,
-                session_id=effective_id,
-                gateway_id=_GATEWAY_ID,
-                message=payload,
-                rid=_rid,
-            )
+            _method = payload.get("method", "?") if isinstance(payload, dict) else "?"
+            # Open a dispatch span and inject its W3C context so the worker's
+            # execution span joins the same trace (F-14). No-op when tracing is off.
+            with tracing.start_span(
+                "mcp.tool_dispatch",
+                attributes={"mcp.hostname": hostname, "mcp.method": _method, "mcp.rid": _rid},
+            ):
+                _carrier = tracing.inject_carrier()
+                await _backend.publish_tool_call(
+                    hostname=hostname,
+                    request_id=request_id,
+                    session_id=effective_id,
+                    gateway_id=_GATEWAY_ID,
+                    message=payload,
+                    rid=_rid,
+                    traceparent=_carrier.get("traceparent", ""),
+                )
             # Guard against a lost call (no worker consuming): if no result is
             # marked within the timeout, emit an error event on the SSE stream
             # so the client doesn't hang forever (F6).
