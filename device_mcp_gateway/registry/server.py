@@ -32,6 +32,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from device_mcp_gateway.audit import redact_url
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
 from device_mcp_gateway.core.translator import SpecTranslator
@@ -381,7 +382,7 @@ class Registry:
                 },
             )
 
-        logger.info(f"Device registered: hostname={hostname}, base_url={base_url}")
+        logger.info(f"Device registered: hostname={hostname}, base_url={redact_url(base_url)}")
         try:
             reachable = await self.check_reachability(profile)
             if reachable:
@@ -477,7 +478,7 @@ class Registry:
                 if resp.status_code == 200:
                     return resp.json()
             except (httpx.HTTPError, ValueError) as exc:
-                logger.debug(f"Spec discovery probe failed for {url}: {exc}")
+                logger.debug(f"Spec discovery probe failed for {redact_url(url)}: {exc}")
                 continue
         return None
 
@@ -489,7 +490,7 @@ class Registry:
             if resp.status_code == 200:
                 return resp.json()
         except (httpx.HTTPError, ValueError) as exc:
-            logger.debug(f"Spec fetch failed for {url}: {exc}")
+            logger.debug(f"Spec fetch failed for {redact_url(url)}: {exc}")
             return None
         return None
 

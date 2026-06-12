@@ -19,6 +19,7 @@ from mcp.server.fastmcp import FastMCP
 from pybreaker import CircuitBreaker, CircuitBreakerError
 
 from device_mcp_gateway import metrics
+from device_mcp_gateway.audit import redact_url
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.adapter import (
     ERR_CIRCUIT_OPEN,
@@ -256,7 +257,7 @@ class DevicePod:
                     # error rather than a fake success; the body cap (F-27) lives here too.
                     return _adapter.build_result(resp)
                 except CircuitBreakerError:
-                    logger.warning(f"Circuit breaker open for pod {base_url}")
+                    logger.warning(f"Circuit breaker open for pod {redact_url(base_url)}")
                     metrics.circuit_breaker_opens_total.labels(hostname=self.hostname).inc()
                     return _adapter.error_envelope(
                         ERR_CIRCUIT_OPEN,

@@ -23,6 +23,8 @@ from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 
+from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, audit_event
+
 # --- Scopes ------------------------------------------------------------------
 
 SCOPE_DEVICES_READ = "devices:read"
@@ -135,13 +137,40 @@ def build_authenticator(cfg: dict) -> Authenticator:
 _bearer = HTTPBearer(auto_error=False)
 
 
+def _audit_target(request: Request) -> str:
+    """`METHOD /path` for the audit target, resolved defensively (works on fakes too)."""
+    method = getattr(request, "method", "?")
+    path = getattr(getattr(request, "url", None), "path", "?")
+    return f"{method} {path}"
+
+
+def _audit_rid(request: Request) -> str:
+    return getattr(getattr(request, "state", None), "request_id", "-")
+
+
 async def authenticate_request(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
 ) -> None:
-    """Router-level dependency: resolve the caller and stash the Principal."""
+    """Router-level dependency: resolve the caller and stash the Principal.
+
+    A failed authentication (401) is audited with the request target (F-55) so
+    access-denied events are answerable from the log, not just successful access.
+    """
     authenticator: Authenticator = request.app.state.authenticator
-    request.state.principal = authenticator.authenticate(credentials)
+    try:
+        request.state.principal = authenticator.authenticate(credentials)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            audit_event(
+                "auth.authenticate",
+                subject="unauthenticated",
+                outcome=AUDIT_OUTCOME_DENIED,
+                rid=_audit_rid(request),
+                target=_audit_target(request),
+                reason="invalid_or_missing_token",
+            )
+        raise
 
 
 def require_scope(scope: str):
@@ -150,6 +179,15 @@ def require_scope(scope: str):
     async def _dep(request: Request) -> None:
         principal: Optional[Principal] = getattr(request.state, "principal", None)
         if principal is None or not principal.has(scope):
+            # Audit the authorization denial with the actor + the scope they lacked (F-55).
+            audit_event(
+                "authz.check",
+                subject=principal.subject if principal is not None else "unauthenticated",
+                outcome=AUDIT_OUTCOME_DENIED,
+                rid=_audit_rid(request),
+                target=_audit_target(request),
+                reason=f"missing_scope:{scope}",
+            )
             raise HTTPException(status_code=403, detail=f"Missing required scope: {scope}")
 
     return _dep

@@ -32,6 +32,7 @@ from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway import __version__
 from device_mcp_gateway.cfg import load_config, resolve_mode, warn_unsafe_settings
+from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_request
 from device_mcp_gateway.core.backoff import jittered
 from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
@@ -456,9 +457,15 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         start = time.perf_counter()
         response = await call_next(request)
         elapsed = (time.perf_counter() - start) * 1000
-        logger.info(
-            f"{request.method} {request.url.path} -> {response.status_code} " f"({elapsed:.1f}ms) rid={request_id}"
-        )
+        # Attribute the access log to the resolved principal (F-56). The auth dependency
+        # runs during call_next, so request.state.principal is set by now for protected
+        # routes (unauthenticated/public routes log subject="-").
+        _principal = getattr(request.state, "principal", None)
+        logger.bind(
+            subject=_principal.subject if _principal else "-",
+            auth_method=_principal.auth_method if _principal else "-",
+            rid=request_id,
+        ).info(f"{request.method} {request.url.path} -> {response.status_code} ({elapsed:.1f}ms) rid={request_id}")
         # Prometheus: label with the route *template* (low cardinality), set after
         # routing has populated scope["endpoint"].
         route = metrics.route_template(request)
@@ -564,6 +571,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             rate_limit_rps=rate_limit_rps,
         )
 
+        audit_request(request, "device.create", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
         return {
             "status": "registered",
             "hostname": hostname,
@@ -607,6 +615,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             rate_limit_rps=rate_limit_rps,
         )
 
+        audit_request(request, "device.update", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
         return {
             "status": "updated",
             "hostname": hostname,
@@ -839,6 +848,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     async def unregister_device(hostname: str, request: Request):
         reg: Registry = request.app.state.registry
         await reg.deregister_device(hostname)
+        audit_request(request, "device.delete", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
         return {"status": "removed", "hostname": hostname}
 
     @protected.get("/metrics/summary", dependencies=[Depends(require_scope(SCOPE_METRICS_READ))])
