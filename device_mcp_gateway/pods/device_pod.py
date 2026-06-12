@@ -159,6 +159,20 @@ class DevicePod:
         self._adapter = DeviceAdapter(max_response_bytes=_MAX_RESPONSE_BYTES)
         self._register_tools()
 
+    def breaker_snapshot(self) -> dict:
+        """Current circuit-breaker state for diagnostics (F-52).
+
+        ``state`` is ``closed`` (healthy), ``open`` (shedding after too many recent
+        failures), or ``half-open`` (probing recovery). ``fail_counter`` is the
+        consecutive-failure count toward ``fail_max``.
+        """
+        return {
+            "state": self._breaker.current_state,
+            "fail_counter": self._breaker.fail_counter,
+            "fail_max": self._breaker.fail_max,
+            "reset_timeout": self._breaker.reset_timeout,
+        }
+
     def _client(self) -> httpx.AsyncClient:
         """Return the pod's shared HTTP client, creating it on first use."""
         if self._http is None or self._http.is_closed:
