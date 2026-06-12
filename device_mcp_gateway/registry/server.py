@@ -33,6 +33,7 @@ import httpx
 from loguru import logger
 
 from device_mcp_gateway.auth.base import AbstractAuth
+from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
 from device_mcp_gateway.core.translator import SpecTranslator
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.shared.crypto import CredentialCodec
@@ -217,6 +218,9 @@ class Registry:
         self._max_pods = config.get("max_concurrent_pods", 50)
         self._http_client: httpx.AsyncClient | None = None
         self._health_semaphore = asyncio.Semaphore(config.get("max_concurrent_health_checks", 10))
+        # Bounded jittered retries for idempotent outbound GETs — reachability, spec
+        # fetch, discovery (F-05). Shared by spawned pods for their tool calls too.
+        self._retry_policy = RetryPolicy.from_config({"registry": config})
 
     # ------------------------------------------------------------------
     # Shared helpers
@@ -465,7 +469,11 @@ class Registry:
         for path in paths:
             url = base_url.rstrip("/") + path
             try:
-                resp = await client.get(url, timeout=timeout)
+
+                async def _probe(u: str = url) -> httpx.Response:
+                    return await client.get(u, timeout=timeout)
+
+                resp = await send_with_retry(_probe, method="GET", policy=self._retry_policy)
                 if resp.status_code == 200:
                     return resp.json()
             except (httpx.HTTPError, ValueError) as exc:
@@ -475,7 +483,9 @@ class Registry:
 
     async def _http_get(self, url: str) -> dict[str, Any] | None:
         try:
-            resp = await self._get_client().get(url, timeout=10)
+            resp = await send_with_retry(
+                lambda: self._get_client().get(url, timeout=10), method="GET", policy=self._retry_policy
+            )
             if resp.status_code == 200:
                 return resp.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -485,7 +495,11 @@ class Registry:
 
     async def check_reachability(self, profile: DeviceProfile) -> bool:
         try:
-            resp = await self._get_client().get(profile.base_url, timeout=5)
+            resp = await send_with_retry(
+                lambda: self._get_client().get(profile.base_url, timeout=5),
+                method="GET",
+                policy=self._retry_policy,
+            )
             profile.config.reachable = resp.status_code < 500
         except Exception:
             profile.config.reachable = False
@@ -517,7 +531,7 @@ class Registry:
             profiles = list(self._profiles.values())
             if profiles:
                 await asyncio.gather(*[self._health_check_one(p) for p in profiles])
-            await asyncio.sleep(self._health_interval)
+            await asyncio.sleep(jittered(self._health_interval))  # F-61: de-sync fleet health loops
 
     async def _spawn_pod(self, profile: DeviceProfile) -> None:
         if sum(1 for p in self._profiles.values() if p.pod_active) >= self._max_pods:
@@ -540,6 +554,7 @@ class Registry:
             base_url=profile.base_url,
             rate_limit_rps=profile.rate_limit_rps,
             keep_alive_interval=keep_alive,
+            retry_policy=self._retry_policy,
         )
         await pod.start()
         profile.pod = pod

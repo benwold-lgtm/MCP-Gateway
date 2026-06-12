@@ -39,6 +39,7 @@ __all__ = [
     "sse_messages_dropped_total",
     "dead_letter_total",
     "circuit_breaker_opens_total",
+    "upstream_retries_total",
     "metrics_port",
     "metrics_enabled",
     "start_metrics_server",
@@ -94,6 +95,13 @@ tool_call_duration_seconds = Histogram(
     "mcp_tool_call_duration_seconds",
     "MCP tool call execution duration in seconds.",
     ["hostname"],
+)
+# Bounded outbound retries on idempotent calls (F-05/F-44). `reason` is the trigger
+# (e.g. status_503, status_429, TimeoutException) so retry storms are diagnosable.
+upstream_retries_total = Counter(
+    "mcp_upstream_retries_total",
+    "Total outbound upstream call retries (idempotent ops only).",
+    ["hostname", "reason"],
 )
 
 # Device-fleet gauges, refreshed by a periodic task (collection is sync; the

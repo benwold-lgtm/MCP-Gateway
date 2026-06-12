@@ -42,6 +42,9 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "shutdown_drain_timeout": _NUM,
         "health_lock_ttl": _NUM,
         "max_concurrent_pods": int,
+        "max_retries": int,
+        "retry_base_delay": _NUM,
+        "retry_max_delay": _NUM,
     },
     "redis": {
         "url": str,
@@ -208,6 +211,9 @@ def _defaults() -> dict:
             "spec_cache_ttl": 3600,
             "tool_call_timeout": 30,
             "max_concurrent_pods": 50,
+            "max_retries": 2,
+            "retry_base_delay": 0.2,
+            "retry_max_delay": 5.0,
         },
         "redis": {
             "url": "redis://localhost:6379/0",
