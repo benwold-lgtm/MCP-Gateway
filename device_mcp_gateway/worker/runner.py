@@ -36,6 +36,7 @@ from loguru import logger
 from device_mcp_gateway import metrics
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered
+from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
@@ -587,11 +588,13 @@ class DeviceWorker:
                 if session_id and msg_id_val is not None:
                     await self._session_router.publish_result(
                         session_id,
-                        {
-                            "jsonrpc": "2.0",
-                            "id": msg_id_val,
-                            "error": {"code": -32001, "message": f"No active pod for {hostname}; call not served"},
-                        },
+                        rpc_error(
+                            RPC_NO_WORKER,
+                            msg_id_val,
+                            rid=rid,
+                            request_id=request_id,
+                            message=f"No active pod for {hostname}; call not served",
+                        ),
                     )
                 if request_id:
                     await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)

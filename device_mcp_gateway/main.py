@@ -33,6 +33,7 @@ from sse_starlette import EventSourceResponse
 from device_mcp_gateway import __version__
 from device_mcp_gateway.cfg import load_config, resolve_mode, warn_unsafe_settings
 from device_mcp_gateway.core.backoff import jittered
+from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
@@ -99,13 +100,17 @@ def _validate_hostname(hostname: str) -> None:
         )
 
 
-async def _watch_tool_call_timeout(redis, session_router, session_id, request_id, msg_id, timeout, hostname="?"):
+async def _watch_tool_call_timeout(
+    redis, session_router, session_id, request_id, msg_id, timeout, hostname="?", rid=None
+):
     """Emit a JSON-RPC timeout error on the SSE stream if no worker responds.
 
     Cross-replica safe: the worker sets result:{request_id} in Redis when it
     handles the call, so this watcher (which may run on a different gateway
     replica than the one holding the SSE stream) checks that shared marker
-    rather than observing the pub/sub channel directly (F6).
+    rather than observing the pub/sub channel directly (F6). The emitted error
+    carries the catalogued `no_worker` reason + the rid so the caller can
+    diagnose and correlate with the access log (F-51).
     """
     try:
         await asyncio.sleep(timeout)
@@ -114,11 +119,13 @@ async def _watch_tool_call_timeout(redis, session_router, session_id, request_id
         metrics.tool_call_timeouts_total.labels(hostname=hostname).inc()
         await session_router.publish_result(
             session_id,
-            {
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "error": {"code": -32001, "message": f"Tool call timed out after {timeout}s — no worker responded"},
-            },
+            rpc_error(
+                RPC_NO_WORKER,
+                msg_id,
+                rid=rid,
+                request_id=request_id,
+                message=f"Tool call timed out after {timeout}s — no worker responded",
+            ),
         )
     except asyncio.CancelledError:
         pass
@@ -789,6 +796,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                         payload.get("id"),
                         _timeout,
                         hostname,
+                        _rid,
                     )
                 )
                 request.app.state.bg_tasks.add(_watcher)
