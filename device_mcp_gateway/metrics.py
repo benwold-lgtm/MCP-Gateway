@@ -35,6 +35,7 @@ __all__ = [
     "worker_pending_calls",
     "worker_assignments_lag",
     "worker_undelivered_calls",
+    "reconciler_leader",
     "tool_call_timeouts_total",
     "sse_messages_dropped_total",
     "dead_letter_total",
@@ -137,6 +138,13 @@ worker_undelivered_calls = Gauge(
     "mcp_worker_undelivered_calls",
     "Tool-call stream entries not yet delivered to this worker's consumer group "
     "(never-read backlog). Add to mcp_worker_pending_calls for total work waiting.",
+)
+# 1 on the worker that currently holds the reconciler lease, 0 on the others.
+# Summed across workers it must be exactly 1; sum == 0 means orphaned-device
+# recovery has stalled (no leader) — alertable (F-14, SRE #1/#2).
+reconciler_leader = Gauge(
+    "mcp_reconciler_leader",
+    "1 if this worker currently holds the reconciler leader lease, else 0.",
 )
 
 # --- Failure-mode counters (SRE O1) ------------------------------------------

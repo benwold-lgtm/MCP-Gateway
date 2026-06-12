@@ -72,6 +72,12 @@ _CONFIG_SCHEMA: dict[str, Any] = {
     "cors": {"allowed_origins": list},
     "security": {"allow_private_targets": bool},
     "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM},
+    "tracing": {
+        "enabled": bool,
+        "otlp_endpoint": str,
+        "service_name": str,
+        "sample_ratio": _NUM,
+    },
     "logging": {
         "level": str,
         "file": str,

@@ -146,12 +146,15 @@ class AbstractRegistryBackend(ABC):
         gateway_id: str,
         message: dict,
         rid: str = "",
+        traceparent: str = "",
     ) -> None:
         """Push a tool-call message onto the device's Redis Stream.
 
         `rid` is the gateway's X-Request-Id correlation id; it rides along on the
         stream so the worker can bind it in its audit log, giving one trace id
-        across the gateway→worker hop (SRE O2).
+        across the gateway→worker hop (SRE O2). `traceparent` is the optional W3C
+        trace-context (F-14): when tracing is on, the worker starts its execution
+        span as a child of it so the call is one end-to-end trace.
         """
         ...
 
@@ -222,6 +225,7 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
         gateway_id: str,
         message: dict,
         rid: str = "",
+        traceparent: str = "",
     ) -> None:
         pass  # no-op; embedded mode routes calls in-process
 
@@ -331,6 +335,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         gateway_id: str,
         message: dict,
         rid: str = "",
+        traceparent: str = "",
     ) -> None:
         await self._r.xadd(
             f"device:{hostname}:calls",
@@ -339,6 +344,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
                 "session_id": session_id,
                 "gateway_id": gateway_id,
                 "rid": rid,
+                "traceparent": traceparent,
                 "message": json.dumps(message),
             },
             maxlen=_CALL_STREAM_MAXLEN,

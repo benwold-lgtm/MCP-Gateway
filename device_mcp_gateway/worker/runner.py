@@ -44,6 +44,7 @@ from device_mcp_gateway.core.spec_limits import (
     fetched_spec_or_none,
     run_translation,
 )
+from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
@@ -166,6 +167,8 @@ class DeviceWorker:
     async def run(self, backend: AbstractRegistryBackend) -> None:
         """Main entry point. Runs until SIGTERM/SIGINT or stop() is called."""
         self._backend = backend
+        # Optional OTel tracing (no-op unless enabled + [otel] installed). F-14.
+        tracing.init_tracing(self._config, "mcp-worker")
         _reg_cfg = self._config.get("registry", {})
         # Bounded jittered retries for idempotent outbound GETs/tool calls (F-05/F-44).
         self._retry_policy = RetryPolicy.from_config(self._config)
@@ -296,7 +299,11 @@ class DeviceWorker:
         lock_ttl = max(self._reconcile_interval * 2, 60)
         while not self._stop_event.is_set():
             try:
-                if await self._acquire_leadership(lock_ttl):
+                is_leader = await self._acquire_leadership(lock_ttl)
+                # Export leadership so an alert can fire when no worker holds it
+                # (orphaned-device recovery stalled) — sum across workers == 1 (F-14).
+                metrics.reconciler_leader.set(1 if is_leader else 0)
+                if is_leader:
                     await self._reconcile_once()
             except asyncio.CancelledError:
                 raise
@@ -618,16 +625,26 @@ class DeviceWorker:
                 )
                 return
             _t = time.perf_counter()
-            result = await pod.call_tool(message)
-            _dur = time.perf_counter() - _t
-            # Distributed-mode tool calls execute here on the worker; record where
-            # the work actually happens (the gateway only enqueues).
-            if result is None:
-                _status = "noresult"  # notification — no JSON-RPC response expected
-            elif isinstance(result, dict) and "error" in result:
-                _status = "error"
-            else:
-                _status = "ok"
+            # Execution span parented from the gateway's dispatch span (F-14): the
+            # traceparent rode along on the stream entry, so this joins the same
+            # end-to-end trace. No-op when tracing is off.
+            with tracing.start_span_from_carrier(
+                "mcp.tool_call",
+                {"traceparent": fields.get("traceparent", "")},
+                attributes={"mcp.hostname": hostname, "mcp.method": _method, "mcp.rid": rid},
+            ) as _span:
+                result = await pod.call_tool(message)
+                _dur = time.perf_counter() - _t
+                # Distributed-mode tool calls execute here on the worker; record where
+                # the work actually happens (the gateway only enqueues).
+                if result is None:
+                    _status = "noresult"  # notification — no JSON-RPC response expected
+                elif isinstance(result, dict) and "error" in result:
+                    _status = "error"
+                else:
+                    _status = "ok"
+                if _span is not None:
+                    _span.set_attribute("mcp.status", _status)
             metrics.tool_calls_total.labels(hostname=hostname, method=_method, status=_status).inc()
             metrics.tool_call_duration_seconds.labels(hostname=hostname).observe(_dur)
             if result is not None:
