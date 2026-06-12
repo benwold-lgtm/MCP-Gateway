@@ -77,6 +77,27 @@ async def test_delete_device_clears_all_keys(real_redis):
     assert "dev1" not in await backend.list_hostnames()
 
 
+async def test_call_backlog_reflects_consumer_group_lag(real_redis):
+    """F-06 admission signal against real Redis: undelivered calls show as group lag,
+    and reading/acking them drains it back toward zero."""
+    backend = RedisRegistryBackend(real_redis)
+    host = "devlag"
+    group = f"workers-{host}"
+    stream = f"device:{host}:calls"
+    await real_redis.delete(stream)
+    await real_redis.xgroup_create(stream, group, id="0", mkstream=True)
+
+    assert await backend.call_backlog(host) == 0  # empty stream, nothing queued
+    for i in range(4):
+        await backend.publish_tool_call(host, f"r{i}", "s", "gw", {"method": "tools/call", "id": i})
+    assert await backend.call_backlog(host) == 4  # all undelivered
+
+    # A worker reading (delivering) the entries removes them from the lag.
+    await real_redis.xreadgroup(group, "w1", {stream: ">"}, count=4)
+    assert await backend.call_backlog(host) == 0
+    await real_redis.delete(stream)
+
+
 # --- SessionRouter (cross-client pub/sub, the F3 path) ----------------------
 
 

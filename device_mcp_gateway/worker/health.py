@@ -23,6 +23,13 @@ import httpx
 from loguru import logger
 
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
+from device_mcp_gateway.core.spec_limits import (
+    DEFAULT_MAX_SPEC_BYTES,
+    DEFAULT_TRANSLATE_TIMEOUT,
+    SpecTooLargeError,
+    fetched_spec_or_none,
+    run_translation,
+)
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 
 _spec_executor = ProcessPoolExecutor(max_workers=2)
@@ -56,6 +63,8 @@ class WorkerHealthLoop:
         discovery_cfg: dict | None = None,
         lock_ttl: int | None = None,
         retry_policy: RetryPolicy | None = None,
+        spec_max_bytes: int = DEFAULT_MAX_SPEC_BYTES,
+        spec_translate_timeout: float = DEFAULT_TRANSLATE_TIMEOUT,
     ) -> None:
         self._worker_id = worker_id
         self._backend = backend
@@ -64,6 +73,9 @@ class WorkerHealthLoop:
         self._spec_poll_interval = spec_poll_interval
         self._spec_cache_ttl = spec_cache_ttl
         self._discovery = discovery_cfg or {}
+        # Spec-ingestion bounds (F-09).
+        self._spec_max_bytes = spec_max_bytes
+        self._spec_translate_timeout = spec_translate_timeout
         # Bounded jittered retries for idempotent reachability/spec GETs (F-05).
         self._retry_policy = retry_policy or RetryPolicy()
         # Per-device check lock TTL. Must exceed the worst-case single-device
@@ -140,8 +152,16 @@ class WorkerHealthLoop:
             if cfg.spec_hash and new_hash != cfg.spec_hash:
                 logger.info(f"Spec changed for {hostname}: {cfg.spec_hash} → {new_hash}")
                 # Store new manifest in Redis
-                loop = asyncio.get_event_loop()
-                manifest_obj = await loop.run_in_executor(_spec_executor, partial(_translate_spec_sync, spec, hostname))
+                try:
+                    manifest_obj = await run_translation(
+                        _spec_executor,
+                        partial(_translate_spec_sync, spec, hostname),
+                        timeout=self._spec_translate_timeout,
+                        hostname=hostname,
+                    )
+                except (SpecTooLargeError, ValueError) as exc:
+                    logger.warning(f"Spec for {hostname} rejected on update: {exc} (F-09)")
+                    return
                 manifest_dict = _manifest_to_dict(manifest_obj)
                 await self._backend.set_manifest(hostname, manifest_dict, ttl=self._spec_cache_ttl)
                 await self._backend.update_device_fields(hostname, spec_hash=new_hash)
@@ -166,8 +186,10 @@ class WorkerHealthLoop:
                 resp = await send_with_retry(
                     lambda: self._client().get(cfg.spec_url, timeout=10), method="GET", policy=self._retry_policy
                 )
-                if resp.status_code == 200:
-                    return resp.json()
+                return fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
+            except SpecTooLargeError as exc:
+                logger.warning(f"Spec fetch rejected oversized spec for {cfg.spec_url}: {exc} (F-09)")
+                return None
             except Exception:
                 pass
             return None
@@ -185,8 +207,12 @@ class WorkerHealthLoop:
                     return await self._client().get(u, timeout=timeout)
 
                 resp = await send_with_retry(_probe, method="GET", policy=self._retry_policy)
-                if resp.status_code == 200:
-                    return resp.json()
+                spec = fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
+                if spec is not None:
+                    return spec
+            except SpecTooLargeError as exc:
+                logger.warning(f"Spec discovery rejected oversized spec at {url}: {exc} (F-09)")
+                continue
             except Exception:
                 continue
         return None

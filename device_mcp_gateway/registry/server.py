@@ -35,6 +35,13 @@ from loguru import logger
 from device_mcp_gateway.audit import redact_url
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
+from device_mcp_gateway.core.spec_limits import (
+    DEFAULT_MAX_SPEC_BYTES,
+    DEFAULT_TRANSLATE_TIMEOUT,
+    SpecTooLargeError,
+    fetched_spec_or_none,
+    run_translation,
+)
 from device_mcp_gateway.core.translator import SpecTranslator
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.shared.crypto import CredentialCodec
@@ -217,6 +224,10 @@ class Registry:
         self._health_interval = config.get("health_check_interval", 30)
         self._spec_poll_interval = config.get("spec_poll_interval", 300)
         self._max_pods = config.get("max_concurrent_pods", 50)
+        # Spec-ingestion bounds (F-09): reject oversized specs before parse/pool and
+        # cap how long one translation may hold a pool worker.
+        self._spec_max_bytes = config.get("spec_max_bytes", DEFAULT_MAX_SPEC_BYTES)
+        self._spec_translate_timeout = config.get("spec_translate_timeout", DEFAULT_TRANSLATE_TIMEOUT)
         self._http_client: httpx.AsyncClient | None = None
         self._health_semaphore = asyncio.Semaphore(config.get("max_concurrent_health_checks", 10))
         # Bounded jittered retries for idempotent outbound GETs — reachability, spec
@@ -475,8 +486,12 @@ class Registry:
                     return await client.get(u, timeout=timeout)
 
                 resp = await send_with_retry(_probe, method="GET", policy=self._retry_policy)
-                if resp.status_code == 200:
-                    return resp.json()
+                spec = fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
+                if spec is not None:
+                    return spec
+            except SpecTooLargeError as exc:
+                logger.warning(f"Spec discovery rejected oversized spec at {redact_url(url)}: {exc} (F-09)")
+                continue
             except (httpx.HTTPError, ValueError) as exc:
                 logger.debug(f"Spec discovery probe failed for {redact_url(url)}: {exc}")
                 continue
@@ -487,8 +502,10 @@ class Registry:
             resp = await send_with_retry(
                 lambda: self._get_client().get(url, timeout=10), method="GET", policy=self._retry_policy
             )
-            if resp.status_code == 200:
-                return resp.json()
+            return fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
+        except SpecTooLargeError as exc:
+            logger.warning(f"Spec fetch rejected oversized spec at {redact_url(url)}: {exc} (F-09)")
+            return None
         except (httpx.HTTPError, ValueError) as exc:
             logger.debug(f"Spec fetch failed for {redact_url(url)}: {exc}")
             return None
@@ -544,8 +561,18 @@ class Registry:
             logger.warning(msg)
             profile.config.spawn_error = msg
             return
-        loop = asyncio.get_event_loop()
-        mcp_manifest = await loop.run_in_executor(_spec_executor, partial(_translate_spec_sync, spec, profile.hostname))
+        try:
+            mcp_manifest = await run_translation(
+                _spec_executor,
+                partial(_translate_spec_sync, spec, profile.hostname),
+                timeout=self._spec_translate_timeout,
+                hostname=profile.hostname,
+            )
+        except (SpecTooLargeError, ValueError) as exc:
+            msg = f"Spec for {profile.hostname} rejected: {exc} (F-09)"
+            logger.warning(msg)
+            profile.config.spawn_error = msg
+            return
         keep_alive = self._config.get("transport", {}).get("sse", {}).get("keep_alive_interval", 30)
         pod = DevicePod(
             hostname=profile.hostname,

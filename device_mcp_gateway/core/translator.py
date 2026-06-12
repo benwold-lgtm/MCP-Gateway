@@ -18,6 +18,8 @@ from loguru import logger
 from openapi_spec_validator import validate as _validate_openapi_spec
 from openapi_spec_validator.validation.exceptions import OpenAPISpecValidatorError
 
+from device_mcp_gateway.core.spec_limits import enforce_operation_count
+
 # Device-supplied spec text (summaries/descriptions/titles) becomes LLM-facing tool
 # metadata, so it is untrusted (Tier-0 F-26 — schema poisoning / indirect prompt
 # injection). Strip control chars, Unicode bidi overrides, and zero-width characters —
@@ -132,6 +134,11 @@ class SpecTranslator:
 
     def translate(self, spec: dict, hostname: str = "test-device") -> McpManifest:
         """Main entry point: spec dict + hostname -> McpManifest."""
+        # Reject a spec with an absurd operation count before the (potentially
+        # expensive) validator and per-op translation run, so a hostile/huge spec
+        # can't monopolise a translation-pool worker (F-09). Cheap, deterministic,
+        # and applied at the one chokepoint every fetch path funnels through.
+        enforce_operation_count(spec)
         try:
             _validate_openapi_spec(spec)
         except OpenAPISpecValidatorError as exc:

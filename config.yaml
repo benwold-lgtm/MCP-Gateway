@@ -63,6 +63,13 @@ registry:
   spec_poll_interval: 300
   # Spec cache TTL in seconds
   spec_cache_ttl: 3600
+  # Max OpenAPI spec body size in bytes (F-09). A fetched spec larger than this is
+  # rejected before it is parsed, cached, or translated, so a hostile/huge document
+  # can't exhaust memory or starve the shared spec-translation process pool.
+  spec_max_bytes: 5000000
+  # Wall-clock seconds a single spec translation may hold a pool worker (F-09). On
+  # timeout the spec is rejected and the awaiting health/registry loop is freed.
+  spec_translate_timeout: 15
   # Distributed mode: seconds the gateway waits for a worker to handle a tool
   # call before emitting a timeout error event on the SSE stream, so clients
   # don't hang forever when no worker is consuming.
@@ -75,6 +82,12 @@ registry:
   # When saturated the worker stops reading that device's call stream (backpressure),
   # so a burst shows up as Redis-stream lag rather than unbounded worker memory.
   max_concurrent_calls_per_device: 20
+  # Distributed mode: admission watermark (F-06). When a device's call stream has
+  # this many undelivered calls (consumer-group lag), the gateway fast-fails new
+  # tool calls with HTTP 429 instead of queuing behind work that would be silently
+  # trimmed at the stream's MAXLEN (10k) and surface only as a 30s client timeout.
+  # Set 0 to disable admission shedding. Keep well below MAXLEN.
+  call_backlog_limit: 1000
   # Distributed mode: on SIGTERM, seconds to let in-flight tool calls finish before
   # cancelling them. Keep below the pod terminationGracePeriodSeconds.
   shutdown_drain_timeout: 25
