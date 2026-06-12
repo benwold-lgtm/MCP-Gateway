@@ -35,20 +35,20 @@ from typing import Any
 
 import httpx
 
+from device_mcp_gateway.core.errors import (
+    ERR_CIRCUIT_OPEN,
+    ERR_CONNECTION,
+    ERR_HTTP,
+    ERR_INTERNAL,
+    ERR_TIMEOUT,
+    ERR_TOO_LARGE,
+)
 from device_mcp_gateway.core.translator import (
     FORM_CONTENT,
     JSON_CONTENT,
     MULTIPART_CONTENT,
     McpTool,
 )
-
-# Error catalog (F-39 / ties F-51): stable, machine-branchable error types.
-ERR_HTTP = "http_error"
-ERR_TOO_LARGE = "response_too_large"
-ERR_CIRCUIT_OPEN = "circuit_open"
-ERR_TIMEOUT = "timeout"
-ERR_CONNECTION = "connection_error"
-ERR_INTERNAL = "internal"
 
 
 class DeviceAdapter:

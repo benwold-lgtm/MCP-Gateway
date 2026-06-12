@@ -28,6 +28,12 @@ from device_mcp_gateway.core.adapter import (
     DeviceAdapter,
 )
 from device_mcp_gateway.core.backoff import RetryPolicy, send_with_retry
+from device_mcp_gateway.core.errors import (
+    RPC_INTERNAL_ERROR,
+    RPC_INVALID_PARAMS,
+    RPC_METHOD_NOT_FOUND,
+    rpc_error,
+)
 from device_mcp_gateway.pods.sse_server import SseTransport
 from device_mcp_gateway.pods.rate_limiter import TokenBucket
 from device_mcp_gateway.core.translator import McpManifest, McpTool
@@ -323,28 +329,16 @@ class DevicePod:
             arguments = params.get("arguments") or {}
             handler = self._tool_dispatch.get(tool_name)
             if not handler:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "error": {"code": -32601, "message": f"Tool not found: {tool_name}"},
-                }
+                return rpc_error(RPC_METHOD_NOT_FOUND, msg_id, message=f"Tool not found: {tool_name}")
             # Validate arguments against the tool's declared JSON schema before dispatch
             # (Tier-0 F-28) so malformed/over-posted params don't reach the upstream.
             if not isinstance(arguments, dict):
-                return {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "error": {"code": -32602, "message": "Invalid params: 'arguments' must be an object"},
-                }
+                return rpc_error(RPC_INVALID_PARAMS, msg_id, message="Invalid params: 'arguments' must be an object")
             schema = self._tool_schemas.get(tool_name)
             if schema is not None:
                 arg_error = _validate_arguments(schema, arguments)
                 if arg_error:
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
-                        "error": {"code": -32602, "message": f"Invalid params: {arg_error}"},
-                    }
+                    return rpc_error(RPC_INVALID_PARAMS, msg_id, message=f"Invalid params: {arg_error}")
             try:
                 result = await handler(**arguments)
                 return {
@@ -354,11 +348,7 @@ class DevicePod:
                 }
             except Exception as e:
                 logger.error(f"Tool call failed for {tool_name}: {e}")
-                return {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "error": {"code": -32000, "message": str(e)},
-                }
+                return rpc_error(RPC_INTERNAL_ERROR, msg_id, message=str(e))
 
         if method == "resources/list":
             resources = [
@@ -371,20 +361,12 @@ class DevicePod:
             uri: str = params.get("uri") or ""
             prefix = f"device://{self.hostname}"
             if not uri.startswith(prefix):
-                return {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "error": {"code": -32602, "message": f"Unknown resource URI: {uri}"},
-                }
+                return rpc_error(RPC_INVALID_PARAMS, msg_id, message=f"Unknown resource URI: {uri}")
             path = uri[len(prefix) :]
             # Reject path traversal / off-API escapes (Tier-0 F-29): the path is appended to
             # base_url, so '..' or a scheme/host-relative path could read off the intended API.
             if path and (".." in path or not path.startswith("/")):
-                return {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "error": {"code": -32602, "message": f"Invalid resource path in URI: {uri}"},
-                }
+                return rpc_error(RPC_INVALID_PARAMS, msg_id, message=f"Invalid resource path in URI: {uri}")
             if self._rate_limiter:
                 await self._rate_limiter.acquire()
             headers = await self.auth.get_headers() if self.auth else {}
@@ -400,15 +382,11 @@ class DevicePod:
                 }
             except Exception as e:
                 logger.error(f"Resource read failed for {uri}: {e}")
-                return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32000, "message": str(e)}}
+                return rpc_error(RPC_INTERNAL_ERROR, msg_id, message=str(e))
 
         # Unknown method — only send an error if this was a request (has an id)
         if msg_id is not None:
-            return {
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "error": {"code": -32601, "message": f"Method not found: {method}"},
-            }
+            return rpc_error(RPC_METHOD_NOT_FOUND, msg_id, message=f"Method not found: {method}")
         return None
 
     async def call_tool(self, message: dict) -> dict | None:
