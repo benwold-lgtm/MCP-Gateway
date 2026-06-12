@@ -131,7 +131,43 @@ class DeviceAdapter:
         body = self._parse_body(resp)
         if resp.status_code >= 400:
             return self.normalize_http_error(resp)
-        return {"ok": True, "status": resp.status_code, "body": body}
+        env: dict[str, Any] = {"ok": True, "status": resp.status_code, "body": body}
+        # Surface header-based pagination (RFC 5988 Link / cursor headers) so the LLM
+        # can continue past page 1 — otherwise only the body is returned and the
+        # cursor is invisible (F-48).
+        pagination = self._pagination(resp)
+        if pagination:
+            env["pagination"] = pagination
+        return env
+
+    # Well-known "next cursor/page" headers (lowercased), checked in order. Body
+    # cursors are too vendor-specific to parse generically — they already ride in
+    # ``body`` for the LLM to read.
+    _CURSOR_HEADERS = ("x-next-cursor", "x-next-page", "next-cursor", "x-cursor", "x-page-token")
+    _TOTAL_HEADERS = ("x-total-count", "x-total", "x-total-pages")
+
+    def _pagination(self, resp: httpx.Response) -> dict[str, Any] | None:
+        """Extract pagination continuation signals from response headers, or None.
+
+        Uses httpx's parsed RFC 5988 ``Link`` rels plus a small set of common
+        cursor/total headers. ``has_more`` is true when a next page is reachable.
+        """
+        links = {rel: meta["url"] for rel, meta in resp.links.items() if meta.get("url")}
+        next_cursor = next((resp.headers[h] for h in self._CURSOR_HEADERS if h in resp.headers), None)
+        total = next((resp.headers[h] for h in self._TOTAL_HEADERS if h in resp.headers), None)
+        if not links and next_cursor is None and total is None:
+            return None
+        pagination: dict[str, Any] = {}
+        if links.get("next"):
+            pagination["next_url"] = links["next"]
+        if links:
+            pagination["links"] = links
+        if next_cursor is not None:
+            pagination["next_cursor"] = next_cursor
+        if total is not None:
+            pagination["total"] = total
+        pagination["has_more"] = bool(links.get("next") or next_cursor)
+        return pagination
 
     def normalize_http_error(self, resp: httpx.Response) -> dict[str, Any]:
         """Envelope for an upstream HTTP error response (4xx/5xx) — includes the body."""

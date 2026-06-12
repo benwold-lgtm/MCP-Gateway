@@ -129,6 +129,46 @@ def test_error_envelope_shape():
     assert env == {"ok": False, "status": 504, "error": {"type": "timeout", "message": "slow"}}
 
 
+# --- F-48 pagination surfacing -----------------------------------------------
+
+
+def _resp_h(headers, status=200, body=b"{}"):
+    h = {"content-type": "application/json", **headers}
+    return httpx.Response(status_code=status, content=body, headers=h)
+
+
+def test_no_pagination_when_no_signals():
+    # A plain response must not grow a pagination key (exact-equality guard).
+    a = DeviceAdapter(_MAX)
+    assert "pagination" not in a.build_result(_resp(200, b'{"x":1}'))
+
+
+def test_pagination_from_link_header_next():
+    a = DeviceAdapter(_MAX)
+    link = '<https://api.dev/items?page=2>; rel="next", <https://api.dev/items?page=9>; rel="last"'
+    env = a.build_result(_resp_h({"link": link}))
+    pag = env["pagination"]
+    assert pag["next_url"] == "https://api.dev/items?page=2"
+    assert pag["links"]["next"] == "https://api.dev/items?page=2"
+    assert pag["links"]["last"] == "https://api.dev/items?page=9"
+    assert pag["has_more"] is True
+
+
+def test_pagination_from_cursor_header():
+    a = DeviceAdapter(_MAX)
+    env = a.build_result(_resp_h({"x-next-cursor": "abc123"}))
+    assert env["pagination"]["next_cursor"] == "abc123"
+    assert env["pagination"]["has_more"] is True
+
+
+def test_pagination_total_only_is_not_has_more():
+    a = DeviceAdapter(_MAX)
+    env = a.build_result(_resp_h({"x-total-count": "500"}))
+    assert env["pagination"]["total"] == "500"
+    assert env["pagination"]["has_more"] is False
+    assert "next_url" not in env["pagination"]
+
+
 # --- translator content-type selection (F-40) --------------------------------
 
 

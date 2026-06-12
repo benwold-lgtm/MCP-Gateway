@@ -68,6 +68,35 @@ Branch on `error.type`:
 
 A successful call returns `{ "ok": true, "status": <2xx>, "body": <parsed> }`.
 
+### Pagination (F-48)
+
+When the device's response carries header-based pagination — an RFC 5988 `Link`
+header or a known cursor/total header — the success envelope gains a `pagination`
+object so the next page is reachable instead of invisible (only the body would
+otherwise be returned):
+
+```json
+{
+  "ok": true,
+  "status": 200,
+  "body": [ ... ],
+  "pagination": {
+    "next_url": "https://api.example.com/items?page=2",
+    "links": { "next": "...", "last": "..." },
+    "next_cursor": "eyJpZCI6MTB9",
+    "total": "500",
+    "has_more": true
+  }
+}
+```
+
+Fields are present only when the corresponding signal exists. `next_url`/`links`
+come from the `Link` header; `next_cursor` from the first of `X-Next-Cursor`,
+`X-Next-Page`, `Next-Cursor`, `X-Cursor`, `X-Page-Token`; `total` from
+`X-Total-Count`/`X-Total`/`X-Total-Pages`. `has_more` is true when a next page is
+reachable. Body-embedded cursors are **not** parsed (too vendor-specific) — they
+already ride in `body` for the model to read.
+
 ---
 
 ## Telling the failure modes apart
