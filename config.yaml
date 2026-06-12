@@ -44,9 +44,12 @@ gateway:
   trust_proxy_headers: false
 
 server:
+  # 0.0.0.0 binds all interfaces (intended for containers behind a network policy/LB).
+  # The gateway warns at startup if it binds all interfaces while auth is disabled —
+  # bind 127.0.0.1 for a local-only process, or configure auth (see gateway.api_key).
   host: "0.0.0.0"
   port: 8000
-  
+
 registry:
   # "embedded": in-process pods, SQLite, no Redis required (default, local dev)
   # "distributed": Redis-backed registry + separate worker processes (production)
@@ -146,9 +149,10 @@ storage:
   db_path: "./data/devices.db"
 
 cors:
-  # Allowed origins for browser-based MCP clients. Empty list disables CORS headers.
-  # Use ["*"] only in development; set specific origins in production.
-  # Example: ["https://my-llm-app.example.com", "https://app.anthropic.com"]
+  # Allowed origins for browser-based MCP clients. Empty list disables CORS headers (safe default).
+  # Credentials are allowed, so a "*" wildcard lets ANY website call the API from a browser —
+  # the gateway warns at startup if you set it. Use ["*"] only in local development; set specific
+  # origins in production. Example: ["https://my-llm-app.example.com", "https://app.anthropic.com"]
   allowed_origins: []
 
 security:
