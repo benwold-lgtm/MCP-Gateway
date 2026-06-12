@@ -27,6 +27,7 @@ from device_mcp_gateway.core.adapter import (
     ERR_TIMEOUT,
     DeviceAdapter,
 )
+from device_mcp_gateway.core.backoff import RetryPolicy, send_with_retry
 from device_mcp_gateway.pods.sse_server import SseTransport
 from device_mcp_gateway.pods.rate_limiter import TokenBucket
 from device_mcp_gateway.core.translator import McpManifest, McpTool
@@ -120,6 +121,7 @@ class DevicePod:
         rate_limit_rps: float | None = None,
         keep_alive_interval: int = 30,
         request_timeout: float = 15,
+        retry_policy: RetryPolicy | None = None,
     ):
         self.hostname = hostname
         self.manifest = manifest
@@ -128,6 +130,8 @@ class DevicePod:
         self.base_url = base_url
         self._keep_alive_interval = keep_alive_interval
         self._request_timeout = request_timeout
+        # Bounded jittered retries for idempotent tool calls (F-05/F-44).
+        self._retry_policy = retry_policy or RetryPolicy()
         # One reused HTTP client per pod (created lazily) instead of one per
         # tool call — keeps connections/TLS alive across invocations (F8).
         self._http: httpx.AsyncClient | None = None
@@ -168,6 +172,12 @@ class DevicePod:
         # without it appearing in the function signature (Pydantic would warn on it).
         _pod_breaker = self._breaker
         _adapter = self._adapter  # request encoder + response normalizer (F-49)
+        _retry_policy = self._retry_policy  # bounded jittered retries (F-05/F-44)
+        _hostname = self.hostname
+
+        def _count_retry(_attempt: int, reason: str) -> None:
+            metrics.upstream_retries_total.labels(hostname=_hostname, reason=reason).inc()
+
         for tool in self.manifest.tools:
             # Build a callable closure per tool. All closure variables are bound
             # via default-argument so each iteration captures its own snapshot.
@@ -206,14 +216,24 @@ class DevicePod:
                 if body_headers:
                     headers = {**body_headers, **headers}
 
-                async def _call():
-                    c = _get_client()
-                    resp = await c.request(
+                async def _send():
+                    return await _get_client().request(
                         method=tool.method,
                         url=url,
                         headers=headers,
                         params=query_params or None,
                         **body_kwargs,
+                    )
+
+                async def _call():
+                    # Bounded jittered retries on transient failures — idempotent (GET)
+                    # methods only; honors 429 Retry-After (F-05/F-44). Runs inside the
+                    # breaker so one logical call = one breaker outcome.
+                    resp = await send_with_retry(
+                        _send,
+                        method=tool.method,
+                        policy=_retry_policy,
+                        on_retry=_count_retry,
                     )
                     # Only raise on 5xx — device-side failures trip the breaker.
                     # 4xx are client/LLM errors and should not affect circuit state.

@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 
 _spec_executor = ProcessPoolExecutor(max_workers=2)
@@ -54,6 +55,7 @@ class WorkerHealthLoop:
         spec_cache_ttl: int = 3600,
         discovery_cfg: dict | None = None,
         lock_ttl: int | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._worker_id = worker_id
         self._backend = backend
@@ -62,6 +64,8 @@ class WorkerHealthLoop:
         self._spec_poll_interval = spec_poll_interval
         self._spec_cache_ttl = spec_cache_ttl
         self._discovery = discovery_cfg or {}
+        # Bounded jittered retries for idempotent reachability/spec GETs (F-05).
+        self._retry_policy = retry_policy or RetryPolicy()
         # Per-device check lock TTL. Must exceed the worst-case single-device
         # check (reachability GET + spec fetch + translation), which is
         # independent of the poll interval — otherwise a slow check lets the
@@ -93,7 +97,7 @@ class WorkerHealthLoop:
             # Drop spec-poll timestamps for devices no longer assigned.
             for stale in set(self._last_spec_check) - set(assigned):
                 self._last_spec_check.pop(stale, None)
-            await asyncio.sleep(self._interval)
+            await asyncio.sleep(jittered(self._interval))  # F-61: de-sync worker health loops
 
     async def _check_device(self, hostname: str) -> None:
         lock_key = f"health_lock:{hostname}"
@@ -149,7 +153,9 @@ class WorkerHealthLoop:
 
     async def _check_reachability(self, base_url: str) -> bool:
         try:
-            resp = await self._client().get(base_url, timeout=5)
+            resp = await send_with_retry(
+                lambda: self._client().get(base_url, timeout=5), method="GET", policy=self._retry_policy
+            )
             return resp.status_code < 500
         except Exception:
             return False
@@ -157,7 +163,9 @@ class WorkerHealthLoop:
     async def _fetch_spec(self, cfg: Any) -> dict | None:
         if cfg.spec_url:
             try:
-                resp = await self._client().get(cfg.spec_url, timeout=10)
+                resp = await send_with_retry(
+                    lambda: self._client().get(cfg.spec_url, timeout=10), method="GET", policy=self._retry_policy
+                )
                 if resp.status_code == 200:
                     return resp.json()
             except Exception:
@@ -172,7 +180,11 @@ class WorkerHealthLoop:
         for path in paths:
             try:
                 url = cfg.base_url.rstrip("/") + path
-                resp = await self._client().get(url, timeout=timeout)
+
+                async def _probe(u: str = url) -> httpx.Response:
+                    return await self._client().get(u, timeout=timeout)
+
+                resp = await send_with_retry(_probe, method="GET", policy=self._retry_policy)
                 if resp.status_code == 200:
                     return resp.json()
             except Exception:

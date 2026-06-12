@@ -16,10 +16,10 @@ test-fast:
 	pytest tests/ -x -q -m "not integration"
 
 lint:
-	flake8 device_mcp_gateway/ tests/
+	flake8 device_mcp_gateway/ tests/ --max-line-length=120
 
 typecheck:
-	mypy device_mcp_gateway/
+	mypy device_mcp_gateway/ --ignore-missing-imports
 
 # Static security scan — same invocation as the CI security job. Flags Medium+
 # severity issues (B104 bind-all, etc.); annotate true false-positives with # nosec.

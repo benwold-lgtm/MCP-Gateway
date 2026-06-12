@@ -32,6 +32,7 @@ from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway import __version__
 from device_mcp_gateway.cfg import load_config, resolve_mode, warn_unsafe_settings
+from device_mcp_gateway.core.backoff import jittered
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
@@ -191,7 +192,7 @@ async def _refresh_device_gauges(app: FastAPI, interval: float) -> None:
             raise
         except Exception:
             logger.warning("device gauge refresh failed")
-        await asyncio.sleep(interval)
+        await asyncio.sleep(jittered(interval))  # F-61: de-sync leader-election/refresh across replicas
 
 
 def create_app(override_config: dict | None = None) -> FastAPI:

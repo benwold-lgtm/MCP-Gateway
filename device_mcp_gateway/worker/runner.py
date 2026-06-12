@@ -35,6 +35,7 @@ from loguru import logger
 
 from device_mcp_gateway import metrics
 from device_mcp_gateway.auth.base import AbstractAuth
+from device_mcp_gateway.core.backoff import RetryPolicy, jittered
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
@@ -152,6 +153,8 @@ class DeviceWorker:
         """Main entry point. Runs until SIGTERM/SIGINT or stop() is called."""
         self._backend = backend
         _reg_cfg = self._config.get("registry", {})
+        # Bounded jittered retries for idempotent outbound GETs/tool calls (F-05/F-44).
+        self._retry_policy = RetryPolicy.from_config(self._config)
         self._health = WorkerHealthLoop(
             worker_id=self._id,
             backend=backend,
@@ -161,6 +164,7 @@ class DeviceWorker:
             spec_cache_ttl=_reg_cfg.get("spec_cache_ttl", 3600),
             discovery_cfg=self._config.get("discovery", {}),
             lock_ttl=_reg_cfg.get("health_lock_ttl"),
+            retry_policy=self._retry_policy,
         )
         self._health.on_spec_changed = self._replace_pod
         await backend.initialize()
@@ -246,7 +250,7 @@ class DeviceWorker:
                 # (pod restarts) and, meanwhile, the leases lapse so the reconciler
                 # reassigns this worker's devices (SRE #8).
                 logger.error("Worker loops unhealthy — withholding heartbeat and claim refresh (SRE #8)")
-            await asyncio.sleep(_HEARTBEAT_INTERVAL)
+            await asyncio.sleep(jittered(_HEARTBEAT_INTERVAL))  # F-61: de-sync fleet heartbeats
 
     def _loops_healthy(self) -> bool:
         """True unless a critical loop crashed or the assignment consumer stalled."""
@@ -282,7 +286,7 @@ class DeviceWorker:
                 raise
             except Exception:
                 logger.exception("Reconciler cycle failed")
-            await asyncio.sleep(self._reconcile_interval)
+            await asyncio.sleep(jittered(self._reconcile_interval))  # F-61: de-sync leader elections
 
     async def _acquire_leadership(self, ttl: int) -> bool:
         """Claim/refresh the reconciler leader lock. Only the leader sweeps.
@@ -362,7 +366,7 @@ class DeviceWorker:
                 raise
             except Exception:
                 logger.warning("worker metrics refresh failed")
-            await asyncio.sleep(interval)
+            await asyncio.sleep(jittered(interval))  # F-61: de-sync metrics refresh
 
     async def _refresh_worker_metrics(self) -> None:
         metrics.worker_pods.set(len(self._pods))
@@ -453,8 +457,8 @@ class DeviceWorker:
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.exception("Assignment consumer error; retrying in 2 s")
-                await asyncio.sleep(2)
+                logger.exception("Assignment consumer error; retrying in ~2 s")
+                await asyncio.sleep(jittered(2))  # F-61: de-sync reconnect storms
 
     # ------------------------------------------------------------------
     # Tool call consumer
@@ -501,7 +505,7 @@ class DeviceWorker:
                 break
             except Exception:
                 logger.exception(f"Call consumer error for {hostname}; retrying")
-                await asyncio.sleep(1)
+                await asyncio.sleep(jittered(1))  # F-61: de-sync reconnect storms
 
     async def _schedule_dispatch(
         self, sem: asyncio.Semaphore, hostname: str, stream: str, group: str, msg_id: str, fields: dict
@@ -723,6 +727,7 @@ class DeviceWorker:
             base_url=cfg.base_url,
             rate_limit_rps=cfg.rate_limit_rps,
             keep_alive_interval=self._keep_alive,
+            retry_policy=self._retry_policy,
         )
         await pod.start(with_sse=False)  # distributed mode: no in-process SSE transport
         self._pods[hostname] = pod

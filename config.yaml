@@ -85,6 +85,15 @@ registry:
   # health_lock_ttl: 120
   # Max pods to run concurrently (embedded mode only)
   max_concurrent_pods: 50
+  # Bounded retries with full-jitter backoff on IDEMPOTENT outbound calls only —
+  # GET tool calls, reachability and spec/discovery fetches (F-05). POST/PUT/PATCH/
+  # DELETE are never auto-retried (a timed-out mutation may already have applied).
+  # On a 429 the upstream's Retry-After is honored, capped at retry_max_delay; if it
+  # asks for longer, the 429 is surfaced instead of holding the call open (F-44).
+  # Keep the budget small so a struggling upstream isn't amplified.
+  max_retries: 2
+  retry_base_delay: 0.2
+  retry_max_delay: 5.0
 
 redis:
   # Redis connection URL. Used when registry.mode = "distributed".
