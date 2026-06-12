@@ -1,7 +1,19 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Ben Wold. All rights reserved.
 # Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
-"""OAuth 2.0 Client Credentials flow with JWT handling."""
+"""OAuth 2.0 token-endpoint flows for outbound device auth.
+
+Supports the non-interactive grants a gateway can run unattended (F-42):
+``client_credentials`` (default), ``password``, and ``refresh_token``. Client
+credentials go in the request body by default or as HTTP Basic (``auth_style``),
+and ``audience`` / ``extra_params`` cover provider-specific knobs (Auth0
+audience, RFC 8707 ``resource``, …).
+
+Out of scope by design: the ``authorization_code`` grant (needs an interactive
+redirect/user-consent, impossible for an unattended gateway) and ``jwt-bearer``
+assertions (need per-device signing-key management) — documented in
+docs/device-auth.md.
+"""
 
 from __future__ import annotations
 
@@ -15,20 +27,32 @@ from loguru import logger
 
 from .base import AbstractAuth
 
+_BODY_GRANTS = ("client_credentials", "password", "refresh_token")
+
 
 @dataclass
 class OAuth2Auth(AbstractAuth):
-    """OAuth2 authentication handler with automatic token refresh."""
+    """OAuth2 token-endpoint auth with automatic refresh."""
 
     token_endpoint: str
     client_id: str
     client_secret: str
     scopes: list[str] | None = None
     refresh_before_expiry: int = 300
+    grant_type: str = "client_credentials"
+    auth_style: str = "request_body"  # request_body | basic
+    audience: str | None = None
+    username: str | None = None
+    password: str | None = None
+    refresh_token: str | None = None
+    extra_params: dict[str, str] | None = None
 
     def __post_init__(self):
+        if self.grant_type not in _BODY_GRANTS:
+            raise ValueError(f"grant_type must be one of {_BODY_GRANTS}, got {self.grant_type!r}")
+        if self.auth_style not in ("request_body", "basic"):
+            raise ValueError(f"auth_style must be 'request_body' or 'basic', got {self.auth_style!r}")
         self._access_token: str | None = None
-        self._refresh_token: str | None = None
         self._token_expiry: float = 0.0
         self._scopes = self.scopes or ["read"]
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -39,20 +63,41 @@ class OAuth2Auth(AbstractAuth):
                 return
             await self._fetch_token()
 
+    def _build_request(self) -> tuple[dict[str, str], httpx.BasicAuth | None]:
+        """Token-request body + optional HTTP Basic auth, per grant and auth_style."""
+        data: dict[str, str] = {"grant_type": self.grant_type, "scope": " ".join(self._scopes)}
+        if self.grant_type == "password":
+            data["username"] = self.username or ""
+            data["password"] = self.password or ""
+        elif self.grant_type == "refresh_token":
+            data["refresh_token"] = self.refresh_token or ""
+        if self.audience:
+            data["audience"] = self.audience
+        if self.extra_params:
+            data.update(self.extra_params)
+
+        if self.auth_style == "basic":
+            return data, httpx.BasicAuth(self.client_id, self.client_secret)
+        # request_body: client creds travel in the form body.
+        data["client_id"] = self.client_id
+        data["client_secret"] = self.client_secret
+        return data, None
+
     async def _fetch_token(self) -> None:
+        data, basic = self._build_request()
+        post_kwargs: dict[str, Any] = {"data": data}
+        if basic is not None:
+            post_kwargs["auth"] = basic
         async with httpx.AsyncClient(timeout=10) as client:
-            data = {
-                "grant_type": "client_credentials",
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "scope": " ".join(self._scopes),
-            }
             try:
-                resp = await client.post(self.token_endpoint, data=data)
+                resp = await client.post(self.token_endpoint, **post_kwargs)
                 resp.raise_for_status()
                 tokens = resp.json()
                 self._access_token = tokens.get("access_token")
-                self._refresh_token = tokens.get("refresh_token")
+                # A rotated refresh token (if the provider returns one) is kept so a
+                # refresh_token grant keeps working across renewals.
+                if tokens.get("refresh_token"):
+                    self.refresh_token = tokens["refresh_token"]
                 expires_in = int(tokens.get("expires_in", 3600))
                 self._token_expiry = time.time() + expires_in
                 logger.info("OAuth2 token retrieved successfully")
@@ -71,6 +116,13 @@ class OAuth2Auth(AbstractAuth):
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "scopes": self._scopes,
+            "grant_type": self.grant_type,
+            "auth_style": self.auth_style,
+            "audience": self.audience,
+            "username": self.username,
+            "password": self.password,
+            "refresh_token": self.refresh_token,
+            "extra_params": self.extra_params,
         }
 
     @classmethod
@@ -80,4 +132,11 @@ class OAuth2Auth(AbstractAuth):
             client_id=data["client_id"],
             client_secret=data["client_secret"],
             scopes=data.get("scopes", ["read"]),
+            grant_type=data.get("grant_type", "client_credentials"),
+            auth_style=data.get("auth_style", "request_body"),
+            audience=data.get("audience"),
+            username=data.get("username"),
+            password=data.get("password"),
+            refresh_token=data.get("refresh_token"),
+            extra_params=data.get("extra_params"),
         )

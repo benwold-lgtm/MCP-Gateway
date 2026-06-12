@@ -293,29 +293,52 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             data.get("auth_type") or data.get("auth", {}).get("type") or cfg.get("auth", {}).get("type", "api_key")
         )
         if auth_type == "api_key":
-            api_key = data.get("auth", {}).get("api_key") or data.get("api_key")
-            header_name = data.get("auth", {}).get("header_name") or cfg.get("auth", {}).get("api_key", {}).get(
+            auth_cfg = data.get("auth", {})
+            api_key = auth_cfg.get("api_key") or data.get("api_key")
+            header_name = auth_cfg.get("header_name") or cfg.get("auth", {}).get("api_key", {}).get(
                 "header_name", "X-API-Key"
             )
-            return ApiKeyAuth(api_key=api_key, header_name=header_name) if api_key else None
+            if not api_key:
+                return None
+            # F-43: optional non-header placement + scheme prefix.
+            try:
+                return ApiKeyAuth(
+                    api_key=api_key,
+                    header_name=header_name,
+                    location=auth_cfg.get("location", "header"),
+                    name=auth_cfg.get("name"),
+                    value_prefix=auth_cfg.get("value_prefix", ""),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid api_key auth: {exc}")
         if auth_type == "oauth2":
             auth_cfg = data.get("auth", {})
-            token_endpoint = auth_cfg.get("token_endpoint") or cfg.get("auth", {}).get("oauth2", {}).get(
-                "token_endpoint"
-            )
-            client_id = auth_cfg.get("client_id") or cfg.get("auth", {}).get("oauth2", {}).get("client_id")
-            client_secret = auth_cfg.get("client_secret") or cfg.get("auth", {}).get("oauth2", {}).get("client_secret")
-            scopes = auth_cfg.get("scopes") or cfg.get("auth", {}).get("oauth2", {}).get("scopes", ["read"])
+            oauth_defaults = cfg.get("auth", {}).get("oauth2", {})
+            token_endpoint = auth_cfg.get("token_endpoint") or oauth_defaults.get("token_endpoint")
+            client_id = auth_cfg.get("client_id") or oauth_defaults.get("client_id")
+            client_secret = auth_cfg.get("client_secret") or oauth_defaults.get("client_secret")
+            scopes = auth_cfg.get("scopes") or oauth_defaults.get("scopes", ["read"])
             if not token_endpoint or not client_id or not client_secret:
                 raise HTTPException(
                     status_code=400, detail="oauth2 requires token_endpoint, client_id, and client_secret"
                 )
-            return OAuth2Auth(
-                token_endpoint=token_endpoint,
-                client_id=client_id,
-                client_secret=client_secret,
-                scopes=scopes,
-            )
+            # F-42: optional grant/style/audience and provider-specific knobs.
+            try:
+                return OAuth2Auth(
+                    token_endpoint=token_endpoint,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    scopes=scopes,
+                    grant_type=auth_cfg.get("grant_type", "client_credentials"),
+                    auth_style=auth_cfg.get("auth_style", "request_body"),
+                    audience=auth_cfg.get("audience"),
+                    username=auth_cfg.get("username"),
+                    password=auth_cfg.get("password"),
+                    refresh_token=auth_cfg.get("refresh_token"),
+                    extra_params=auth_cfg.get("extra_params"),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid oauth2 auth: {exc}")
         if auth_type == "none":
             return None
         raise HTTPException(status_code=400, detail=f"Unsupported auth_type: {auth_type}")

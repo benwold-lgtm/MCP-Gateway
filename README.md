@@ -278,8 +278,19 @@ Set `MCP_GATEWAY_API_KEY` (environment variable) or `gateway.api_key` in `config
 ```json
 {"auth_type": "api_key", "auth": {"api_key": "my-key", "header_name": "X-API-Key"}}
 ```
+The key can live in a header (default), a query param, or a cookie, with an optional scheme prefix (F-43):
+```json
+{"auth_type": "api_key", "auth": {"api_key": "my-key", "location": "query", "name": "apikey"}}
+{"auth_type": "api_key", "auth": {"api_key": "my-key", "location": "header", "name": "Authorization", "value_prefix": "Bearer "}}
+{"auth_type": "api_key", "auth": {"api_key": "my-key", "location": "cookie", "name": "session"}}
+```
+| Field | Default | Notes |
+|-------|---------|-------|
+| `location` | `header` | `header`, `query`, or `cookie` |
+| `name` | per-location (`X-API-Key` / `api_key` / `api_key`) | header/param/cookie name; legacy `header_name` still accepted |
+| `value_prefix` | `""` | prepended to the value, e.g. `"Bearer "` |
 
-#### OAuth2 (Client Credentials)
+#### OAuth2 (token endpoint)
 ```json
 {
   "auth_type": "oauth2",
@@ -291,6 +302,15 @@ Set `MCP_GATEWAY_API_KEY` (environment variable) or `gateway.api_key` in `config
   }
 }
 ```
+Beyond the default `client_credentials` body flow, the following are supported (F-42):
+| Field | Default | Notes |
+|-------|---------|-------|
+| `grant_type` | `client_credentials` | also `password` (with `username`/`password`) or `refresh_token` (with `refresh_token`) |
+| `auth_style` | `request_body` | `basic` sends client id/secret as HTTP Basic to the token endpoint |
+| `audience` | — | provider audience (e.g. Auth0) |
+| `extra_params` | — | object merged into the token request (e.g. RFC 8707 `resource`) |
+
+The interactive `authorization_code` grant and `jwt-bearer` assertions are intentionally **not** supported — the first needs a user redirect (impossible for an unattended gateway), the second needs per-device signing-key management.
 
 ---
 
