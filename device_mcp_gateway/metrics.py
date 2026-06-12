@@ -162,6 +162,13 @@ circuit_breaker_opens_total = Counter(
     "Tool calls rejected because a device pod's circuit breaker was open.",
     ["hostname"],
 )
+calls_rejected_overload_total = Counter(
+    "mcp_calls_rejected_overload_total",
+    "Tool calls fast-failed with 429 because the device's call-stream backlog "
+    "exceeded the admission watermark (F-06) — rejected up front instead of "
+    "being silently trimmed at MAXLEN.",
+    ["hostname"],
+)
 
 
 def start_metrics_server(port: int) -> bool:

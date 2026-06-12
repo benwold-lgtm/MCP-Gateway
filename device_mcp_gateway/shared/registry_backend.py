@@ -155,6 +155,15 @@ class AbstractRegistryBackend(ABC):
         """
         ...
 
+    async def call_backlog(self, hostname: str) -> int:
+        """Undelivered tool-calls queued for ``hostname`` (admission signal, F-06).
+
+        Default 0: backends that route calls in-process (embedded mode) have no
+        queue to back up, so they never shed. The Redis backend overrides this
+        with the consumer-group lag.
+        """
+        return 0
+
 
 # ---------------------------------------------------------------------------
 # In-memory backend (embedded mode)
@@ -335,3 +344,35 @@ class RedisRegistryBackend(AbstractRegistryBackend):
             maxlen=_CALL_STREAM_MAXLEN,
             approximate=True,
         )
+
+    async def call_backlog(self, hostname: str) -> int:
+        """Entries XADDed to the device's call stream but not yet delivered to
+        the worker consumer group (XINFO GROUPS ``lag``) — the admission-control
+        signal for F-06.
+
+        A growing lag means the worker isn't draining the stream; once it nears
+        ``_CALL_STREAM_MAXLEN`` the oldest undelivered calls are silently trimmed
+        on the next XADD. The gateway reads this before publishing and fast-fails
+        (429) past a watermark, turning a silent drop into a visible reject.
+
+        Returns 0 when the stream/group doesn't exist yet (nothing queued) or on
+        any Redis error, so a metrics hiccup never wrongly sheds live traffic.
+        """
+        group = f"workers-{hostname}"
+        try:
+            groups = await self._r.xinfo_groups(f"device:{hostname}:calls")
+        except Exception:
+            return 0
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            name = g.get("name")
+            if isinstance(name, bytes):
+                name = name.decode()
+            if name == group:
+                lag = g.get("lag")
+                try:
+                    return int(lag) if lag is not None else 0
+                except (TypeError, ValueError):
+                    return 0
+        return 0

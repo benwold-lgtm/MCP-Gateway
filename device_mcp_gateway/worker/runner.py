@@ -37,6 +37,13 @@ from device_mcp_gateway import metrics
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered
 from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
+from device_mcp_gateway.core.spec_limits import (
+    DEFAULT_MAX_SPEC_BYTES,
+    DEFAULT_TRANSLATE_TIMEOUT,
+    SpecTooLargeError,
+    fetched_spec_or_none,
+    run_translation,
+)
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
@@ -135,6 +142,12 @@ class DeviceWorker:
         # blocks on this when saturated rather than spawning unbounded tasks/outbound
         # requests, so a burst becomes visible stream lag instead of worker OOM.
         self._max_calls_per_device = config.get("registry", {}).get("max_concurrent_calls_per_device", 20)
+        # Spec-ingestion bounds (F-09): reject oversized specs before parse/pool and
+        # cap how long one translation may hold a worker's translation-pool slot.
+        self._spec_max_bytes = config.get("registry", {}).get("spec_max_bytes", DEFAULT_MAX_SPEC_BYTES)
+        self._spec_translate_timeout = config.get("registry", {}).get(
+            "spec_translate_timeout", DEFAULT_TRANSLATE_TIMEOUT
+        )
         # Seconds to let in-flight tool calls finish on shutdown before cancelling,
         # so a rolling update doesn't error every active call (SRE #6).
         self._drain_timeout = config.get("registry", {}).get("shutdown_drain_timeout", 25)
@@ -166,6 +179,8 @@ class DeviceWorker:
             discovery_cfg=self._config.get("discovery", {}),
             lock_ttl=_reg_cfg.get("health_lock_ttl"),
             retry_policy=self._retry_policy,
+            spec_max_bytes=self._spec_max_bytes,
+            spec_translate_timeout=self._spec_translate_timeout,
         )
         self._health.on_spec_changed = self._replace_pod
         await backend.initialize()
@@ -713,8 +728,19 @@ class DeviceWorker:
                 await self._backend.update_device_fields(hostname, spawn_error=err, pod_active=False)
                 await self._release_claim(hostname)
                 return
-            loop = asyncio.get_event_loop()
-            manifest_obj = await loop.run_in_executor(_spec_executor, partial(_translate_spec_sync, spec, hostname))
+            try:
+                manifest_obj = await run_translation(
+                    _spec_executor,
+                    partial(_translate_spec_sync, spec, hostname),
+                    timeout=self._spec_translate_timeout,
+                    hostname=hostname,
+                )
+            except (SpecTooLargeError, ValueError) as exc:
+                err = f"Spec for {hostname} rejected: {exc} (F-09)"
+                logger.warning(err)
+                await self._backend.update_device_fields(hostname, spawn_error=err, pod_active=False)
+                await self._release_claim(hostname)
+                return
             manifest_dict = _manifest_to_dict(manifest_obj)
             ttl = self._config.get("registry", {}).get("spec_cache_ttl", 3600)
             await self._backend.set_manifest(hostname, manifest_dict, ttl=ttl)
@@ -797,8 +823,10 @@ class DeviceWorker:
             if cfg.spec_url:
                 try:
                     resp = await client.get(cfg.spec_url, timeout=10)
-                    if resp.status_code == 200:
-                        return resp.json()
+                    return fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
+                except SpecTooLargeError as exc:
+                    logger.warning(f"Spec fetch rejected oversized spec for {cfg.spec_url}: {exc} (F-09)")
+                    return None
                 except Exception:
                     pass
                 return None
@@ -807,8 +835,12 @@ class DeviceWorker:
             for path in paths:
                 try:
                     resp = await client.get(cfg.base_url.rstrip("/") + path, timeout=timeout)
-                    if resp.status_code == 200:
-                        return resp.json()
+                    spec = fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
+                    if spec is not None:
+                        return spec
+                except SpecTooLargeError as exc:
+                    logger.warning(f"Spec discovery rejected oversized spec for {cfg.base_url}: {exc} (F-09)")
+                    continue
                 except Exception:
                     continue
         return None

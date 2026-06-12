@@ -782,8 +782,29 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         _rid = getattr(request.state, "request_id", "-")
 
         if mode == "distributed":
+            _backend = request.app.state.registry._backend
+            # Admission control (F-06): if the device's call stream is backed up
+            # past the watermark, the worker isn't draining it and a new call
+            # would queue behind work that gets silently trimmed at MAXLEN —
+            # surfacing only as a 30s client timeout. Fast-fail with 429 instead
+            # so the backpressure is visible and retryable at the source.
+            _backlog_limit = cfg.get("registry", {}).get("call_backlog_limit", 1000)
+            if _backlog_limit > 0 and await _backend.call_backlog(hostname) >= _backlog_limit:
+                metrics.calls_rejected_overload_total.labels(hostname=hostname).inc()
+                logger.bind(
+                    event="audit",
+                    hostname=hostname,
+                    subject=_subject,
+                    status="rejected_overload",
+                    rid=_rid,
+                ).warning("tool dispatch shed: call backlog over watermark")
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Device '{hostname}' is overloaded; retry shortly",
+                    headers={"Retry-After": "1"},
+                )
             request_id = str(uuid.uuid4())
-            await request.app.state.registry._backend.publish_tool_call(
+            await _backend.publish_tool_call(
                 hostname=hostname,
                 request_id=request_id,
                 session_id=effective_id,
