@@ -57,7 +57,12 @@ from device_mcp_gateway.rbac import (
     require_scope,
 )
 from device_mcp_gateway.registry.server import Registry
-from device_mcp_gateway.schemas import DeviceListResponse, OverviewResponse
+from device_mcp_gateway.schemas import (
+    BreakerState,
+    DeviceDiagnostics,
+    DeviceListResponse,
+    OverviewResponse,
+)
 from device_mcp_gateway.security.url_policy import UrlPolicyError, validate_target_url
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
@@ -693,6 +698,54 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             for t in manifest_dict.get("tools", [])
         ]
         return {"hostname": hostname, "tools": tools, "count": len(tools)}
+
+    @protected.get(
+        "/devices/{hostname}/diagnostics",
+        dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))],
+        response_model=DeviceDiagnostics,
+    )
+    async def device_diagnostics(hostname: str, request: Request):
+        """Self-service "why is my device down?" diagnostics (F-52): registry
+        status, last check + age, spec/manifest state, spawn error, and the
+        circuit breaker (in-process pods only)."""
+        reg: Registry = request.app.state.registry
+        mode = request.app.state.mode
+        device = await reg.get_device(hostname)
+        if not device:
+            raise HTTPException(status_code=404, detail=f"Device '{hostname}' not found")
+
+        manifest_dict = await reg.get_manifest(hostname)
+        tool_count = len(manifest_dict.get("tools", [])) if manifest_dict else 0
+        age = (time.time() - device.last_check) if device.last_check else None
+
+        # Breaker state is per-pod. In embedded mode the pod is in-process and we can
+        # read it; in distributed mode it lives in the worker, unreachable from here.
+        if mode == "distributed":
+            breaker = BreakerState(available=False, note="pod runs on a worker; breaker not readable from the gateway")
+        else:
+            profile = reg.get_profile(hostname)
+            if profile and profile.pod_active and profile.pod:
+                breaker = BreakerState(available=True, **profile.pod.breaker_snapshot())
+            else:
+                breaker = BreakerState(available=False, note="no active pod")
+
+        return DeviceDiagnostics(
+            hostname=device.hostname,
+            mode=mode,
+            base_url=device.base_url,
+            spec_url=device.spec_url,
+            transport=device.transport,
+            reachable=device.reachable,
+            pod_active=device.pod_active,
+            worker_id=device.worker_id,
+            last_check=device.last_check or None,
+            last_check_age_seconds=round(age, 1) if age is not None else None,
+            spec_hash=device.spec_hash,
+            has_manifest=manifest_dict is not None,
+            tool_count=tool_count,
+            spawn_error=device.spawn_error,
+            breaker=breaker,
+        )
 
     # --- SSE endpoints (mode-aware) ---
 

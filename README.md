@@ -171,6 +171,7 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /dev
 | `GET` | `/devices` | List all registered devices |
 | `GET` | `/devices/{hostname}` | Get a single device's status |
 | `GET` | `/devices/{hostname}/tools` | List a device's MCP tools |
+| `GET` | `/devices/{hostname}/diagnostics` | "Why is my device down?" — status, last check + age, spec/manifest state, spawn error, circuit breaker (`devices:read`) |
 | `GET` | `/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
 | `POST` | `/devices/{hostname}/messages` | Send a JSON-RPC 2.0 message via SSE |
 | `GET` | `/metrics/summary` | Reachability counts and per-device rate-limit state (JSON, auth-protected) |
@@ -223,6 +224,28 @@ Prometheus metrics are exposed separately on a **dedicated metrics port** (`metr
   "spawn_error": null
 }
 ```
+
+**`GET /devices/{hostname}/diagnostics`:**
+```json
+{
+  "hostname": "my-sensor",
+  "mode": "embedded",
+  "base_url": "http://192.168.1.42",
+  "spec_url": null,
+  "transport": "sse",
+  "reachable": true,
+  "pod_active": true,
+  "worker_id": null,
+  "last_check": 1717500000.0,
+  "last_check_age_seconds": 12.4,
+  "spec_hash": "9f3c1a2b4d5e6f70",
+  "has_manifest": true,
+  "tool_count": 7,
+  "spawn_error": null,
+  "breaker": {"available": true, "state": "closed", "fail_counter": 0, "fail_max": 5, "reset_timeout": 60, "note": null}
+}
+```
+In distributed mode the breaker runs on the worker, so `breaker` is `{"available": false, "note": "pod runs on a worker; ..."}`.
 
 **`POST /devices` / `PUT /devices/{hostname}`:**
 ```json
