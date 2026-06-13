@@ -138,7 +138,33 @@ class DeviceAdapter:
         pagination = self._pagination(resp)
         if pagination:
             env["pagination"] = pagination
+        # Surface an async long-running operation (202 + poll location) as a job
+        # handle so the model can poll for completion instead of the call appearing
+        # done — the gateway is synchronous and can't wait it out (F-45).
+        operation = self._async_operation(resp)
+        if operation:
+            env["operation"] = operation
         return env
+
+    def _async_operation(self, resp: httpx.Response) -> dict[str, Any] | None:
+        """Detect an accepted-but-incomplete async operation, or None.
+
+        Triggers on ``202 Accepted`` or an ``Operation-Location`` header (the Azure
+        async pattern). ``poll_url`` is where to check status; ``retry_after`` is
+        the server's polling hint. ``Location`` is only treated as a poll URL on a
+        202 — on a 201 it's the created resource, not a job.
+        """
+        op_location = resp.headers.get("operation-location")
+        if resp.status_code != 202 and op_location is None:
+            return None
+        operation: dict[str, Any] = {"status": "pending"}
+        poll_url = op_location or (resp.headers.get("location") if resp.status_code == 202 else None)
+        if poll_url:
+            operation["poll_url"] = poll_url
+        retry_after = resp.headers.get("retry-after")
+        if retry_after is not None:
+            operation["retry_after"] = retry_after
+        return operation
 
     # Well-known "next cursor/page" headers (lowercased), checked in order. Body
     # cursors are too vendor-specific to parse generically — they already ride in
