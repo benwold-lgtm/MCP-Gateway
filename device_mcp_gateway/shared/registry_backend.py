@@ -167,6 +167,25 @@ class AbstractRegistryBackend(ABC):
         """
         return 0
 
+    # --- Dead-letter queue operations (F-10) ---------------------------------
+    # Default no-ops: embedded mode routes in-process and has no DLQ. The Redis
+    # backend overrides these for the distributed-mode device:{h}:calls:dead stream.
+
+    async def dead_letter_list(self, hostname: str, count: int = 50) -> list[dict]:
+        """Return up to ``count`` dead-lettered calls (newest first), parsed for display."""
+        return []
+
+    async def dead_letter_replay(self, hostname: str, ids: list[str] | None = None, count: int = 50) -> int:
+        """Re-publish dead-lettered calls onto the device's call stream and remove
+        them from the DLQ. ``ids`` selects specific entries; otherwise up to
+        ``count`` oldest are replayed. Returns the number replayed."""
+        return 0
+
+    async def dead_letter_purge(self, hostname: str, ids: list[str] | None = None) -> int:
+        """Delete dead-lettered calls — ``ids`` for specific entries, else the whole
+        DLQ. Returns the number removed (or -1 when the whole stream was dropped)."""
+        return 0
+
 
 # ---------------------------------------------------------------------------
 # In-memory backend (embedded mode)
@@ -382,3 +401,88 @@ class RedisRegistryBackend(AbstractRegistryBackend):
                 except (TypeError, ValueError):
                     return 0
         return 0
+
+    # --- Dead-letter queue operations (F-10) ---------------------------------
+
+    @staticmethod
+    def _decode_entry(fields: Any) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for k, v in (fields or {}).items():
+            kk = k.decode() if isinstance(k, bytes) else k
+            vv = v.decode() if isinstance(v, bytes) else v
+            out[kk] = vv
+        return out
+
+    async def dead_letter_list(self, hostname: str, count: int = 50) -> list[dict]:
+        key = f"device:{hostname}:calls:dead"
+        try:
+            entries = await self._r.xrevrange(key, count=count)  # newest first
+        except Exception:
+            return []
+        result: list[dict] = []
+        for entry_id, fields in entries:
+            f = self._decode_entry(fields)
+            eid = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
+            # Parse the JSON-RPC method out of the carried message for at-a-glance triage.
+            method = None
+            try:
+                msg = json.loads(f.get("message", "{}"))
+                method = msg.get("method") if isinstance(msg, dict) else None
+            except (json.JSONDecodeError, TypeError):
+                method = None
+            result.append(
+                {
+                    "id": eid,
+                    "reason": f.get("reason", ""),
+                    "ts": f.get("ts", ""),
+                    "method": method,
+                    "rid": f.get("rid", ""),
+                    "request_id": f.get("request_id", ""),
+                    "session_id": f.get("session_id", ""),
+                }
+            )
+        return result
+
+    async def dead_letter_replay(self, hostname: str, ids: list[str] | None = None, count: int = 50) -> int:
+        """Re-publish DLQ entries onto the live call stream, then XDEL them.
+
+        Replay keeps the original request_id/session_id/rid/traceparent so logs and
+        any still-live session correlate; the DLQ-only ``reason``/``ts`` are dropped.
+        A result for an expired session is best-effort — the call still re-executes.
+        """
+        dead_key = f"device:{hostname}:calls:dead"
+        calls_key = f"device:{hostname}:calls"
+        try:
+            if ids:
+                entries = []
+                for i in ids:
+                    entries.extend(await self._r.xrange(dead_key, min=i, max=i))
+            else:
+                entries = await self._r.xrange(dead_key, count=count)  # oldest first
+        except Exception:
+            return 0
+        replayed = 0
+        for entry_id, fields in entries:
+            f = self._decode_entry(fields)
+            payload = {
+                k: f[k] for k in ("request_id", "session_id", "gateway_id", "rid", "traceparent", "message") if k in f
+            }
+            if "message" not in payload:
+                continue
+            try:
+                await self._r.xadd(calls_key, payload, maxlen=_CALL_STREAM_MAXLEN, approximate=True)
+                await self._r.xdel(dead_key, entry_id)
+                replayed += 1
+            except Exception:
+                logger.warning(f"Failed to replay dead-letter entry {entry_id} for {hostname}")
+        return replayed
+
+    async def dead_letter_purge(self, hostname: str, ids: list[str] | None = None) -> int:
+        key = f"device:{hostname}:calls:dead"
+        try:
+            if ids:
+                return int(await self._r.xdel(key, *ids))
+            await self._r.delete(key)
+            return -1  # whole DLQ dropped
+        except Exception:
+            return 0

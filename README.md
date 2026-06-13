@@ -174,6 +174,9 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /dev
 | `GET` | `/devices/{hostname}/diagnostics` | "Why is my device down?" — status, last check + age, spec/manifest state, spawn error, circuit breaker (`devices:read`) |
 | `GET` | `/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
 | `POST` | `/devices/{hostname}/messages` | Send a JSON-RPC 2.0 message via SSE |
+| `GET` | `/devices/{hostname}/deadletter` | Inspect dead-lettered tool calls (distributed mode; `devices:read`) |
+| `POST` | `/devices/{hostname}/deadletter/replay` | Re-publish dead-lettered calls onto the call stream; optional `{"ids":[...]}` (`devices:write`) |
+| `DELETE` | `/devices/{hostname}/deadletter` | Drain the dead-letter queue; optional `{"ids":[...]}` (`devices:write`) |
 | `GET` | `/metrics/summary` | Reachability counts and per-device rate-limit state (JSON, auth-protected) |
 | `GET` | `/admin/overview` | Aggregate fleet counts + device list in one call (UI/BFF enabler; `devices:read`) |
 
