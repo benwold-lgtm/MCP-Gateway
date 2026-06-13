@@ -169,6 +169,36 @@ def test_pagination_total_only_is_not_has_more():
     assert "next_url" not in env["pagination"]
 
 
+# --- F-45 long-running operation surfacing -----------------------------------
+
+
+def test_no_operation_for_plain_200():
+    a = DeviceAdapter(_MAX)
+    assert "operation" not in a.build_result(_resp(200, b'{"x":1}'))
+
+
+def test_operation_from_202_with_location_and_retry_after():
+    a = DeviceAdapter(_MAX)
+    env = a.build_result(_resp_h({"location": "https://api.dev/jobs/7", "retry-after": "5"}, status=202))
+    assert env["ok"] is True and env["status"] == 202
+    op = env["operation"]
+    assert op["status"] == "pending"
+    assert op["poll_url"] == "https://api.dev/jobs/7"
+    assert op["retry_after"] == "5"
+
+
+def test_operation_from_operation_location_header_on_200():
+    a = DeviceAdapter(_MAX)
+    env = a.build_result(_resp_h({"operation-location": "https://api.dev/op/abc"}, status=200))
+    assert env["operation"]["poll_url"] == "https://api.dev/op/abc"
+
+
+def test_201_location_is_not_an_async_operation():
+    # 201 Created's Location is the new resource, not a job to poll.
+    a = DeviceAdapter(_MAX)
+    assert "operation" not in a.build_result(_resp_h({"location": "https://api.dev/items/9"}, status=201))
+
+
 # --- translator content-type selection (F-40) --------------------------------
 
 

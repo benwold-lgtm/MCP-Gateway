@@ -97,6 +97,34 @@ come from the `Link` header; `next_cursor` from the first of `X-Next-Cursor`,
 reachable. Body-embedded cursors are **not** parsed (too vendor-specific) — they
 already ride in `body` for the model to read.
 
+### Long-running operations (F-45)
+
+The gateway serves a tool call synchronously, so it can't wait out a slow upstream
+job. When the device returns an **accepted-but-incomplete** async operation, the
+success envelope gains an `operation` handle so the model can poll for completion
+rather than treating the call as done:
+
+```json
+{
+  "ok": true,
+  "status": 202,
+  "body": { "...": "..." },
+  "operation": {
+    "status": "pending",
+    "poll_url": "https://api.example.com/operations/abc123",
+    "retry_after": "5"
+  }
+}
+```
+
+Triggers on `202 Accepted` or an `Operation-Location` header (the Azure async
+pattern). `poll_url` is where to check status — `Operation-Location`, or `Location`
+on a 202 (a 201's `Location` is the created resource, not a job, so it is ignored).
+`retry_after` echoes the server's `Retry-After` hint. The model continues by
+calling the device's status/poll endpoint (or `resources/read` on the URL). The
+gateway does **not** poll server-side — that would hold a worker for the operation's
+full duration; a bounded server-side poll is a possible future enhancement.
+
 ---
 
 ## Telling the failure modes apart
