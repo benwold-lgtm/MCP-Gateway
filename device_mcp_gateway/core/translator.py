@@ -200,6 +200,8 @@ class SpecTranslator:
         # Tool description is device-supplied and shown to the LLM → untrusted (F-26).
         description = _sanitize_text(op.get("summary") or op.get("description") or f"{method} {path}")
         parameters, required, locations, body_spec, wire_names = self._build_parameter_schema(op)
+        # Defensive: never emit a required entry whose property was dropped (F-47).
+        required = [r for r in required if r in parameters]
         tags = op.get("tags", [])
         return McpTool(
             name=name,
@@ -236,7 +238,15 @@ class SpecTranslator:
         return node if isinstance(node, dict) else {}
 
     def _resolve_schema(self, schema: dict, seen: set | None = None) -> dict:
-        """Recursively resolve $ref, allOf/anyOf/oneOf, and nested object properties."""
+        """Recursively resolve $ref and allOf, and nested object properties.
+
+        ``anyOf``/``oneOf`` are **preserved** as composition (not flattened to a
+        union) so the "exactly one of" / alternatives semantics survive into the
+        emitted JSON Schema — MCP clients accept it (F-47). ``allOf`` is still
+        merged (that is its JSON-Schema meaning). Each resolved level is finalized:
+        ``nullable`` → a nullable type, and ``required`` reconciled against the
+        surviving properties.
+        """
         if seen is None:
             seen = set()
 
@@ -254,22 +264,51 @@ class SpecTranslator:
             for k, v in schema.items():
                 if k != "allOf" and k not in result:
                     result[k] = v
-            return result
+            return self._finalize_schema(result)
 
         for combiner in ("anyOf", "oneOf"):
             if combiner in schema:
-                result = self._merge_schemas(schema[combiner], seen, require_all=False)
-                for k, v in schema.items():
-                    if k != combiner and k not in result:
-                        result[k] = v
-                return result
+                branches = [self._resolve_schema(s, seen) for s in schema[combiner]]
+                result = {k: v for k, v in schema.items() if k != combiner}
+                result[combiner] = branches
+                return self._finalize_schema(result)
 
         if schema.get("type") == "object" and "properties" in schema:
-            return {
-                **schema,
-                "properties": {k: self._resolve_schema(v, seen) for k, v in schema["properties"].items()},
-            }
+            return self._finalize_schema(
+                {
+                    **schema,
+                    "properties": {k: self._resolve_schema(v, seen) for k, v in schema["properties"].items()},
+                }
+            )
 
+        return self._finalize_schema(dict(schema))
+
+    @staticmethod
+    def _finalize_schema(schema: dict) -> dict:
+        """Normalize a resolved schema: OpenAPI 3.0 ``nullable`` → a JSON-Schema
+        nullable type, and drop ``required`` entries with no surviving property (F-47)."""
+        # nullable (OpenAPI 3.0 keyword, not valid JSON Schema) → add "null" to the type.
+        if schema.pop("nullable", False):
+            t = schema.get("type")
+            if isinstance(t, str):
+                schema["type"] = [t, "null"]
+            elif isinstance(t, list):
+                if "null" not in t:
+                    schema["type"] = [*t, "null"]
+            else:
+                for comb in ("oneOf", "anyOf"):
+                    if isinstance(schema.get(comb), list):
+                        schema[comb] = [*schema[comb], {"type": "null"}]
+                        break
+        # required must only name properties that actually survived (e.g. after a
+        # cross-location collision drop) — a stale entry makes the schema invalid.
+        props, required = schema.get("properties"), schema.get("required")
+        if isinstance(props, dict) and isinstance(required, list):
+            kept = [r for r in required if r in props]
+            if kept:
+                schema["required"] = kept
+            else:
+                schema.pop("required", None)
         return schema
 
     def _merge_schemas(self, schemas: list[dict], seen: set, require_all: bool) -> dict:
@@ -286,7 +325,8 @@ class SpecTranslator:
             props.update(resolved.get("properties", {}))
             if require_all:
                 req.extend(resolved.get("required", []))
-            for k in ("type", "description", "title"):
+            # Preserve typing/aids from the first sub-schema that carries them (F-47).
+            for k in ("type", "description", "title", "discriminator", "example", "examples", "format"):
                 if k in resolved and k not in base:
                     base[k] = resolved[k]
         result = dict(base)
@@ -402,7 +442,17 @@ class SpecTranslator:
     ) -> RequestBodySpec:
         """Flatten the chosen request body into tool params and describe its encoding (F-40)."""
         schema = self._resolve_schema(media["schema"]) if media and "schema" in media else {}
-        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        props = dict(schema.get("properties", {})) if isinstance(schema, dict) else {}
+        # A top-level composed body (oneOf/anyOf is now preserved, not flattened) has no
+        # top-level `properties`; union the branch properties so the flat body args still
+        # work. Required is intentionally not carried across alternatives (F-47).
+        if not props and isinstance(schema, dict):
+            for comb in ("oneOf", "anyOf"):
+                for branch in schema.get(comb, []) or []:
+                    if isinstance(branch, dict):
+                        props.update(branch.get("properties", {}))
+                if props:
+                    break
 
         # Object body → flatten each property into a body parameter (existing behaviour),
         # tracking which properties are binary so multipart sends them as file parts.
