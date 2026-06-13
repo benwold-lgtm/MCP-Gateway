@@ -114,6 +114,12 @@ sequenceDiagram
     Note over WK: Start per-device call consumer task
 ```
 
+#### Registration latency — provisioning is off the request path (F-11)
+
+`POST /devices` never blocks on a slow or unreachable device. In **distributed mode** the gateway only persists the device and publishes an `assign`, returning `200 { pod_active: false }` immediately; a worker does reachability + spec discovery + translation + spawn out of band (the diagram above). In **embedded mode** the gateway runs that same provisioning on a background task and waits inline only up to `registry.registration_provision_budget` (default 8 s): a fast/healthy device finishes within the budget so the response already reflects the spawned pod, while a slow device returns promptly with `"provisioning": true` and the work continues in the background (also re-checked by the health loop). Either way the caller polls `GET /devices/{hostname}` for the settled `reachable` / `pod_active` / `spawn_error`.
+
+Spec **discovery probes candidate paths concurrently** (both the embedded registry and the worker) and takes the first path that returns a valid spec, so worst-case discovery latency is one path's timeout rather than the sum across all of `spec_paths`. Translation is bounded separately by `registry.spec_translate_timeout` (F-09).
+
 ### Runtime Tool Invocation
 
 ```mermaid

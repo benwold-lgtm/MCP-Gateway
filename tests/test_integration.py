@@ -205,7 +205,9 @@ async def test_spec_change_replaces_pod():
 
 
 def test_register_unreachable_device_reports_failure(client):
-    """Registering an unreachable device should still return 200 but surface pod_active=False."""
+    """Registering an unreachable device still returns 200; reachability is then
+    determined off the request path (F-11 async registration) and surfaced as
+    reachable=False / pod_active=False once provisioning settles."""
     hostname = "unreachable-device.local"
     resp = client.post(
         "/devices",
@@ -220,7 +222,17 @@ def test_register_unreachable_device_reports_failure(client):
     data = resp.json()
     assert data["hostname"] == hostname
     assert data["pod_active"] is False
-    assert data["reachable"] is False
+    # A device whose probe outlives the inline budget returns still-provisioning;
+    # poll GET /devices/{h} until the background provisioning settles reachability.
+    deadline = time.time() + 30
+    final = data
+    while time.time() < deadline:
+        final = client.get(f"/devices/{hostname}").json()
+        if final["reachable"] is False:
+            break
+        time.sleep(0.5)
+    assert final["reachable"] is False
+    assert final["pod_active"] is False
 
     # Clean up
     client.delete(f"/devices/{hostname}")

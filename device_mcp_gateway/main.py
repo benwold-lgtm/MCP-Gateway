@@ -610,6 +610,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "pod_active": device_cfg.pod_active,
             "reachable": device_cfg.reachable,
             "spawn_error": device_cfg.spawn_error,
+            # Async registration (F-11): True when the device was accepted but its
+            # pod is still being provisioned in the background — poll GET /devices/{h}.
+            "provisioning": reg.is_provisioning(hostname),
         }
 
     @protected.put("/devices/{hostname}", dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))])
@@ -654,6 +657,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "pod_active": device_cfg.pod_active,
             "reachable": device_cfg.reachable,
             "spawn_error": device_cfg.spawn_error,
+            "provisioning": reg.is_provisioning(hostname),  # F-11 (see register_device)
         }
 
     @protected.get(
