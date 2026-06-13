@@ -222,6 +222,13 @@ class Registry:
         )
         self._health_task: asyncio.Task | None = None
         self._health_interval = config.get("health_check_interval", 30)
+        # Async registration (F-11): reachability probe + spec discovery + pod spawn
+        # run off the POST /devices request path on a background task, so a slow or
+        # unreachable device can't stall the caller. Registration waits inline up to
+        # this budget so a fast/healthy device still returns ready; past the budget
+        # it returns and the task finishes in the background.
+        self._registration_provision_budget = config.get("registration_provision_budget", 8)
+        self._provision_tasks: dict[str, asyncio.Task] = {}
         self._spec_poll_interval = config.get("spec_poll_interval", 300)
         self._max_pods = config.get("max_concurrent_pods", 50)
         # Spec-ingestion bounds (F-09): reject oversized specs before parse/pool and
@@ -266,7 +273,10 @@ class Registry:
             return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
         async with self._lock_for(hostname):
             profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
-            return profile.config
+        # Provision off the request path (F-11) so a slow/unreachable device or a
+        # long spec discovery can't stall the POST; the fast path still returns ready.
+        await self._provision_in_background(profile, wait_budget=self._registration_provision_budget)
+        return profile.config
 
     async def replace_device(
         self,
@@ -287,7 +297,9 @@ class Registry:
                 await self._kill_pod(existing)
                 self._spec_cache.invalidate(existing.base_url)
             profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
-            return profile.config
+        # Re-provision off the request path (F-11), same as register_device.
+        await self._provision_in_background(profile, wait_budget=self._registration_provision_budget)
+        return profile.config
 
     async def deregister_device(self, hostname: str) -> None:
         if self._mode == "distributed":
@@ -394,17 +406,59 @@ class Registry:
             )
 
         logger.info(f"Device registered: hostname={hostname}, base_url={redact_url(base_url)}")
-        try:
-            reachable = await self.check_reachability(profile)
-            if reachable:
-                await self.fetch_spec(profile)
-                if profile.spec_data and not profile.pod_active:
-                    await self._spawn_pod(profile)
-        except Exception as exc:
-            logger.exception(f"Error during post-register processing for {hostname}")
-            profile.config.spawn_error = str(exc)
-
         return profile
+
+    async def _provision_device(self, profile: DeviceProfile) -> None:
+        """Reachability probe + spec fetch + pod spawn for a just-registered device.
+
+        Runs off the registration request path (F-11). Holds the per-device lock so
+        it serialises with a concurrent replace/deregister, and bails if the profile
+        was superseded while it waited for the lock.
+        """
+        async with self._lock_for(profile.hostname):
+            if self._profiles.get(profile.hostname) is not profile:
+                return  # replaced/deregistered while we were queued
+            try:
+                reachable = await self.check_reachability(profile)
+                if reachable:
+                    await self.fetch_spec(profile)
+                    if profile.spec_data and not profile.pod_active:
+                        await self._spawn_pod(profile)
+            except Exception as exc:
+                logger.exception(f"Error during provisioning for {profile.hostname}")
+                profile.config.spawn_error = str(exc)
+
+    async def _provision_in_background(self, profile: DeviceProfile, *, wait_budget: float | None) -> None:
+        """Schedule provisioning as a tracked task and optionally wait up to a budget.
+
+        Within the budget a fast/healthy device finishes provisioning inline so the
+        caller's response reflects the spawned pod; past the budget the task keeps
+        running and the device becomes ready shortly after (also re-checked by the
+        health loop). ``wait_budget=None`` is fire-and-forget.
+        """
+        hostname = profile.hostname
+        task = asyncio.create_task(self._provision_device(profile))
+        self._provision_tasks[hostname] = task
+
+        def _done(t: asyncio.Task, h: str = hostname) -> None:
+            if self._provision_tasks.get(h) is t:
+                self._provision_tasks.pop(h, None)
+
+        task.add_done_callback(_done)
+        if wait_budget and wait_budget > 0:
+            done, _pending = await asyncio.wait({task}, timeout=wait_budget)
+            if not done:
+                logger.info(
+                    f"Device {hostname} registered; provisioning continues in background "
+                    f"(exceeded {wait_budget}s budget)"
+                )
+
+    def is_provisioning(self, hostname: str) -> bool:
+        """True while a background provisioning task for ``hostname`` is still running
+        (embedded mode). Lets a caller surface that registration accepted the device
+        but its pod isn't ready yet (F-11)."""
+        task = self._provision_tasks.get(hostname)
+        return task is not None and not task.done()
 
     async def load_persisted_devices(self) -> None:
         """Embedded mode: reload devices from SQLite on startup."""
@@ -428,14 +482,7 @@ class Registry:
             profile = DeviceProfile(config=cfg, auth=auth)
             self._profiles[record["hostname"]] = profile
             await self._backend.set_device(record["hostname"], cfg)
-            try:
-                reachable = await self.check_reachability(profile)
-                if reachable:
-                    await self.fetch_spec(profile)
-                    if profile.spec_data and not profile.pod_active:
-                        await self._spawn_pod(profile)
-            except Exception:
-                logger.exception(f"Error reconnecting persisted device {record['hostname']}")
+            await self._provision_device(profile)
 
     async def fetch_spec(self, profile: DeviceProfile) -> dict[str, Any]:
         cache_key = profile.base_url
@@ -478,24 +525,38 @@ class Registry:
         )
         timeout = self._config.get("discovery", {}).get("timeout", 10)
         client = self._get_client()
-        for path in paths:
+
+        async def _probe(path: str) -> dict[str, Any] | None:
             url = base_url.rstrip("/") + path
             try:
 
-                async def _probe(u: str = url) -> httpx.Response:
+                async def _get(u: str = url) -> httpx.Response:
                     return await client.get(u, timeout=timeout)
 
-                resp = await send_with_retry(_probe, method="GET", policy=self._retry_policy)
-                spec = fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
-                if spec is not None:
-                    return spec
+                resp = await send_with_retry(_get, method="GET", policy=self._retry_policy)
+                return fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
             except SpecTooLargeError as exc:
                 logger.warning(f"Spec discovery rejected oversized spec at {redact_url(url)}: {exc} (F-09)")
-                continue
+                return None
             except (httpx.HTTPError, ValueError) as exc:
                 logger.debug(f"Spec discovery probe failed for {redact_url(url)}: {exc}")
-                continue
-        return None
+                return None
+
+        # Probe candidate paths concurrently and take the first that yields a valid
+        # spec, so worst-case discovery latency is one path's timeout, not the sum of
+        # all of them (F-11). Losing probes are cancelled once we have a winner.
+        tasks = [asyncio.create_task(_probe(p)) for p in paths]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                spec = await fut
+                if spec is not None:
+                    return spec
+            return None
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _http_get(self, url: str) -> dict[str, Any] | None:
         try:
@@ -608,6 +669,12 @@ class Registry:
         return self._profiles.get(hostname)
 
     async def shutdown(self) -> None:
+        # Stop any in-flight background provisioning before tearing down pods (F-11).
+        for task in list(self._provision_tasks.values()):
+            task.cancel()
+        if self._provision_tasks:
+            await asyncio.gather(*self._provision_tasks.values(), return_exceptions=True)
+            self._provision_tasks.clear()
         for profile in self._profiles.values():
             await self._kill_pod(profile)
         if self._http_client and not self._http_client.is_closed:

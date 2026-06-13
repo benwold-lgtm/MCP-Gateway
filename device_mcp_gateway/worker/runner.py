@@ -1028,17 +1028,31 @@ class DeviceWorker:
                 return None
             paths = discovery.get("spec_paths", ["/openapi.json", "/swagger.json", "/api-docs"])
             timeout = discovery.get("timeout", 10)
-            for path in paths:
+
+            async def _probe(path: str) -> dict | None:
                 try:
                     resp = await client.get(cfg.base_url.rstrip("/") + path, timeout=timeout)
-                    spec = fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
-                    if spec is not None:
-                        return spec
+                    return fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
                 except SpecTooLargeError as exc:
                     logger.warning(f"Spec discovery rejected oversized spec for {cfg.base_url}: {exc} (F-09)")
-                    continue
+                    return None
                 except Exception:
-                    continue
+                    return None
+
+            # Probe candidate paths concurrently and take the first valid spec, so a
+            # worker's device provisioning isn't gated by serial per-path timeouts
+            # (F-11). Losing probes are cancelled once we have a winner.
+            tasks = [asyncio.create_task(_probe(p)) for p in paths]
+            try:
+                for fut in asyncio.as_completed(tasks):
+                    spec = await fut
+                    if spec is not None:
+                        return spec
+            finally:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         return None
 
 

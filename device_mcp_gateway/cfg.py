@@ -37,6 +37,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "spec_poll_interval": _NUM,
         "spec_cache_ttl": _NUM,
         "tool_call_timeout": _NUM,
+        "registration_provision_budget": _NUM,
         "reconcile_interval": _NUM,
         "max_concurrent_calls_per_device": int,
         "rebalance_enabled": bool,
