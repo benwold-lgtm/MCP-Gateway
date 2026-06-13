@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import signal
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -135,6 +136,9 @@ class DeviceWorker:
         self._result_marker_ttl = max(config.get("registry", {}).get("tool_call_timeout", 30) * 2, 60)
         # How often the (leader-elected) reconciler sweeps for orphaned devices (SRE #1/#2).
         self._reconcile_interval = config.get("registry", {}).get("reconcile_interval", 30)
+        # Periodic load rebalancing on scale-out (F-07): each worker sheds its excess
+        # devices over the per-worker target so new/idle workers actually pick up load.
+        self._rebalance_enabled = bool(config.get("registry", {}).get("rebalance_enabled", True))
         # Only reclaim call-stream entries idle longer than this, so XAUTOCLAIM
         # never steals a call still in-flight on a healthy owner. Comfortably
         # above the tool-call timeout.
@@ -209,7 +213,8 @@ class DeviceWorker:
         health_task = asyncio.create_task(self._health.run_forever(self._assigned), name="health")
         metrics_task = asyncio.create_task(self._metrics_loop(), name="metrics")
         reconcile_task = asyncio.create_task(self._reconcile_loop(), name="reconcile")
-        tasks = [heartbeat_task, assignments_task, health_task, metrics_task, reconcile_task]
+        rebalance_task = asyncio.create_task(self._rebalance_loop(), name="rebalance")
+        tasks = [heartbeat_task, assignments_task, health_task, metrics_task, reconcile_task, rebalance_task]
         # Loops whose unexpected exit means this worker can no longer do its job;
         # the heartbeat is withheld if any has crashed (SRE #8).
         self._critical_tasks = [assignments_task, health_task, reconcile_task]
@@ -370,6 +375,83 @@ class DeviceWorker:
             if not await self._r.exists(f"worker:{wid}:heartbeat"):
                 await self._r.srem("workers:active", wid)
                 logger.info(f"Pruned dead worker {wid} from workers:active")
+
+    # ------------------------------------------------------------------
+    # Rebalancing on scale-out (F-07)
+    # ------------------------------------------------------------------
+
+    async def _live_worker_count(self) -> int:
+        """Number of workers with a live heartbeat (membership alone overstates it)."""
+        live = 0
+        for wid in await self._r.smembers("workers:active"):
+            if await self._r.exists(f"worker:{wid}:heartbeat"):
+                live += 1
+        return max(live, 1)
+
+    async def _rebalance_target(self) -> tuple[int, int]:
+        """Per-worker device target = ceil(total devices / live workers), and the
+        live-worker count. With this target the maximum fleet imbalance is one
+        device, and at least one worker is always below target when a device needs
+        a home (pigeonhole) — so declining at/over target can't starve placement."""
+        total = int(await self._r.scard("devices:all"))
+        live = await self._live_worker_count()
+        return math.ceil(total / live), live
+
+    async def _decline_assignment(self, hostname: str) -> bool:
+        """Should this worker refuse to take ``hostname`` right now? (F-07)
+
+        Two reasons: (a) we just shed it ourselves (cooldown marker is ours) — let
+        another worker take it instead of immediately re-grabbing it; (b) we're
+        already at/over the per-worker target while other workers exist — bias
+        placement toward an under-target worker. A declined assignment is left
+        unclaimed; the leader reconciler republishes it next sweep, so it still
+        lands (on an under-target worker)."""
+        if not self._rebalance_enabled:
+            return False
+        if (await self._r.get(f"rebalance:cooldown:{hostname}")) == self._id:
+            logger.debug(f"Declining {hostname}: in our own rebalance cooldown")
+            return True
+        target, live = await self._rebalance_target()
+        if live > 1 and len(self._assigned) >= target:
+            logger.debug(f"Declining {hostname}: at/over target ({len(self._assigned)}/{target})")
+            return True
+        return False
+
+    async def _rebalance_loop(self) -> None:
+        """Per-worker (not leader-gated) loop: shed devices over the target so a
+        scaled-out/idle worker actually picks up load (F-07)."""
+        while not self._stop_event.is_set():
+            try:
+                if self._rebalance_enabled:
+                    await self._rebalance_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Rebalance cycle failed")
+            await asyncio.sleep(jittered(self._reconcile_interval))  # F-61: de-sync fleet rebalancing
+
+    async def _rebalance_once(self) -> None:
+        target, live = await self._rebalance_target()
+        if live <= 1:
+            return  # nothing to balance onto
+        excess = len(self._assigned) - target
+        if excess <= 0:
+            return
+        # Shed the excess down to target. Sheds are independent across workers and
+        # sum to the global excess, which fits the under-target capacity — so this
+        # converges (typically in one cycle) without over-shedding.
+        for hostname in list(self._assigned)[:excess]:
+            await self._shed_device(hostname, target)
+
+    async def _shed_device(self, hostname: str, target: int) -> None:
+        """Release a device so another worker can take it. A short cooldown marks it
+        ours so we don't immediately re-claim our own shed device."""
+        await self._r.set(f"rebalance:cooldown:{hostname}", self._id, ex=self._claim_ttl)
+        await self._kill_pod(hostname)  # releases the claim + marks pod inactive
+        if self._backend:
+            await self._backend.publish_assignment("assign", hostname)
+        metrics.rebalance_shed_total.inc()
+        logger.info(f"Rebalance: shed {hostname} (had {len(self._assigned) + 1}, target {target})")
 
     # ------------------------------------------------------------------
     # Metrics
@@ -724,6 +806,8 @@ class DeviceWorker:
     async def _spawn_pod(self, hostname: str) -> None:
         if hostname in self._assigned:
             logger.debug(f"Already assigned: {hostname}")
+            return
+        if await self._decline_assignment(hostname):
             return
         if not await self._acquire_claim(hostname):
             logger.info(f"Device {hostname} is claimed by another worker; skipping spawn")

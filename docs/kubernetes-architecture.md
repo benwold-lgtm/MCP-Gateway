@@ -181,6 +181,10 @@ The heartbeat key is written by the worker's internal heartbeat loop with a TTL 
 
 The heartbeat is **gated on consumer-loop health** (SRE #8): the loop withholds the heartbeat (and stops refreshing device-claim leases) if a critical loop — the assignment consumer, health loop, or reconciler — has crashed, or if the assignment consumer has not made progress within `2 × health_check_interval`. So a worker whose process is alive but whose consumers are wedged now fails liveness (gets restarted) **and** lets its claims lapse so the reconciler reassigns its devices, instead of looking healthy while doing nothing.
 
+### Rebalancing on scale-out (F-07)
+
+Device claims are sticky — the owner refreshes its lease each heartbeat — so without rebalancing a newly added worker (e.g. from the HPA) stays idle while early workers stay hot. Each worker therefore runs a **rebalance loop** (paced by `reconcile_interval`): it computes a per-worker target = `ceil(total_devices / live_workers)` and, if it owns more than that, **sheds** the excess — releasing the claim, stopping the pod, and re-publishing an `assign`. To bias placement onto under-loaded workers, a worker **declines** an assignment while it is at/over target (the reconciler re-publishes a declined device next sweep, so it still lands), and a short `rebalance:cooldown:{hostname}` marker stops a worker from immediately re-grabbing a device it just shed. The result converges to within one device per worker, typically in a cycle or two. A shed device's pod is briefly down during the move, and any in-flight calls are reclaimed by the new owner via `XAUTOCLAIM`. Set `registry.rebalance_enabled: false` to pin devices to their first owner. The `mcp_rebalance_shed_total` counter and the per-worker `mcp_worker_pods` gauge make rebalancing activity and any residual skew visible.
+
 ### PodDisruptionBudgets
 
 Both gateway and worker have a PDB with `minAvailable: 1`. This prevents node drains and cluster upgrades from taking down all replicas simultaneously. Rolling updates (during which one pod is replaced at a time) proceed normally as long as `replicas ≥ 2`.

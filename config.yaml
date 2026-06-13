@@ -78,6 +78,12 @@ registry:
   # devices (claim lease lapsed because the owning worker died) and republishes
   # their assignments so a live worker takes over. One worker leads at a time.
   reconcile_interval: 30
+  # Distributed mode: periodic load rebalancing on scale-out (F-07). Each worker
+  # sheds devices above the per-worker target (ceil(total_devices / live_workers))
+  # so a newly added/idle worker actually picks up load instead of early workers
+  # staying hot. Sheds are paced by reconcile_interval. Set false to pin devices to
+  # their first owner (no rebalancing).
+  rebalance_enabled: true
   # Distributed mode: max concurrent in-flight tool calls a worker runs per device.
   # When saturated the worker stops reading that device's call stream (backpressure),
   # so a burst shows up as Redis-stream lag rather than unbounded worker memory.

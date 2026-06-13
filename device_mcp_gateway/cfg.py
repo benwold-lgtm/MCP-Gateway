@@ -39,6 +39,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "tool_call_timeout": _NUM,
         "reconcile_interval": _NUM,
         "max_concurrent_calls_per_device": int,
+        "rebalance_enabled": bool,
         "call_backlog_limit": int,
         "spec_max_bytes": int,
         "spec_translate_timeout": _NUM,
