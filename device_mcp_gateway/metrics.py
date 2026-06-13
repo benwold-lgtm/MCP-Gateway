@@ -36,6 +36,7 @@ __all__ = [
     "worker_assignments_lag",
     "worker_undelivered_calls",
     "reconciler_leader",
+    "rebalance_shed_total",
     "tool_call_timeouts_total",
     "sse_messages_dropped_total",
     "dead_letter_total",
@@ -169,6 +170,10 @@ circuit_breaker_opens_total = Counter(
     "mcp_circuit_breaker_opens_total",
     "Tool calls rejected because a device pod's circuit breaker was open.",
     ["hostname"],
+)
+rebalance_shed_total = Counter(
+    "mcp_rebalance_shed_total",
+    "Devices shed by a worker during rebalancing to relieve load skew on scale-out (F-07).",
 )
 calls_rejected_overload_total = Counter(
     "mcp_calls_rejected_overload_total",
