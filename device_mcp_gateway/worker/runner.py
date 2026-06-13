@@ -37,7 +37,7 @@ from loguru import logger
 from device_mcp_gateway import metrics
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered
-from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
+from device_mcp_gateway.core.errors import RPC_DUPLICATE, RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.core.spec_limits import (
     DEFAULT_MAX_SPEC_BYTES,
     DEFAULT_TRANSLATE_TIMEOUT,
@@ -59,6 +59,10 @@ _HEARTBEAT_INTERVAL = 10  # seconds
 _RECONCILER_LOCK = "reconciler:leader"
 # Bound for a device's dead-letter stream (undeliverable tool calls, SRE #4).
 _DLQ_MAXLEN = 1_000
+# HTTP methods whose re-execution carries no extra side effect (RFC 7231 safe +
+# idempotent). A redelivered call on one of these is safe to run again; anything
+# else (POST/PATCH) is guarded against double-execution (F-08).
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"})
 
 
 def _decode_fields(fields: dict) -> dict:
@@ -143,6 +147,14 @@ class DeviceWorker:
         # never steals a call still in-flight on a healthy owner. Comfortably
         # above the tool-call timeout.
         self._reclaim_min_idle_ms = max(config.get("registry", {}).get("tool_call_timeout", 30), 30) * 1000
+        # Idempotency guard (F-08): at-least-once delivery means a reclaimed call
+        # (XAUTOCLAIM from a dead/shed worker's PEL) can re-run an operation that
+        # already executed. Guard non-idempotent calls (POST/PATCH) so they run at
+        # most once across the fleet; idempotent calls are still re-run freely.
+        self._idempotency_guard = bool(config.get("registry", {}).get("idempotency_guard", True))
+        # The dedup/started markers must outlive the reclaim window so a reclaim
+        # still sees them. request_ids are unique per call, so a long TTL is safe.
+        self._idempotency_ttl = max(self._reclaim_min_idle_ms // 1000 * 3, 120)
         # Cap concurrent in-flight tool calls per device (SRE #5). The consume loop
         # blocks on this when saturated rather than spawning unbounded tasks/outbound
         # requests, so a burst becomes visible stream lag instead of worker OOM.
@@ -672,6 +684,60 @@ class DeviceWorker:
         except Exception:
             logger.exception(f"Failed to dead-letter call for {hostname}")
 
+    # ------------------------------------------------------------------
+    # Idempotency guard (F-08)
+    # ------------------------------------------------------------------
+
+    async def _guard_duplicate(self, hostname: str, request_id: str, pod: DevicePod, message: dict) -> str | None:
+        """Decide whether a (possibly redelivered) call should be (re-)executed.
+
+        Returns None to proceed, or a reason string to suppress execution:
+          - ``already_completed``: the result was already published (the original
+            attempt finished but died before acking) — don't re-run or re-publish.
+          - ``nonidempotent_guard``: a non-idempotent op had already begun and we
+            can't prove it didn't apply — refuse rather than double-execute.
+
+        The single-delivery happy path returns None (the markers don't yet exist),
+        so this only ever suppresses a genuine duplicate/reclaim.
+        """
+        if await self._already_completed(request_id):
+            return "already_completed"
+        if self._is_idempotent_call(pod, message):
+            return None  # safe/idempotent method — re-running is harmless
+        # Non-idempotent: claim the exclusive right to execute this request_id once.
+        if await self._begin_exec(request_id):
+            return None  # we are the first; proceed
+        return "nonidempotent_guard"
+
+    async def _already_completed(self, request_id: str) -> bool:
+        """True if a result was already recorded for this call (dedup fast path)."""
+        return bool(await self._r.exists(f"result:{request_id}"))
+
+    async def _begin_exec(self, request_id: str) -> bool:
+        """SET-NX a 'started' marker; True only for the first executor of this id.
+
+        A subsequent reclaim of the same entry finds the marker set and refuses,
+        so a non-idempotent operation runs at most once across the fleet.
+        """
+        return bool(await self._r.set(f"exec:{request_id}", self._id, nx=True, ex=self._idempotency_ttl))
+
+    def _is_idempotent_call(self, pod: DevicePod, message: dict) -> bool:
+        """True if re-executing this call carries no extra side effect.
+
+        Read-only MCP methods (tools/list, resources/read, ping, …) are inherently
+        safe. For tools/call, idempotency follows the backing HTTP method. An
+        unknown tool name produces a handler-not-found error with no upstream call,
+        so it's safe to re-run too.
+        """
+        if not isinstance(message, dict) or message.get("method") != "tools/call":
+            return True
+        params = message.get("params") or {}
+        tool_name = params.get("name")
+        for tool in pod.manifest.tools:
+            if tool.name == tool_name:
+                return tool.method.upper() in _IDEMPOTENT_METHODS
+        return True
+
     async def _dispatch_call(self, hostname: str, stream: str, group: str, msg_id: str, fields: dict) -> None:
         session_id = fields.get("session_id", "")
         request_id = fields.get("request_id", "")
@@ -706,6 +772,35 @@ class DeviceWorker:
                     "tool dispatch"
                 )
                 return
+            # Idempotency guard (F-08): a reclaimed/redelivered call may already
+            # have executed. Decide whether to (re-)run before touching the upstream.
+            if self._idempotency_guard and request_id:
+                decision = await self._guard_duplicate(hostname, request_id, pod, message)
+                if decision is not None:
+                    if decision == "nonidempotent_guard":
+                        # Refusing a possibly-applied non-idempotent op — tell the
+                        # client definitively instead of letting it hang to timeout.
+                        msg_id_val = message.get("id") if isinstance(message, dict) else None
+                        if session_id and msg_id_val is not None:
+                            await self._session_router.publish_result(
+                                session_id,
+                                rpc_error(
+                                    RPC_DUPLICATE,
+                                    msg_id_val,
+                                    rid=rid,
+                                    request_id=request_id,
+                                    message=(
+                                        f"Duplicate delivery of a non-idempotent call to {hostname}; "
+                                        "not re-executed to avoid a double side effect"
+                                    ),
+                                ),
+                            )
+                        await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
+                    metrics.duplicate_calls_suppressed_total.labels(hostname=hostname, reason=decision).inc()
+                    logger.bind(
+                        event="audit", hostname=hostname, method=_method, status=f"duplicate_{decision}", rid=rid
+                    ).info("tool dispatch")
+                    return
             _t = time.perf_counter()
             # Execution span parented from the gateway's dispatch span (F-14): the
             # traceparent rode along on the stream entry, so this joins the same

@@ -39,8 +39,9 @@ no worker, internal fault). Shape:
 | `-32602` | `invalid_params` | Request arguments failed validation. | Missing/extra/wrong-typed tool arguments, or a malformed resource URI/path. |
 | `-32000` | `internal_error` | The tool handler raised an unexpected error. | A gateway/pod bug or an unhandled device response — correlate with `rid` in the logs. |
 | `-32001` | `no_worker` | The call was accepted but no worker served it in time. | No worker owns the device, the owning worker died, or it is saturated/slow (distributed mode). |
+| `-32002` | `duplicate_suppressed` | A duplicate delivery of a non-idempotent call was suppressed (F-08). | The call was redelivered (a worker died/shed the device mid-flight) after a prior attempt had begun; re-running a non-idempotent operation could double-apply, so it was not retried. Retry explicitly if the operation is safe to repeat. |
 
-`-32601` and `-32602` are standard JSON-RPC 2.0 codes; `-32000`/`-32001` are in the
+`-32601` and `-32602` are standard JSON-RPC 2.0 codes; `-32000`/`-32001`/`-32002` are in the
 JSON-RPC server-defined range (`-32000…-32099`).
 
 ---
@@ -132,6 +133,7 @@ full duration; a bounded server-side poll is a possible future enhancement.
 | Symptom | Where it shows | What it means |
 |---------|----------------|---------------|
 | `no_worker` (JSON-RPC `-32001`) | error event on the SSE stream | The gateway accepted the call but no worker served it before the timeout. |
+| `duplicate_suppressed` (JSON-RPC `-32002`) | error event on the SSE stream | A non-idempotent call was redelivered after a prior attempt began; the guard refused to re-run it to avoid a double side effect (F-08). |
 | `circuit_open` (envelope) | tool result | The worker reached the device path, but the breaker is open from prior failures. |
 | `http_error` (envelope) | tool result | The device answered with a >= 400 status (the body is included). |
 | `connection_error` / `timeout` (envelope) | tool result | The device couldn't be reached / didn't answer in time. |

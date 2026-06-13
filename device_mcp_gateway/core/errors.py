@@ -67,6 +67,7 @@ RPC_INVALID_PARAMS = -32602
 # Server-defined range (-32000..-32099):
 RPC_INTERNAL_ERROR = -32000
 RPC_NO_WORKER = -32001
+RPC_DUPLICATE = -32002
 
 # code -> (reason slug, default message/meaning, likely cause)
 RPC_CATALOG: dict[int, tuple[str, str, str]] = {
@@ -89,6 +90,13 @@ RPC_CATALOG: dict[int, tuple[str, str, str]] = {
         "no_worker",
         "The call was accepted but no worker served it in time.",
         "No worker owns the device, the owning worker died, or it is saturated/slow (distributed mode).",
+    ),
+    RPC_DUPLICATE: (
+        "duplicate_suppressed",
+        "A duplicate delivery of a non-idempotent call was suppressed (F-08).",
+        "The call was redelivered (a worker died/shed the device mid-flight) after a prior attempt "
+        "had begun; re-running a non-idempotent operation could double-apply, so it was not retried. "
+        "Retry explicitly if the operation is safe to repeat.",
     ),
 }
 
@@ -135,6 +143,7 @@ __all__ = [
     "RPC_INVALID_PARAMS",
     "RPC_INTERNAL_ERROR",
     "RPC_NO_WORKER",
+    "RPC_DUPLICATE",
     "RPC_CATALOG",
     "rpc_error",
 ]

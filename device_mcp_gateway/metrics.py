@@ -37,6 +37,7 @@ __all__ = [
     "worker_undelivered_calls",
     "reconciler_leader",
     "rebalance_shed_total",
+    "duplicate_calls_suppressed_total",
     "tool_call_timeouts_total",
     "sse_messages_dropped_total",
     "dead_letter_total",
@@ -174,6 +175,13 @@ circuit_breaker_opens_total = Counter(
 rebalance_shed_total = Counter(
     "mcp_rebalance_shed_total",
     "Devices shed by a worker during rebalancing to relieve load skew on scale-out (F-07).",
+)
+duplicate_calls_suppressed_total = Counter(
+    "mcp_duplicate_calls_suppressed_total",
+    "Redelivered tool calls the idempotency guard did not re-execute (F-08). "
+    "reason=already_completed: the result was already published; "
+    "reason=nonidempotent_guard: a non-idempotent op had already begun, so retry was refused.",
+    ["hostname", "reason"],
 )
 calls_rejected_overload_total = Counter(
     "mcp_calls_rejected_overload_total",

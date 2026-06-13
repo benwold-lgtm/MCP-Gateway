@@ -84,6 +84,14 @@ registry:
   # staying hot. Sheds are paced by reconcile_interval. Set false to pin devices to
   # their first owner (no rebalancing).
   rebalance_enabled: true
+  # Distributed mode: idempotency guard (F-08). At-least-once stream delivery means
+  # a reclaimed call (a worker died/shed the device with calls in its PEL) can re-run
+  # an operation that already executed. With this on, a non-idempotent call (POST/PATCH)
+  # runs at most once across the fleet — a redelivery after a prior attempt began is
+  # refused with a duplicate_suppressed error instead of double-applying. Idempotent
+  # methods (GET/PUT/DELETE/…) are still retried freely. Set false to allow
+  # at-least-once for every method (only safe if your upstreams dedupe writes).
+  idempotency_guard: true
   # Distributed mode: max concurrent in-flight tool calls a worker runs per device.
   # When saturated the worker stops reading that device's call stream (backpressure),
   # so a burst shows up as Redis-stream lag rather than unbounded worker memory.

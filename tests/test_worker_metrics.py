@@ -25,9 +25,16 @@ def _worker(worker_id="W1", redis=None):
     return DeviceWorker(worker_id=worker_id, config=CONFIG, redis_client=redis)
 
 
+class _Manifest:
+    tools: list = []
+
+
 class _FakePod:
     def __init__(self, result):
         self._result = result
+        # Real pods always carry a manifest; the worker reads it to classify a
+        # call's idempotency before dispatch (F-08).
+        self.manifest = _Manifest()
 
     async def call_tool(self, message):
         return self._result
