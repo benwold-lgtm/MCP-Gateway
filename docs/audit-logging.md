@@ -5,9 +5,10 @@ Relevant to SOC 2 (CC-series) and HIPAA (§164.312(b) audit controls).
 
 ## Audit events
 
-Audit records are emitted on the normal log stream with the structured field
-`event="audit"` (so a log pipeline can filter `event=audit` and forward them to a
-separate, retained sink). Schema:
+Audit records are emitted with the structured field `event="audit"`. They appear on
+the normal log stream **and** on a dedicated, always-JSON audit sink
+(`logging.audit_file`, default `logs/audit.log`) that carries only audit records —
+the clean stream to forward to a retained SIEM/WORM store. Schema:
 
 | Field | Meaning |
 |-------|---------|
@@ -17,6 +18,7 @@ separate, retained sink). Schema:
 | `rid` | request id; matches the access-log line and the `X-Request-Id` response header |
 | `target` | what was acted on — a hostname, or `METHOD /path` |
 | `outcome` | `success` \| `denied` \| `error` |
+| `audit_seq` / `audit_prev` / `audit_hash` | tamper-evident hash-chain fields (see below) |
 | (extra) | e.g. `reason=missing_scope:devices:write` |
 
 ### What is audited
@@ -31,6 +33,45 @@ separate, retained sink). Schema:
 Auth-failure auditing is centralized at the RBAC dependency seam
 ([`rbac.py`](../device_mcp_gateway/rbac.py)), so every protected route is covered
 without per-route code.
+
+## Tamper-evidence (F-57)
+
+Each audit record is linked into an append-only **hash chain**: `audit_hash =
+sha256(audit_seq ‖ audit_prev ‖ canonical(payload))`, where `audit_prev` is the
+previous record's hash. Editing a record changes its hash; deleting or reordering
+one breaks the `audit_prev` linkage of the next. The chain continues across a
+process restart (it is re-seeded from the tail of the existing audit file) and is
+per-process — the gateway and each worker keep their own files
+(`logs/audit.log`, `logs/worker-audit.log`) so independent chains never interleave.
+
+Verify a file offline:
+
+```bash
+python -m device_mcp_gateway.audit_verify logs/audit.log
+# OK: verified 1234 audit record(s)            → exit 0
+# FAIL: hash mismatch at seq 42: record was altered → exit 1
+```
+
+To verify across a rotation boundary, pass the prior file's last hash and next seq:
+`--start-prev <hash> --start-seq <n>`. In-app chaining detects local tampering; for
+end-to-end assurance, **forward the audit stream to an append-only sink** (the SIEM
+holds an independent copy, so even wholesale local-file replacement is caught).
+
+## Retention, legal hold & disposal (F-58)
+
+The dedicated audit sink uses **time-based retention** (`logging.audit_retention`,
+default `"90 days"`) rather than a backup-file count, so retention maps to a policy
+period. Set it to your regulatory window (e.g. `"7 years"` for HIPAA-aligned
+retention).
+
+- **Disposal:** files past `audit_retention` are deleted automatically by the sink.
+  Choose the value to match your documented disposal schedule.
+- **Legal hold:** to suspend disposal, raise `audit_retention` (or forward the stream
+  to a sink with hold capability and stop relying on local deletion). Because the
+  primary retained copy should live in the SIEM/WORM store, legal hold is enforced
+  there; the local file is a forwarding buffer.
+- **Disable:** set `logging.audit_enabled: false` to drop the dedicated sink (records
+  still appear in the main log).
 
 ## Access-log attribution
 
@@ -61,6 +102,7 @@ persisted** by the gateway. What the gateway stores/logs:
 
 For regulated deployments, operators remain responsible for: classifying the data
 their devices expose, deciding whether tool I/O may be logged downstream of the
-gateway, and forwarding the `event="audit"` stream to a retained, tamper-evident
-sink (see findings F-57/F-58 for the roadmap on a forwarded, time-retained audit
-stream).
+gateway, and **forwarding the dedicated audit file to a retained, append-only sink**.
+The gateway makes that stream tamper-evident (hash chain, F-57) and time-retained
+(F-58); the durable, hold-capable copy of record lives in the operator's SIEM/WORM
+store.

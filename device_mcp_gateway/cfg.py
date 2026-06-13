@@ -87,6 +87,10 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "max_size": _NUM,
         "backup_count": int,
         "json_logs": bool,
+        "audit_file": str,
+        "worker_audit_file": str,
+        "audit_retention": str,
+        "audit_enabled": bool,
     },
 }
 
@@ -238,5 +242,5 @@ def _defaults() -> dict:
         "storage": {"db_path": "./data/devices.db"},
         "cors": {"allowed_origins": []},
         "metrics": {"enabled": True, "port": 9100, "gauge_refresh_interval": 15},
-        "logging": {"level": "INFO"},
+        "logging": {"level": "INFO", "audit_retention": "90 days", "audit_enabled": True},
     }

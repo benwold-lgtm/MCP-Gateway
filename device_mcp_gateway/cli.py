@@ -113,6 +113,11 @@ def worker_main() -> None:
             log_file=log_cfg.get("file", "logs/worker.log"),
             max_size_mb=log_cfg.get("max_size", 50),
             backup_count=log_cfg.get("backup_count", 5),
+            # Each process owns its own audit file so the per-process hash chains don't
+            # interleave (F-57); the worker's stream is separate from the gateway's.
+            audit_file=log_cfg.get("worker_audit_file", "logs/worker-audit.log"),
+            audit_retention=log_cfg.get("audit_retention", "90 days"),
+            audit_enabled=log_cfg.get("audit_enabled", True),
         )
 
         try:
