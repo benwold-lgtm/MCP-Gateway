@@ -98,6 +98,43 @@ async def test_call_backlog_reflects_consumer_group_lag(real_redis):
     await real_redis.delete(stream)
 
 
+async def test_dead_letter_inspect_replay_purge(real_redis):
+    """F-10 DLQ ops against real Redis: list parses entries, replay moves them onto
+    the call stream, purge drops the queue."""
+    backend = RedisRegistryBackend(real_redis)
+    host = "devdlq"
+    dead = f"device:{host}:calls:dead"
+    calls = f"device:{host}:calls"
+    await real_redis.delete(dead, calls)
+    for i in range(3):
+        await real_redis.xadd(
+            dead,
+            {
+                "request_id": f"r{i}",
+                "session_id": "s",
+                "gateway_id": "gw",
+                "rid": f"rid{i}",
+                "message": json.dumps({"method": "tools/call", "id": i}),
+                "reason": "no active pod",
+                "ts": "1.0",
+            },
+        )
+
+    listed = await backend.dead_letter_list(host, count=10)
+    assert len(listed) == 3 and listed[0]["method"] == "tools/call"
+
+    replayed = await backend.dead_letter_replay(host, count=10)
+    assert replayed == 3
+    assert await real_redis.xlen(calls) == 3
+    assert await real_redis.xlen(dead) == 0
+
+    # Re-seed and purge the whole queue.
+    await real_redis.xadd(dead, {"message": "{}", "reason": "x", "ts": "1"})
+    assert await backend.dead_letter_purge(host) == -1
+    assert await real_redis.exists(dead) == 0
+    await real_redis.delete(calls)
+
+
 # --- SessionRouter (cross-client pub/sub, the F3 path) ----------------------
 
 

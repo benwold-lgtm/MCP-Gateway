@@ -204,6 +204,29 @@ DLQ growing (`rate(mcp_dead_letter_total[5m]) > 0`), undelivered backlog nearing
 admission shedding (`rate(mcp_calls_rejected_overload_total[5m]) > 0`, F-06), and
 circuit breakers opening.
 
+### Working a dead-letter alert (F-10)
+
+When `MCPDeadLetterGrowing` fires, the device's undeliverable calls are in
+`device:{hostname}:calls:dead`. Inspect, replay, or drain them over the API
+(distributed mode):
+
+```bash
+# Inspect — newest first (id, reason, ts, method, rid, request_id, session_id)
+curl -H "Authorization: Bearer $KEY" .../devices/$H/deadletter
+
+# Replay — re-publish onto the live call stream and remove from the DLQ.
+# Most DLQ entries are "no active pod" from a pod-replace window; once a pod is
+# back, replaying re-runs them. Add {"ids":[...]} to replay specific entries.
+curl -X POST -H "Authorization: Bearer $KEY" .../devices/$H/deadletter/replay
+
+# Drain — drop the whole queue (or {"ids":[...]} for specific entries)
+curl -X DELETE -H "Authorization: Bearer $KEY" .../devices/$H/deadletter
+```
+
+Replay preserves the original `request_id`/`session_id`/`rid`/`traceparent`; a
+result for an already-expired session is best-effort, but the call still
+re-executes. The gateway does not auto-replay — it's an operator action.
+
 ---
 
 ## Distributed Tracing (OpenTelemetry)
