@@ -35,6 +35,7 @@ from typing import Any
 from loguru import logger
 
 from device_mcp_gateway import metrics
+from device_mcp_gateway.audit import audit_log
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered
 from device_mcp_gateway.core.errors import RPC_DUPLICATE, RPC_NO_WORKER, rpc_error
@@ -768,9 +769,7 @@ class DeviceWorker:
                     )
                 if request_id:
                     await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
-                logger.bind(event="audit", hostname=hostname, method=_method, status="dead_letter", rid=rid).info(
-                    "tool dispatch"
-                )
+                audit_log("tool dispatch", hostname=hostname, method=_method, status="dead_letter", rid=rid)
                 return
             # Idempotency guard (F-08): a reclaimed/redelivered call may already
             # have executed. Decide whether to (re-)run before touching the upstream.
@@ -797,9 +796,9 @@ class DeviceWorker:
                             )
                         await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
                     metrics.duplicate_calls_suppressed_total.labels(hostname=hostname, reason=decision).inc()
-                    logger.bind(
-                        event="audit", hostname=hostname, method=_method, status=f"duplicate_{decision}", rid=rid
-                    ).info("tool dispatch")
+                    audit_log(
+                        "tool dispatch", hostname=hostname, method=_method, status=f"duplicate_{decision}", rid=rid
+                    )
                     return
             _t = time.perf_counter()
             # Execution span parented from the gateway's dispatch span (F-14): the
@@ -832,14 +831,14 @@ class DeviceWorker:
                 await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
             # Distributed-mode audit log with execution latency (SRE O2/O3): the
             # gateway only logs "dispatched", so per-call latency lives here.
-            logger.bind(
-                event="audit",
+            audit_log(
+                "tool dispatch",
                 hostname=hostname,
                 method=_method,
                 status=_status,
                 duration_ms=round(_dur * 1000, 1),
                 rid=rid,
-            ).info("tool dispatch")
+            )
         except Exception:
             logger.exception(f"Tool call dispatch error for {hostname} session {session_id} rid={rid}")
         finally:

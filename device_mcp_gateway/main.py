@@ -32,7 +32,7 @@ from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway import __version__
 from device_mcp_gateway.cfg import load_config, resolve_mode, warn_unsafe_settings
-from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_request
+from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_log, audit_request
 from device_mcp_gateway.core.backoff import jittered
 from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
@@ -221,6 +221,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         max_size_mb=_log_cfg.get("max_size", 50),
         backup_count=_log_cfg.get("backup_count", 5),
         json_logs=_log_cfg.get("json_logs", True),
+        audit_file=_log_cfg.get("audit_file", "logs/audit.log"),
+        audit_retention=_log_cfg.get("audit_retention", "90 days"),
+        audit_enabled=_log_cfg.get("audit_enabled", True),
     )
 
     _gateway_cfg = cfg.get("gateway", {})
@@ -927,13 +930,14 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             _backlog_limit = cfg.get("registry", {}).get("call_backlog_limit", 1000)
             if _backlog_limit > 0 and await _backend.call_backlog(hostname) >= _backlog_limit:
                 metrics.calls_rejected_overload_total.labels(hostname=hostname).inc()
-                logger.bind(
-                    event="audit",
+                audit_log(
+                    "tool dispatch shed: call backlog over watermark",
+                    level="WARNING",
                     hostname=hostname,
                     subject=_subject,
                     status="rejected_overload",
                     rid=_rid,
-                ).warning("tool dispatch shed: call backlog over watermark")
+                )
                 raise HTTPException(
                     status_code=429,
                     detail=f"Device '{hostname}' is overloaded; retry shortly",
@@ -976,14 +980,14 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                 )
                 request.app.state.bg_tasks.add(_watcher)
                 _watcher.add_done_callback(request.app.state.bg_tasks.discard)
-            logger.bind(
-                event="audit",
+            audit_log(
+                "tool dispatch",
                 hostname=hostname,
                 subject=_subject,
                 method=payload.get("method", "?"),
                 status="dispatched",
                 rid=_rid,
-            ).info("tool dispatch")
+            )
             return {"status": "accepted"}
         else:
             profile = reg.get_profile(hostname)
@@ -999,15 +1003,15 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             _method = payload.get("method", "?") if isinstance(payload, dict) else "?"
             metrics.tool_calls_total.labels(hostname=hostname, method=_method, status=_status).inc()
             metrics.tool_call_duration_seconds.labels(hostname=hostname).observe(_dur / 1000.0)
-            logger.bind(
-                event="audit",
+            audit_log(
+                "tool dispatch",
                 hostname=hostname,
                 subject=_subject,
                 method=payload.get("method", "?"),
                 status=_status,
                 duration_ms=round(_dur, 1),
                 rid=_rid,
-            ).info("tool dispatch")
+            )
             return response
 
     @protected.delete("/devices/{hostname}", dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))])

@@ -241,3 +241,15 @@ logging:
   # Emit log file as newline-delimited JSON (recommended for external collectors).
   # Set to false only for local development without an observability stack.
   json_logs: true
+  # Dedicated tamper-evident audit stream (F-57/F-58). Only event="audit" records
+  # land here, always JSON, hash-chained so any edit/deletion/reorder is detectable
+  # offline via `python -m device_mcp_gateway.audit_verify <file>`. Forward this file
+  # to an append-only SIEM/WORM store for end-to-end tamper-evidence. Each process
+  # must own its own audit file (the worker uses logs/worker-audit.log).
+  audit_file: "logs/audit.log"
+  # Time-based retention for the audit stream (F-58), e.g. "90 days", "7 years".
+  # For legal hold, raise this (or set audit_enabled and ship to a retained sink) —
+  # see docs/audit-logging.md for the retention/legal-hold/disposal policy.
+  audit_retention: "90 days"
+  # Set false to disable the dedicated audit sink (records still appear in the main log).
+  audit_enabled: true
