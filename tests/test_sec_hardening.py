@@ -9,6 +9,7 @@ F-37: a session is bound to the principal that opened it; another caller can't p
 """
 
 import socket
+import time
 import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
@@ -83,9 +84,23 @@ def _free_port():
     return port
 
 
+def _wait_until_listening(port, timeout=5.0):
+    """Block until the metrics server thread is accepting connections, so the first
+    request can't race the daemon thread's bind/listen (a CI flake otherwise)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket() as s:
+            s.settimeout(0.25)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return
+        time.sleep(0.05)
+    raise AssertionError(f"metrics server never started listening on :{port}")
+
+
 def test_metrics_server_requires_bearer_token():
     port = _free_port()
     assert metrics.start_metrics_server(port, auth_token="sekret") is True
+    _wait_until_listening(port)
     base = f"http://127.0.0.1:{port}/"
 
     # No token → 401.
