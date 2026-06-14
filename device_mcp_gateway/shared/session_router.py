@@ -98,13 +98,21 @@ class SessionRouter:
         hostname: str,
         gateway_id: str,
         ttl: int = _SESSION_TTL,
+        owner: str | None = None,
     ) -> None:
-        """Record that session_id is held by this gateway instance."""
+        """Record that session_id is held by this gateway instance.
+
+        ``owner`` is the principal subject that opened the session; it binds the
+        session to that principal so another caller can't post to it (F-37).
+        """
         key = f"session:{session_id}"
+        mapping = {"hostname": hostname, "gateway_id": gateway_id}
+        if owner is not None:
+            mapping["owner"] = owner
         # Pipeline hset + expire so the hash never lands without a TTL — a drop
         # between two separate round-trips would otherwise leak the session key.
         pipe = self._r.pipeline()
-        pipe.hset(key, mapping={"hostname": hostname, "gateway_id": gateway_id})
+        pipe.hset(key, mapping=mapping)
         pipe.expire(key, ttl)
         await pipe.execute()
         logger.debug(f"Session registered: session_id={session_id} gateway={gateway_id}")
