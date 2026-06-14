@@ -16,9 +16,14 @@ the concrete path — concrete paths are unbounded cardinality and will OOM Prom
 
 import os
 
+import hmac
+import threading
+from http.server import ThreadingHTTPServer
+
 from loguru import logger
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Counter, Gauge, Histogram, generate_latest
 from prometheus_client import start_http_server as _start_http_server
+from prometheus_client.exposition import MetricsHandler
 
 __all__ = [
     "CONTENT_TYPE_LATEST",
@@ -45,6 +50,7 @@ __all__ = [
     "upstream_retries_total",
     "metrics_port",
     "metrics_enabled",
+    "metrics_token",
     "start_metrics_server",
     "route_template",
 ]
@@ -72,6 +78,21 @@ def metrics_enabled(cfg: dict | None = None) -> bool:
     if cfg:
         return bool(cfg.get("metrics", {}).get("enabled", True))
     return True
+
+
+def metrics_token(cfg: dict | None = None) -> str | None:
+    """Resolve an optional bearer token gating the exposition endpoint (F-36).
+
+    env MCP_METRICS_TOKEN > config metrics.auth_token > None. When set, scrapers
+    must send ``Authorization: Bearer <token>``; when unset, the endpoint is open
+    and must be restricted by a NetworkPolicy (the documented default).
+    """
+    env = os.getenv("MCP_METRICS_TOKEN")
+    if env:
+        return env
+    if cfg:
+        return cfg.get("metrics", {}).get("auth_token") or None
+    return None
 
 
 # --- Instruments (registered on the process-global default REGISTRY) ---------
@@ -192,16 +213,48 @@ calls_rejected_overload_total = Counter(
 )
 
 
-def start_metrics_server(port: int) -> bool:
+def _authenticated_handler(token: str):
+    """Build a MetricsHandler subclass that requires a bearer token (F-36)."""
+    base = MetricsHandler.factory(REGISTRY)
+    expected = f"Bearer {token}"
+
+    class _AuthMetricsHandler(base):  # type: ignore[valid-type, misc]
+        def do_GET(self) -> None:  # noqa: N802 (http.server API)
+            presented = self.headers.get("Authorization", "")
+            # Constant-time compare so a wrong token can't be timing-probed.
+            if not hmac.compare_digest(presented, expected):
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", "Bearer")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            super().do_GET()
+
+        def log_message(self, *args: object) -> None:  # silence per-scrape stderr noise
+            pass
+
+    return _AuthMetricsHandler
+
+
+def start_metrics_server(port: int, auth_token: str | None = None) -> bool:
     """Start the Prometheus exposition HTTP server on ``port``.
 
-    Tolerant of "address already in use": the test suite builds many app
-    instances in one process, and a metrics port collision must never crash the
-    app or a test. Returns True if the server started, False otherwise.
+    When ``auth_token`` is set, the endpoint requires ``Authorization: Bearer
+    <token>`` (F-36); otherwise it is open and must be restricted by a NetworkPolicy.
+    Tolerant of "address already in use": the test suite builds many app instances
+    in one process, and a metrics port collision must never crash the app or a test.
+    Returns True if the server started, False otherwise.
     """
     try:
-        _start_http_server(port)
-        logger.info(f"Prometheus metrics server listening on :{port}")
+        if auth_token:
+            httpd = ThreadingHTTPServer(("", port), _authenticated_handler(auth_token))
+            threading.Thread(target=httpd.serve_forever, daemon=True, name="metrics-exposition").start()
+            logger.info(f"Prometheus metrics server listening on :{port} (bearer-token authenticated)")
+        else:
+            _start_http_server(port)
+            logger.info(
+                f"Prometheus metrics server listening on :{port} (unauthenticated — restrict via NetworkPolicy)"
+            )
         return True
     except OSError as exc:  # address in use, permission, etc. — non-fatal
         logger.warning(f"Metrics server not started on :{port}: {exc}")

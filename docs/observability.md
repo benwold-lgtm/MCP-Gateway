@@ -25,6 +25,21 @@ at `GET /metrics/summary`.
 | `metrics.enabled` | `true` | `MCP_METRICS_ENABLED=0` to disable |
 | `metrics.port` | `9100` | `MCP_METRICS_PORT` |
 | `metrics.gauge_refresh_interval` | `15` (s) | config only |
+| `metrics.auth_token` | _unset_ | `MCP_METRICS_TOKEN` |
+
+**Authenticating the scrape (F-36).** By default the exposition port is open and relies on
+a NetworkPolicy to restrict who can reach it. Set `metrics.auth_token` (or `MCP_METRICS_TOKEN`)
+to require `Authorization: Bearer <token>` on every scrape — defence-in-depth for clusters
+where a NetworkPolicy alone isn't sufficient. Point Prometheus at a secret-backed
+`bearer_token_file`:
+
+```yaml
+scrape_configs:
+  - job_name: mcp-gateway
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/mcp-metrics-token
+```
 
 Both the **gateway** and each **worker** expose the same port (workers have no API
 server, so this is their only HTTP surface). Run **one process per pod** and scale via

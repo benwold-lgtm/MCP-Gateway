@@ -215,6 +215,11 @@ metrics:
   port: 9100
   # Seconds between device-fleet gauge refreshes (registered/active/reachable).
   gauge_refresh_interval: 15
+  # Optional bearer token gating the exposition endpoint (F-36; env MCP_METRICS_TOKEN
+  # overrides). When set, scrapers must send `Authorization: Bearer <token>` (point the
+  # Prometheus scrape config at a secret-backed bearer_token_file). When unset (default),
+  # the endpoint is open and must be restricted with a NetworkPolicy.
+  # auth_token: "change-me"
 
 # Optional distributed tracing (OpenTelemetry → OTLP/HTTP). OFF by default and a
 # no-op unless the [otel] extra is installed (pip install '.[otel]'). When on, a

@@ -74,6 +74,82 @@ from device_mcp_gateway.shared.registry_backend import (
 _GATEWAY_ID = os.getenv("GATEWAY_ID", str(uuid.uuid4()))
 
 
+class _BodyTooLarge(Exception):
+    """Raised by the body-size limiter when the streamed body exceeds the cap."""
+
+
+class _BodySizeLimitMiddleware:
+    """Pure-ASGI request-body cap that can't be bypassed by a chunked transfer or a
+    missing/understated Content-Length (F-35).
+
+    A declared Content-Length over the cap is rejected up front; otherwise the actual
+    body bytes are tallied as they stream in (covering chunked encoding and a spoofed
+    low Content-Length), and the request is rejected the moment the cap is crossed —
+    before the whole body is buffered into memory.
+    """
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    return await self._reject(send, 400, "Invalid Content-Length header")
+                if declared > self.max_bytes:
+                    return await self._reject(send, 413, self._too_large_msg())
+                break
+
+        total = 0
+
+        async def counting_receive():
+            nonlocal total
+            message = await receive()
+            if message["type"] == "http.request":
+                total += len(message.get("body", b""))
+                if total > self.max_bytes:
+                    raise _BodyTooLarge()
+            return message
+
+        started = False
+
+        async def tracking_send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except _BodyTooLarge:
+            if started:
+                raise  # response already begun — can't replace it
+            await self._reject(send, 413, self._too_large_msg())
+
+    def _too_large_msg(self) -> str:
+        return f"Request body exceeds the {self.max_bytes // 1024} KB limit"
+
+    async def _reject(self, send, status: int, detail: str) -> None:
+        body = json.dumps({"detail": detail}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
 def _parse_rate_limit(data: dict) -> float | None:
     rps = data.get("rate_limit_rps")
     if rps is None:
@@ -363,6 +439,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.session_router = None
     # Strong refs to fire-and-forget timeout watchers so they aren't GC'd.
     _app.state.bg_tasks = set()
+    # Embedded-mode session→owner map for principal↔session binding (F-37). In
+    # distributed mode the owner lives on the Redis session hash instead, so the
+    # binding survives across gateway replicas.
+    _app.state.session_owners = {}
     # Short-TTL cache for the UI read aggregate (SRE O4) so a polling dashboard
     # doesn't trigger a fresh list_devices() on every request. Per-replica; ETag is
     # a content hash so it's stable across replicas.
@@ -447,7 +527,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         # --- Metrics (dedicated port + gauge refresher) ---
         gauge_task = None
         if metrics.metrics_enabled(cfg):
-            metrics.start_metrics_server(metrics.metrics_port(cfg))
+            metrics.start_metrics_server(metrics.metrics_port(cfg), auth_token=metrics.metrics_token(cfg))
             _refresh = cfg.get("metrics", {}).get("gauge_refresh_interval", 15)
             gauge_task = asyncio.create_task(_refresh_device_gauges(app, _refresh))
 
@@ -475,15 +555,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     # --- Middleware ---
 
-    @_app.middleware("http")
-    async def limit_body_size(request: Request, call_next):
-        content_length = request.headers.get("content-length")
-        if content_length is not None and int(content_length) > _max_body_bytes:
-            return JSONResponse(
-                status_code=413,
-                content={"detail": f"Request body exceeds the {_max_body_bytes // 1024} KB limit"},
-            )
-        return await call_next(request)
+    # Body-size cap (F-35): pure-ASGI so a chunked / missing / understated
+    # Content-Length can't slip an oversized body past a header-only check.
+    _app.add_middleware(_BodySizeLimitMiddleware, max_bytes=_max_body_bytes)
 
     @_app.middleware("http")
     async def log_requests(request: Request, call_next):
@@ -847,12 +921,18 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         if device.transport != "sse":
             raise HTTPException(status_code=400, detail="Device transport is not SSE")
 
+        # Bind the session to the principal that opens it (F-37) so another caller
+        # holding tools:call can't post to it. ``principal`` is set by the auth
+        # dependency on this protected route.
+        _principal = getattr(request.state, "principal", None)
+        _owner_subject = _principal.subject if _principal else "unknown"
+
         if mode == "distributed":
             # Distributed: server-assigned session ID; route results via Redis pub/sub
             session_router = request.app.state.session_router
             effective_id = str(uuid.uuid4())
             endpoint_url = f"/devices/{hostname}/messages?session_id={effective_id}"
-            await session_router.register(effective_id, hostname, _GATEWAY_ID)
+            await session_router.register(effective_id, hostname, _GATEWAY_ID, owner=_owner_subject)
 
             async def event_generator():
                 metrics.active_sse_connections.inc()
@@ -881,6 +961,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             endpoint_url = f"/devices/{hostname}/messages?session_id={effective_id}"
             transport = profile.pod._ensure_sse_transport()
             transport.register_client(effective_id, endpoint_url)
+            request.app.state.session_owners[effective_id] = _owner_subject  # F-37
 
             async def _counted_stream():
                 metrics.active_sse_connections.inc()
@@ -889,6 +970,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                         yield ev
                 finally:
                     metrics.active_sse_connections.dec()
+                    request.app.state.session_owners.pop(effective_id, None)
 
             return EventSourceResponse(_counted_stream())
 
@@ -919,6 +1001,17 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         _principal = getattr(request.state, "principal", None)
         _subject = _principal.subject if _principal else "unknown"
         _rid = getattr(request.state, "request_id", "-")
+
+        # Principal↔session binding (F-37): a session may only be posted to by the
+        # principal that opened it. Distributed mode stores the owner on the Redis
+        # session hash (survives across replicas); embedded mode keeps it in-process.
+        if mode == "distributed":
+            _sess = await request.app.state.session_router.get(effective_id)
+            _owner = _sess.get("owner") if _sess else None
+        else:
+            _owner = request.app.state.session_owners.get(effective_id)
+        if _owner is not None and _owner != _subject:
+            raise HTTPException(status_code=403, detail="session_id is bound to a different principal")
 
         if mode == "distributed":
             _backend = request.app.state.registry._backend

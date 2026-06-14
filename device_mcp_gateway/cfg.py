@@ -74,7 +74,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
     "storage": {"type": str, "db_path": str},
     "cors": {"allowed_origins": list},
     "security": {"allow_private_targets": bool},
-    "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM},
+    "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM, "auth_token": str},
     "tracing": {
         "enabled": bool,
         "otlp_endpoint": str,

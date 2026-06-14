@@ -152,7 +152,7 @@ def worker_main() -> None:
         # port here (same pattern as the gateway). This also unlocks the
         # redis-stream-lag signal the worker HPA wants.
         if metrics.metrics_enabled(cfg):
-            metrics.start_metrics_server(metrics.metrics_port(cfg))
+            metrics.start_metrics_server(metrics.metrics_port(cfg), auth_token=metrics.metrics_token(cfg))
 
         async def _run() -> None:
             redis_client = await create_redis(cfg)
