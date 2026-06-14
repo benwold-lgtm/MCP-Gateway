@@ -264,11 +264,18 @@ def start_metrics_server(port: int, auth_token: str | None = None) -> bool:
 def route_template(request) -> str:
     """Return the matched route's path template (e.g. ``/devices/{hostname}``).
 
-    Starlette 1.2 does not expose ``scope["route"]`` — only ``scope["endpoint"]``
-    after routing. We build (and cache on app.state) an endpoint→path_format map
-    so labels stay low-cardinality. Unmatched requests (404 from scanners) collapse
-    to ``__unmatched__`` so they cannot explode the label set.
+    Starlette (1.3+) puts the matched ``Route`` on the scope, whose ``path_format``
+    is the low-cardinality template directly — robust across the endpoint-wrapping
+    changes that broke the older ``scope["endpoint"]`` identity match. Older
+    Starlette only exposed ``scope["endpoint"]``, so we keep an endpoint→path_format
+    cache as a fallback. Unmatched requests (404 from scanners) collapse to
+    ``__unmatched__`` so they cannot explode the label set.
     """
+    route = request.scope.get("route")
+    if route is not None:
+        path_format = getattr(route, "path_format", None) or getattr(route, "path", None)
+        if path_format:
+            return path_format
     endpoint = request.scope.get("endpoint")
     if endpoint is None:
         return "__unmatched__"
