@@ -200,6 +200,27 @@ Tool calls ride a Redis Stream with **at-least-once** delivery: when a worker di
 
 This makes a non-idempotent operation run **at most once across the fleet** even through worker death, shedding, and reclaim. It does not provide end-to-end exactly-once against the *upstream device* — that would require the device to honour an idempotency key — but it removes the gateway-introduced duplicate. The guard markers outlive the reclaim window (so a reclaim always sees them) and expire well within the per-call `request_id` lifetime (ids are unique, so a long TTL is harmless). Set `registry.idempotency_guard: false` to allow at-least-once for every method — only safe when your upstreams dedupe writes themselves. The `mcp_duplicate_calls_suppressed_total{reason}` counter exposes how often a redelivery was deduped (`already_completed`) or refused (`nonidempotent_guard`).
 
+### Scaling a hot device — single-owner by design (F-03)
+
+A device is owned by **exactly one worker** at a time: one lease, one consumer of its `device:{hostname}:calls` stream. Adding workers spreads *different* devices across the fleet (see rebalancing above) but does **not** split a single device's call stream across pods. A single hot device therefore scales **vertically** — its throughput is bounded by one worker's per-device concurrency cap (`registry.max_concurrent_calls_per_device`, default **20** in-flight calls) and by the upstream API itself — not horizontally.
+
+This is a **deliberate design decision, not a gap.** Single-ownership is what makes the rest of the control plane correct and cheap:
+
+- **At-most-once writes (F-08)** — the `exec:{request_id}` guard and `XAUTOCLAIM` reclaim assume one owner; sharding a device across pods would require cross-shard dedup.
+- **Per-device ordering** — a single consumer processes a device's calls in stream order; multiple consumers would interleave.
+- **One circuit breaker per device** — breaker state (open/closed, failure count) lives in the owning pod; split ownership means split-brain breaker decisions.
+- **Lease failover (SRE #1/#2) and rebalancing (F-07)** — the whole device is the atomic unit that moves between workers.
+
+Sharding one device across pods would multiply upstream connections, fracture the breaker, and complicate idempotency and ordering — substantial fragility to buy a capability that is rarely needed. For an MCP→API gateway the load is LLM-driven tool calls, and the **upstream API is almost always the first bottleneck** (most APIs rate-limit the caller, which is why the gateway honours upstream `429`/`Retry-After`, F-44). You typically hit the upstream's limit long before one worker saturates.
+
+**If a device does run hot, scale it without sharding:**
+
+1. **Raise the cap** — increase `registry.max_concurrent_calls_per_device` so the owning worker runs more calls in parallel.
+2. **Bigger pod** — give the worker that holds the hot device more CPU/memory.
+3. **Operator-level fan-out** — register the same upstream as two logical devices (e.g. `api-a` / `api-b`) so they land on different workers and the client/model spreads load across them. This shards at the *registration* boundary without touching the single-owner invariant.
+
+**Future consideration — fairness / rate limiting (F-16, not implemented):** the concurrency cap is global to the device, so one noisy principal can monopolize a device's slots, and there is no per-principal quota or token-bucket. If multi-tenant fairness or abuse control becomes a requirement, add per-principal rate limiting as a dedicated feature — it is orthogonal to the single-owner decision above.
+
 ### PodDisruptionBudgets
 
 Both gateway and worker have a PDB with `minAvailable: 1`. This prevents node drains and cluster upgrades from taking down all replicas simultaneously. Rolling updates (during which one pod is replaced at a time) proceed normally as long as `replicas ≥ 2`.
