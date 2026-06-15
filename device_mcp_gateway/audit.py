@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
+import uuid
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -40,7 +42,24 @@ AUDIT_OUTCOME_ERROR = "error"
 _GENESIS = "0" * 64
 # Fields bound onto an audit record that are chain metadata / framing, not part of
 # the hashed payload. Everything else under the record's ``extra`` is the payload.
-_CHAIN_META = frozenset({"event", "audit_seq", "audit_prev", "audit_hash"})
+_CHAIN_META = frozenset({"event", "audit_instance", "audit_seq", "audit_prev", "audit_hash"})
+
+
+def _resolve_instance_id() -> str:
+    """Stable identifier for this gateway replica's audit sub-chain.
+
+    The hash chain is a single-writer construct, but a multi-replica gateway can have
+    several processes appending to one shared audit sink (file/SIEM). Each replica keeps
+    its own in-process chain; tagging every record with the replica id lets the verifier
+    replay each replica's sub-chain independently, so the interleave no longer looks like
+    tampering (review concern). Prefer an explicit / orchestrator-stable id (K8s sets
+    HOSTNAME to the pod name) so the chain survives restarts; the per-process fallback is
+    a last resort that simply starts a fresh sub-chain.
+    """
+    return os.getenv("MCP_INSTANCE_ID") or os.getenv("HOSTNAME") or f"local-{uuid.uuid4().hex[:8]}"
+
+
+_INSTANCE_ID = _resolve_instance_id()
 
 
 def _record_hash(seq: int, prev: str, payload: dict[str, Any]) -> str:
@@ -92,15 +111,24 @@ def reset_audit_chain() -> None:
 
 def init_audit_chain(audit_file: str) -> None:
     """Continue the hash chain from the last record already in ``audit_file`` so a
-    restart doesn't reset the chain (which would otherwise look like tampering)."""
-    last = _read_last_audit_extra(audit_file)
+    restart doesn't reset the chain (which would otherwise look like tampering).
+
+    Seeds from the last record *this replica* wrote (matched by ``audit_instance``),
+    not the global tail — so a restart of replica A continues A's sub-chain even if
+    replica B wrote the most recent record to a shared sink.
+    """
+    last = _read_last_audit_extra(audit_file, instance_id=_INSTANCE_ID)
     if last and isinstance(last.get("audit_seq"), int) and isinstance(last.get("audit_hash"), str):
         _chain.seed(next_seq=last["audit_seq"] + 1, prev=last["audit_hash"])
 
 
-def _read_last_audit_extra(audit_file: str) -> dict[str, Any] | None:
+def _read_last_audit_extra(audit_file: str, *, instance_id: str | None = None) -> dict[str, Any] | None:
     """Return the ``extra`` dict of the last audit record in a serialised log file,
-    or None if the file is absent/empty/unreadable (→ chain starts at genesis)."""
+    or None if the file is absent/empty/unreadable (→ chain starts at genesis).
+
+    When ``instance_id`` is given, only records from that replica are considered, so
+    a replica re-seeds from its own sub-chain rather than another replica's tail.
+    """
     try:
         with open(audit_file, encoding="utf-8") as fh:
             last = None
@@ -112,8 +140,11 @@ def _read_last_audit_extra(audit_file: str) -> dict[str, Any] | None:
                     extra = json.loads(line).get("record", {}).get("extra", {})
                 except (ValueError, AttributeError):
                     continue
-                if extra.get("event") == "audit":
-                    last = extra
+                if extra.get("event") != "audit":
+                    continue
+                if instance_id is not None and extra.get("audit_instance", "") != instance_id:
+                    continue
+                last = extra
             return last
     except OSError:
         return None
@@ -175,7 +206,9 @@ def audit_log(message: str, *, level: str = "INFO", **fields: Any) -> None:
     verifier never trips over an unchained one.
     """
     seq, prev, h = _chain.advance(fields)
-    logger.bind(event="audit", audit_seq=seq, audit_prev=prev, audit_hash=h, **fields).log(level, message)
+    logger.bind(event="audit", audit_instance=_INSTANCE_ID, audit_seq=seq, audit_prev=prev, audit_hash=h, **fields).log(
+        level, message
+    )
 
 
 def subject_of(request: Any) -> str:
@@ -200,9 +233,16 @@ def verify_audit_chain(
     previous record's hash), and a sequence gap. A file that starts mid-chain (after
     rotation) still verifies internally; pass ``start_prev``/``start_seq`` (the prior
     file's last hash/seq + 1) to chain across a rotation boundary.
+
+    Records carry an ``audit_instance`` tag and are verified as one sub-chain *per
+    replica*: a multi-replica gateway interleaves several independent chains into one
+    shared sink, and replaying them together would otherwise flag the interleave as
+    tampering. ``start_prev``/``start_seq`` seed a sub-chain on first sight, intended
+    for the single-stream rotation-boundary case. Records with no tag (older releases)
+    share the default ``""`` sub-chain, so existing single-replica logs verify as before.
     """
-    prev = start_prev
-    expected_seq = start_seq
+    # instance_id -> (expected prev hash, expected next seq); seeded lazily per replica.
+    chains: dict[str, tuple[str | None, int | None]] = {}
     count = 0
     try:
         fh = open(audit_file, encoding="utf-8")
@@ -219,6 +259,7 @@ def verify_audit_chain(
                 continue
             if extra.get("event") != "audit":
                 continue
+            inst = extra.get("audit_instance", "")
             seq = extra.get("audit_seq")
             rec_prev = extra.get("audit_prev")
             rec_hash = extra.get("audit_hash")
@@ -227,11 +268,13 @@ def verify_audit_chain(
             payload = {k: v for k, v in extra.items() if k not in _CHAIN_META}
             if _record_hash(seq, rec_prev, payload) != rec_hash:
                 return False, f"hash mismatch at seq {seq}: record was altered"
+            prev, expected_seq = chains.get(inst, (start_prev, start_seq))
             if prev is not None and rec_prev != prev:
                 return False, f"chain break before seq {seq}: a record was deleted or reordered"
             if expected_seq is not None and seq != expected_seq:
                 return False, f"sequence gap: expected seq {expected_seq}, found {seq}"
-            prev, expected_seq, count = rec_hash, seq + 1, count + 1
+            chains[inst] = (rec_hash, seq + 1)
+            count += 1
     return True, f"verified {count} audit record(s)"
 
 

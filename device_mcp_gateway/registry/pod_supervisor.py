@@ -23,7 +23,7 @@ from typing import Any
 from loguru import logger
 
 from device_mcp_gateway.core.spec_limits import DEFAULT_TRANSLATE_TIMEOUT, SpecTooLargeError, run_translation
-from device_mcp_gateway.core.translator import SpecTranslator
+from device_mcp_gateway.core.translator import SpecTranslator, manifest_to_dict
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.registry.models import DeviceProfile
 from device_mcp_gateway.registry.spec_service import SpecService
@@ -110,6 +110,12 @@ class PodSupervisor:
         profile.pod = pod
         profile.config.pod_active = True
         profile.config.spawn_error = None
+        # Cache the manifest so REST introspection (GET /devices/{h}/tools) works in
+        # embedded mode too. The distributed worker does this in its health loop;
+        # embedded never did, so /tools always 409'd "no manifest cached" even though
+        # MCP tools/list served fine from the live pod (F-12 / review bug #4).
+        ttl = self._config.get("spec_cache_ttl", 3600)
+        await self._backend.set_manifest(profile.hostname, manifest_to_dict(mcp_manifest), ttl=ttl)
         await self._backend.update_device_fields(profile.hostname, pod_active=True, spawn_error=None)
         logger.info(f"Pod spawned for {profile.hostname}")
 
