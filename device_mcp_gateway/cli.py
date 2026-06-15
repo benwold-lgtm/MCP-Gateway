@@ -49,6 +49,11 @@ def main() -> None:
         port = args.port or cfg.get("server", {}).get("port", 8000)
         log_level = (args.log_level or cfg.get("logging", {}).get("level", "INFO")).lower()
 
+        # Export the resolved bind address so the import-time app (create_app →
+        # warn_unsafe_settings) sees the effective host, not just config — otherwise a
+        # `--host 127.0.0.1` override still triggers the "binding 0.0.0.0" warning.
+        os.environ["MCP_BIND_HOST"] = host
+
         uvicorn.run(
             "device_mcp_gateway.main:app",
             host=host,

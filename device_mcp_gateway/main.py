@@ -31,7 +31,7 @@ from loguru import logger
 from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway import API_V1_PREFIX, __version__
-from device_mcp_gateway.cfg import load_config, resolve_mode, warn_unsafe_settings
+from device_mcp_gateway.cfg import load_config, resolve_bind_host, resolve_mode, warn_unsafe_settings
 from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_log, audit_request
 from device_mcp_gateway.core.backoff import jittered
 from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
@@ -1247,7 +1247,7 @@ if __name__ == "__main__":
     import uvicorn
 
     _cfg = app.state.config
-    host = _cfg.get("server", {}).get("host", "0.0.0.0")  # nosec B104 — bind-all intended in containers
+    host = resolve_bind_host(_cfg)
     port = _cfg.get("server", {}).get("port", 8000)
     logger.info(f"Starting uvicorn on {host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level=_cfg.get("logging", {}).get("level", "INFO").lower())

@@ -192,7 +192,7 @@ def warn_unsafe_settings(cfg: dict[str, Any], mode: str, auth_enabled: bool) -> 
     the Tier-0 distributed-mode gates); returns the warning strings for testing.
     """
     warnings: list[str] = []
-    host = cfg.get("server", {}).get("host", "0.0.0.0")  # nosec B104 — default fallback for a read, not a bind
+    host = resolve_bind_host(cfg)
     origins = cfg.get("cors", {}).get("allowed_origins", []) or []
 
     if not auth_enabled:
@@ -222,6 +222,18 @@ def resolve_mode(cfg: dict[str, Any]) -> str:
     diverge (gateway embedded + worker distributed = split brain).
     """
     return os.getenv("MCP_REGISTRY_MODE") or cfg.get("registry", {}).get("mode", "embedded")
+
+
+def resolve_bind_host(cfg: dict[str, Any]) -> str:
+    """Resolve the *effective* bind address, honoring the CLI --host override.
+
+    The app is built at import time (``app = create_app()``) — before uvicorn binds —
+    so ``warn_unsafe_settings`` can't see a ``--host`` flag passed to the console script.
+    The CLI exports the resolved host as ``MCP_BIND_HOST`` before importing the app, so
+    the bind-all warning reflects the address actually bound rather than only the config
+    value (which would cry wolf when ``--host 127.0.0.1`` overrides a ``0.0.0.0`` config).
+    """
+    return os.getenv("MCP_BIND_HOST") or cfg.get("server", {}).get("host", "0.0.0.0")  # nosec B104 — read, not a bind
 
 
 def _defaults() -> dict:
