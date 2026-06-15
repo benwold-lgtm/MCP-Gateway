@@ -88,23 +88,23 @@ spec:
             limits:
               cpu: "1000m"
               memory: "1Gi"
-          # Workers have no HTTP port; use exec probes via Redis heartbeat key.
-          # The heartbeat key is set by the worker's heartbeat loop with TTL =
-          # 2 × health_check_interval. A missing key means the loop has stalled.
+          # Workers have no HTTP port. The heartbeat loop touches a local liveness
+          # file (mtime) on every HEALTHY beat and withholds it when its critical
+          # loops have stalled, so file freshness mirrors worker liveness (F-17).
+          # This replaces the old probe that spawned a Python interpreter AND opened
+          # a fresh Redis connection every period, per worker — heavyweight and a
+          # failure source of its own under Redis stress. `find -mmin -2` flags the
+          # file as fresh only if touched in the last 2 min (> heartbeat interval);
+          # a stale or missing file → no match → exit 1 → probe fails.
+          # NOTE: the path must match registry.liveness_file (default: the system
+          # temp dir + /mcp-worker-alive). Update both together if you override it.
           livenessProbe:
             exec:
               command:
-                - python
+                - /bin/sh
                 - -c
-                - |
-                  import os, sys, redis as r
-                  client = r.from_url(
-                      os.environ.get("MCP_REDIS_URL", "redis://redis:6379/0"),
-                      socket_connect_timeout=3,
-                  )
-                  key = f"worker:{os.environ.get('WORKER_ID', 'unknown')}:heartbeat"
-                  sys.exit(0 if client.exists(key) else 1)
-            # Allow time for: Python startup + Redis connect + first heartbeat write.
+                - find /tmp/mcp-worker-alive -mmin -2 | grep -q .
+            # Allow time for: process startup + first healthy heartbeat write.
             initialDelaySeconds: 60
             periodSeconds: 30
             timeoutSeconds: 5

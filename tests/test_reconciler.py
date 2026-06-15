@@ -18,7 +18,9 @@ import fakeredis.aioredis
 from device_mcp_gateway.shared.registry_backend import DeviceConfig, MemoryRegistryBackend
 from device_mcp_gateway.worker.runner import DeviceWorker
 
-CONFIG = {"registry": {"health_check_interval": 30, "reconcile_interval": 5}}
+# grace_cycles=1 here so these mechanics-focused tests reassign on the first sweep;
+# the multi-sweep hysteresis (default 2) has its own tests below (F-62).
+CONFIG = {"registry": {"health_check_interval": 30, "reconcile_interval": 5, "reconcile_orphan_grace_cycles": 1}}
 
 
 def _shared_redis():
@@ -127,6 +129,107 @@ async def test_reconcile_ignores_missing_config():
 
     await worker._reconcile_once()  # must not raise
     assert backend.assignments == []
+
+
+# --- Lease-flap hysteresis (F-62) -------------------------------------------
+
+
+def _worker_grace(redis, grace):
+    cfg = {"registry": {"health_check_interval": 30, "reconcile_orphan_grace_cycles": grace}}
+    return DeviceWorker(worker_id="live", config=cfg, redis_client=redis)
+
+
+async def _orphaned_backend(host="dev1"):
+    backend = _RecordingBackend()
+    await backend.set_device(
+        host, DeviceConfig(hostname=host, base_url=f"http://{host}", pod_active=True, worker_id="dead-worker")
+    )
+    return backend
+
+
+@pytest.mark.asyncio
+async def test_hysteresis_defers_reassignment_until_grace_met():
+    """With grace=2 a device seen orphaned on ONE sweep is not yet reassigned — it
+    must persist across consecutive sweeps, so a transient lapse self-heals (F-62)."""
+    r = _shared_redis()
+    backend = await _orphaned_backend()
+    worker = _worker_grace(r, grace=2)
+    worker._backend = backend
+
+    await worker._reconcile_once()  # sweep 1: missed once (1/2) — defer
+    assert backend.assignments == []  # NOT reassigned yet
+    cfg = await backend.get_device("dev1")
+    assert cfg.pod_active is True  # ownership untouched while we wait
+
+    await worker._reconcile_once()  # sweep 2: missed twice (2/2) — reassign
+    assert ("assign", "dev1") in backend.assignments
+    cfg = await backend.get_device("dev1")
+    assert cfg.pod_active is False and cfg.worker_id is None
+
+
+@pytest.mark.asyncio
+async def test_hysteresis_resets_when_claim_reappears():
+    """A transient lapse must not accumulate: if the owner refreshes its claim
+    between sweeps, the orphan streak resets and no reassignment happens (F-62)."""
+    r = _shared_redis()
+    backend = await _orphaned_backend()
+    worker = _worker_grace(r, grace=2)
+    worker._backend = backend
+
+    await worker._reconcile_once()  # sweep 1: 1/2 missed
+    assert backend.assignments == []
+
+    await r.set("claim:dev1", "owner-recovered", ex=60)  # owner came back (e.g. after a GC pause)
+    await worker._reconcile_once()  # sweep 2: live claim → streak cleared
+    assert backend.assignments == []
+    assert worker._orphan_miss_counts.get("dev1") is None  # streak forgotten
+
+    await r.delete("claim:dev1")  # lapses again later
+    await worker._reconcile_once()  # counts as the FIRST miss again, not the second
+    assert backend.assignments == []  # still deferred — flap did not trigger a reassign
+
+
+@pytest.mark.asyncio
+async def test_reassignment_increments_churn_metric():
+    """Each reassignment bumps the churn counter so flapping is alertable (F-62)."""
+    from device_mcp_gateway import metrics
+
+    r = _shared_redis()
+    backend = await _orphaned_backend()
+    worker = _worker_grace(r, grace=1)  # reassign immediately
+    worker._backend = backend
+
+    before = metrics.reconciler_reassignments_total._value.get()
+    await worker._reconcile_once()
+    assert ("assign", "dev1") in backend.assignments
+    assert metrics.reconciler_reassignments_total._value.get() == before + 1
+
+
+@pytest.mark.asyncio
+async def test_orphan_counts_pruned_for_vanished_devices():
+    """A device that disappears mid-streak (deregistered) drops out of the miss map
+    so it can't grow without bound."""
+    r = _shared_redis()
+
+    hostnames = ["dev1"]
+
+    class _ShrinkingBackend(_RecordingBackend):
+        async def list_hostnames(self):
+            return list(hostnames)
+
+    backend = _ShrinkingBackend()
+    await backend.set_device(
+        "dev1", DeviceConfig(hostname="dev1", base_url="http://dev1", pod_active=True, worker_id="dead")
+    )
+    worker = _worker_grace(r, grace=3)
+    worker._backend = backend
+
+    await worker._reconcile_once()  # 1/3 — recorded
+    assert worker._orphan_miss_counts.get("dev1") == 1
+
+    hostnames.clear()  # device deregistered
+    await worker._reconcile_once()
+    assert "dev1" not in worker._orphan_miss_counts  # pruned, not leaked
 
 
 # --- XAUTOCLAIM recovery of stranded calls ----------------------------------

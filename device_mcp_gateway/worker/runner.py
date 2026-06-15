@@ -26,7 +26,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import signal
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
@@ -147,6 +149,19 @@ class DeviceWorker:
         self._result_marker_ttl = max(config.get("registry", {}).get("tool_call_timeout", 30) * 2, 60)
         # How often the (leader-elected) reconciler sweeps for orphaned devices (SRE #1/#2).
         self._reconcile_interval = config.get("registry", {}).get("reconcile_interval", 30)
+        # Lease-flap hysteresis (F-62). A claim:{h} lease lapse is treated as the
+        # owner's death — but a GC pause / Redis stall / network blip longer than the
+        # claim TTL can lapse a *healthy* worker's claim, getting it declared dead and
+        # its devices reassigned (transient double-pod churn). Require the device to be
+        # seen orphaned across this many CONSECUTIVE leader sweeps before reassigning,
+        # so a single transient lapse self-heals (the owner refreshes the claim on its
+        # next heartbeat) without triggering a reassignment. ~grace × reconcile_interval
+        # of additional margin on top of the claim TTL. 0/1 disables the hysteresis.
+        self._orphan_grace_cycles = max(int(config.get("registry", {}).get("reconcile_orphan_grace_cycles", 2)), 1)
+        # Per-device count of consecutive leader sweeps observed with no live claim.
+        # Leader-local: a new leader starts fresh (counts reset), which only adds
+        # safety — a just-elected leader won't reassign on its very first sweep.
+        self._orphan_miss_counts: dict[str, int] = {}
         # Periodic load rebalancing on scale-out (F-07): each worker sheds its excess
         # devices over the per-worker target so new/idle workers actually pick up load.
         self._rebalance_enabled = bool(config.get("registry", {}).get("rebalance_enabled", True))
@@ -193,6 +208,17 @@ class DeviceWorker:
         self._assignment_progress = time.monotonic()
         self._critical_tasks: list[asyncio.Task] = []
         self._liveness_staleness = max(config.get("registry", {}).get("health_check_interval", 30) * 2, 60)
+        # Local liveness file for a CHEAP K8s exec probe (F-17). The old probe spawned
+        # a Python interpreter + opened a Redis connection every period, per worker —
+        # heavyweight and itself a failure source under Redis stress. Instead the
+        # healthy heartbeat touches this file's mtime; the probe just checks the file
+        # is fresh (a shell `find -mmin`), no interpreter/Redis. When loops are
+        # unhealthy the heartbeat is withheld, the file goes stale, and the probe
+        # fails — same semantics as before, a fraction of the cost. Default lands in
+        # the system temp dir (avoids a hardcoded /tmp); override to match the probe.
+        self._liveness_file = config.get("registry", {}).get("liveness_file") or os.path.join(
+            tempfile.gettempdir(), "mcp-worker-alive"
+        )
         # _health is initialised in run() after the backend is available
         self._health: WorkerHealthLoop | None = None
 
@@ -298,6 +324,7 @@ class DeviceWorker:
                 await self._r.sadd("workers:active", self._id)
                 await self._r.set(key, str(time.time()), ex=ttl)
                 await self._refresh_claims()  # keep device-claim leases alive (RC-6)
+                self._touch_liveness_file()  # cheap local liveness signal for K8s (F-17)
             else:
                 # Withhold the heartbeat AND the claim refresh so K8s liveness fails
                 # (pod restarts) and, meanwhile, the leases lapse so the reconciler
@@ -317,6 +344,21 @@ class DeviceWorker:
             logger.error("Assignment consumer has not progressed; worker appears stalled")
             return False
         return True
+
+    def _touch_liveness_file(self) -> None:
+        """Bump the local liveness file's mtime so a cheap exec probe sees freshness.
+
+        Only called on a healthy heartbeat, so withholding the heartbeat (unhealthy
+        loops) also lets the file go stale → the probe fails → K8s restarts the pod
+        (F-17). A filesystem hiccup here must never crash the heartbeat loop, so any
+        error is logged and swallowed — the Redis heartbeat key remains the
+        authoritative liveness signal for the reconciler regardless.
+        """
+        try:
+            with open(self._liveness_file, "w") as fh:
+                fh.write(str(time.time()))
+        except OSError as exc:
+            logger.warning(f"Could not update liveness file {self._liveness_file}: {exc}")
 
     # ------------------------------------------------------------------
     # Reconciler (leader-elected) — SRE #1/#2
@@ -379,16 +421,35 @@ class DeviceWorker:
         reassigned = 0
         for hostname in hostnames:
             if await self._r.get(f"claim:{hostname}") is not None:
-                continue  # a live worker holds the claim
+                # A live worker holds the claim — clear any orphan streak so a past
+                # transient lapse doesn't count toward a future reassignment (F-62).
+                self._orphan_miss_counts.pop(hostname, None)
+                continue
+            # No live claim. Apply hysteresis: only reassign once the device has been
+            # seen orphaned across enough consecutive sweeps that a transient lapse
+            # (GC pause / Redis stall under the grace window) has been ruled out (F-62).
+            misses = self._orphan_miss_counts.get(hostname, 0) + 1
+            self._orphan_miss_counts[hostname] = misses
+            if misses < self._orphan_grace_cycles:
+                logger.info(
+                    f"Device {hostname} has no live claim (sweep {misses}/{self._orphan_grace_cycles}); "
+                    "deferring reassignment in case the lapse is transient (F-62)"
+                )
+                continue
             cfg = await self._backend.get_device(hostname)
             if cfg is None:
+                self._orphan_miss_counts.pop(hostname, None)
                 continue  # raced with deregistration
             if cfg.pod_active or cfg.worker_id:
                 # Ownership left stale by a dead worker — make Redis reflect reality.
                 await self._backend.update_device_fields(hostname, pod_active=False, worker_id=None)
             await self._backend.publish_assignment("assign", hostname)
+            metrics.reconciler_reassignments_total.inc()  # churn signal — alert on rate (F-62)
+            self._orphan_miss_counts.pop(hostname, None)  # streak consumed; start fresh
             reassigned += 1
-            logger.info(f"Reconciler reassigned orphaned device {hostname}")
+            logger.info(f"Reconciler reassigned orphaned device {hostname} after {misses} missed sweep(s)")
+        # Drop streaks for devices that no longer exist so the map can't grow unbounded.
+        self._orphan_miss_counts = {h: n for h, n in self._orphan_miss_counts.items() if h in hostnames}
         if reassigned:
             logger.info(f"Reconciler reassigned {reassigned} orphaned device(s) this cycle")
         await self._prune_dead_workers()

@@ -175,3 +175,59 @@ async def test_gauge_leadership_failover_after_expiry():
     assert await _acquire_gauge_leadership(r, "replica-A", ttl=30) is True
     await r.delete("gateway:gauge-leader")  # simulate A dying → lock lapses
     assert await _acquire_gauge_leadership(r, "replica-B", ttl=30) is True
+
+
+# --- gauge_leader gauge export (F-21 — election alert) -----------------------
+
+
+def _gauge_refresh_app(redis):
+    from types import SimpleNamespace
+
+    class _Reg:
+        async def list_devices(self):
+            return []
+
+    return SimpleNamespace(state=SimpleNamespace(redis=redis, registry=_Reg()))
+
+
+@pytest.mark.asyncio
+async def test_refresh_exports_gauge_leader_when_leading(monkeypatch):
+    """The replica that wins the lock exports mcp_gateway_gauge_leader=1 so a
+    'no leader' alert can fire when the sum across replicas drops to 0 (F-21)."""
+    from device_mcp_gateway.main import _refresh_device_gauges
+
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    app = _gauge_refresh_app(r)
+    metrics.gauge_leader.set(0)
+
+    task = asyncio.create_task(_refresh_device_gauges(app, interval=60))
+    for _ in range(50):
+        await asyncio.sleep(0.005)
+        if metrics.gauge_leader._value.get() == 1:
+            break
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert metrics.gauge_leader._value.get() == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_exports_zero_when_another_replica_leads(monkeypatch):
+    """A replica that loses the election exports 0 — so the fleet sum stays exactly
+    1 (the leader) and the absent-leader alert only fires when truly nobody leads."""
+    from device_mcp_gateway.main import _refresh_device_gauges
+
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    await r.set("gateway:gauge-leader", "another-replica", ex=60)  # someone else already leads
+    app = _gauge_refresh_app(r)
+    metrics.gauge_leader.set(1)  # stale value from when we were leader
+
+    task = asyncio.create_task(_refresh_device_gauges(app, interval=60))
+    for _ in range(50):
+        await asyncio.sleep(0.005)
+        if metrics.gauge_leader._value.get() == 0:
+            break
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert metrics.gauge_leader._value.get() == 0

@@ -140,6 +140,28 @@ spec:
           annotations:
             summary: "No reconciler leader elected"
             description: "No worker holds the reconciler lease for >5m; orphaned devices (dead-worker claims) won't be reassigned."
+        - alert: MCPGaugeLeaderAbsent
+          # No gateway replica holds the device-gauge-refresh lock ⇒ the fleet
+          # gauges (registered/active/reachable devices) stop updating (F-21). The
+          # series is emitted only in distributed mode, so this is silent in embedded.
+          expr: sum(mcp_gateway_gauge_leader) == 0
+          for: 5m
+          labels:
+            severity: ticket
+          annotations:
+            summary: "No gateway gauge-refresh leader elected"
+            description: "No gateway replica holds the gauge-refresh lock for >5m; device-fleet gauges are stale (coordination SPOF, F-21). Check the gateway replicas' Redis connectivity."
+        - alert: MCPReconcilerReassignmentChurn
+          # Reassignments should fire ~once per real worker death. A sustained rate
+          # means claim leases are FLAPPING — healthy workers declared dead under GC
+          # pauses / Redis latency, causing transient double-pod churn (F-62).
+          expr: sum(rate(mcp_reconciler_reassignments_total[15m])) > 0.05
+          for: 15m
+          labels:
+            severity: ticket
+          annotations:
+            summary: "Reconciler reassignment churn (lease flapping)"
+            description: "Devices are being reassigned at {{ $value }}/s sustained over 15m — well above the once-per-worker-death baseline. Likely claim-lease flap (F-62): raise registry.claim_ttl / reconcile_orphan_grace_cycles, or investigate GC pauses / Redis latency."
         - alert: MCPDeadLetterGrowing
           expr: sum(rate(mcp_dead_letter_total[5m])) > 0
           for: 5m
