@@ -134,7 +134,7 @@ def test_messages_endpoint_sheds_when_backlog_over_watermark(monkeypatch):
 
     with TestClient(app) as client:
         resp = client.post(
-            "/devices/devx/messages?session_id=s1",
+            "/v1/devices/devx/messages?session_id=s1",
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
         )
     assert resp.status_code == 429
@@ -148,7 +148,7 @@ def test_messages_endpoint_accepts_when_backlog_under_watermark(monkeypatch):
     # No "id" => no timeout watcher task is spawned, keeping the test self-contained.
     with TestClient(app) as client:
         resp = client.post(
-            "/devices/devy/messages?session_id=s1",
+            "/v1/devices/devy/messages?session_id=s1",
             json={"jsonrpc": "2.0", "method": "tools/call"},
         )
     assert resp.status_code == 200

@@ -30,7 +30,7 @@ from fastapi.responses import JSONResponse, Response
 from loguru import logger
 from sse_starlette import EventSourceResponse
 
-from device_mcp_gateway import __version__
+from device_mcp_gateway import API_V1_PREFIX, __version__
 from device_mcp_gateway.cfg import load_config, resolve_mode, warn_unsafe_settings
 from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_log, audit_request
 from device_mcp_gateway.core.backoff import jittered
@@ -936,7 +936,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             # Distributed: server-assigned session ID; route results via Redis pub/sub
             session_router = request.app.state.session_router
             effective_id = str(uuid.uuid4())
-            endpoint_url = f"/devices/{hostname}/messages?session_id={effective_id}"
+            endpoint_url = f"{API_V1_PREFIX}/devices/{hostname}/messages?session_id={effective_id}"
             await session_router.register(effective_id, hostname, _GATEWAY_ID, owner=_owner_subject)
 
             async def event_generator():
@@ -963,7 +963,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             # Always server-assigned — ignore client-supplied session_id/client_id
             # to prevent session hijacking (S2).
             effective_id = str(uuid.uuid4())
-            endpoint_url = f"/devices/{hostname}/messages?session_id={effective_id}"
+            endpoint_url = f"{API_V1_PREFIX}/devices/{hostname}/messages?session_id={effective_id}"
             transport = profile.pod._ensure_sse_transport()
             transport.register_client(effective_id, endpoint_url)
             request.app.state.session_owners[effective_id] = _owner_subject  # F-37
@@ -1192,7 +1192,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             headers={"ETag": etag, "Cache-Control": f"max-age={int(_read_cache_ttl)}"},
         )
 
-    _app.include_router(protected)
+    # Version the entire management API under /v1 (e.g. /v1/devices). Probes
+    # (/health, /readyz) and the Prometheus scrape endpoint stay unversioned.
+    _app.include_router(protected, prefix=API_V1_PREFIX)
     return _app
 
 

@@ -97,7 +97,7 @@ def _device(**over):
 def test_diagnostics_404_for_unknown_device(monkeypatch):
     app = _app("embedded", _StubRegistry(device=None), monkeypatch)
     with TestClient(app) as client:
-        assert client.get("/devices/nope/diagnostics").status_code == 404
+        assert client.get("/v1/devices/nope/diagnostics").status_code == 404
 
 
 def test_diagnostics_embedded_with_active_pod_reports_breaker(monkeypatch):
@@ -106,7 +106,7 @@ def test_diagnostics_embedded_with_active_pod_reports_breaker(monkeypatch):
     reg = _StubRegistry(device, manifest=manifest, profile=_StubProfile(_pod(), pod_active=True))
     app = _app("embedded", reg, monkeypatch)
     with TestClient(app) as client:
-        body = client.get("/devices/dev/diagnostics").json()
+        body = client.get("/v1/devices/dev/diagnostics").json()
     assert body["hostname"] == "dev"
     assert body["mode"] == "embedded"
     assert body["spec_hash"] == "abc123"
@@ -121,7 +121,7 @@ def test_diagnostics_embedded_without_pod_marks_breaker_unavailable(monkeypatch)
     reg = _StubRegistry(device, manifest=None, profile=None)
     app = _app("embedded", reg, monkeypatch)
     with TestClient(app) as client:
-        body = client.get("/devices/dev/diagnostics").json()
+        body = client.get("/v1/devices/dev/diagnostics").json()
     assert body["spawn_error"] == "spec fetch failed"
     assert body["has_manifest"] is False
     assert body["tool_count"] == 0
@@ -134,7 +134,7 @@ def test_diagnostics_distributed_breaker_unavailable_with_note(monkeypatch):
     reg = _StubRegistry(device, manifest={"tools": []}, profile=None)
     app = _app("distributed", reg, monkeypatch)
     with TestClient(app) as client:
-        body = client.get("/devices/dev/diagnostics").json()
+        body = client.get("/v1/devices/dev/diagnostics").json()
     assert body["mode"] == "distributed"
     assert body["worker_id"] == "worker-7"
     assert body["breaker"]["available"] is False

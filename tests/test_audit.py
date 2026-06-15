@@ -91,7 +91,7 @@ def test_audit_request_pulls_subject_and_rid(audit_log):
 # --- F-55 auth-failure auditing (centralized at the rbac seam) ---------------
 
 
-def _fake_request(authenticator=None, principal=None, request_id="rid-1", method="POST", path="/devices"):
+def _fake_request(authenticator=None, principal=None, request_id="rid-1", method="POST", path="/v1/devices"):
     state = SimpleNamespace(request_id=request_id)
     if principal is not None:
         state.principal = principal
@@ -115,14 +115,14 @@ async def test_401_is_audited(audit_log):
     assert e["action"] == "auth.authenticate"
     assert e["outcome"] == "denied"
     assert e["subject"] == "unauthenticated"
-    assert e["target"] == "POST /devices"
+    assert e["target"] == "POST /v1/devices"
     assert e["rid"] == "rid-1"
 
 
 @pytest.mark.asyncio
 async def test_403_is_audited_with_actor_and_scope(audit_log):
     dep = require_scope(SCOPE_DEVICES_WRITE)
-    req = _fake_request(principal=_p("viewer"), method="DELETE", path="/devices/x")
+    req = _fake_request(principal=_p("viewer"), method="DELETE", path="/v1/devices/x")
     with pytest.raises(HTTPException) as exc:
         await dep(req)
     assert exc.value.status_code == 403
@@ -131,7 +131,7 @@ async def test_403_is_audited_with_actor_and_scope(audit_log):
     assert e["outcome"] == "denied"
     assert e["subject"] == "key:viewer"
     assert e["reason"] == f"missing_scope:{SCOPE_DEVICES_WRITE}"
-    assert e["target"] == "DELETE /devices/x"
+    assert e["target"] == "DELETE /v1/devices/x"
 
 
 @pytest.mark.asyncio

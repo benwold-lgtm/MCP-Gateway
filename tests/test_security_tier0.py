@@ -76,7 +76,7 @@ def test_register_route_rejects_ssrf(tmp_path, monkeypatch):
     app = create_app(override_config=cfg)
     client = TestClient(app)
     resp = client.post(
-        "/devices",
+        "/v1/devices",
         json={"hostname": "evil", "base_url": "http://169.254.169.254/", "auth_type": "none"},
     )
     assert resp.status_code == 400

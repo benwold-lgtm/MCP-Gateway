@@ -42,7 +42,7 @@ def _body_app(max_bytes, tmp_path):
 def test_declared_content_length_over_limit_rejected(tmp_path):
     client = _body_app(1024, tmp_path)
     # httpx sets Content-Length for a JSON body → the up-front header check rejects it.
-    resp = client.post("/devices", json={"hostname": "x", "base_url": "http://192.0.2.1", "blob": "A" * 4000})
+    resp = client.post("/v1/devices", json={"hostname": "x", "base_url": "http://192.0.2.1", "blob": "A" * 4000})
     assert resp.status_code == 413
 
 
@@ -53,13 +53,13 @@ def test_chunked_body_over_limit_rejected(tmp_path):
         for _ in range(8):
             yield b"A" * 512  # 4096 bytes total, sent chunked (no Content-Length)
 
-    resp = client.post("/devices", content=gen())
+    resp = client.post("/v1/devices", content=gen())
     assert resp.status_code == 413  # caught by the streaming byte counter, not a header check
 
 
 def test_small_body_under_limit_passes(tmp_path):
     client = _body_app(1_048_576, tmp_path)
-    resp = client.post("/devices", json={"hostname": "ok", "base_url": "http://192.0.2.1", "auth_type": "none"})
+    resp = client.post("/v1/devices", json={"hostname": "ok", "base_url": "http://192.0.2.1", "auth_type": "none"})
     assert resp.status_code != 413  # registered (200) — body cap not triggered
 
 
@@ -161,7 +161,7 @@ def test_messages_rejected_for_foreign_session(monkeypatch):
     app.state.session_owners["sess-1"] = "key:someone-else"  # opened by another principal
     with TestClient(app) as client:
         resp = client.post(
-            "/devices/dev/messages?session_id=sess-1",
+            "/v1/devices/dev/messages?session_id=sess-1",
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
         )
     assert resp.status_code == 403
@@ -173,7 +173,7 @@ def test_messages_not_rejected_for_own_session(monkeypatch):
     app.state.session_owners["sess-2"] = "anonymous"  # matches the ANONYMOUS caller
     with TestClient(app) as client:
         resp = client.post(
-            "/devices/dev/messages?session_id=sess-2",
+            "/v1/devices/dev/messages?session_id=sess-2",
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
         )
     assert resp.status_code != 403  # owner gate passed (downstream dispatch may differ)

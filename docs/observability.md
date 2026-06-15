@@ -18,7 +18,7 @@ Metrics are exposed in Prometheus text format on a **dedicated metrics port**
 port (`8000`). This lets a `ServiceMonitor`/scrape config target a named `metrics` port
 and lets a NetworkPolicy restrict who can scrape it, without opening an unauthenticated
 hole in the API surface. The API port keeps a separate, **auth-protected** JSON summary
-at `GET /metrics/summary`.
+at `GET /v1/metrics/summary`.
 
 | Setting | Default | Override |
 |---------|---------|----------|
@@ -50,7 +50,7 @@ process-global registry needs no multiprocess mode.
 
 | Metric | Type | Labels | Emitted by | Description |
 |--------|------|--------|------------|-------------|
-| `mcp_http_requests_total` | counter | `method`, `route`, `status` | gateway | HTTP requests, labelled with the **route template** (`/devices/{hostname}`), never the concrete path. Unmatched paths collapse to `route="__unmatched__"`. |
+| `mcp_http_requests_total` | counter | `method`, `route`, `status` | gateway | HTTP requests, labelled with the **route template** (`/v1/devices/{hostname}`), never the concrete path. Unmatched paths collapse to `route="__unmatched__"`. |
 | `mcp_http_request_duration_seconds` | histogram | `method`, `route` | gateway | HTTP request latency. |
 | `mcp_tool_calls_total` | counter | `hostname`, `method`, `status` | gateway (embedded) + worker (distributed) | MCP tool calls executed. `status` ∈ `ok`/`error`/`noresult` (`noresult` = a notification with no JSON-RPC response). |
 | `mcp_tool_call_duration_seconds` | histogram | `hostname` | gateway (embedded) + worker | Tool-call execution latency. |
@@ -227,15 +227,15 @@ When `MCPDeadLetterGrowing` fires, the device's undeliverable calls are in
 
 ```bash
 # Inspect — newest first (id, reason, ts, method, rid, request_id, session_id)
-curl -H "Authorization: Bearer $KEY" .../devices/$H/deadletter
+curl -H "Authorization: Bearer $KEY" .../v1/devices/$H/deadletter
 
 # Replay — re-publish onto the live call stream and remove from the DLQ.
 # Most DLQ entries are "no active pod" from a pod-replace window; once a pod is
 # back, replaying re-runs them. Add {"ids":[...]} to replay specific entries.
-curl -X POST -H "Authorization: Bearer $KEY" .../devices/$H/deadletter/replay
+curl -X POST -H "Authorization: Bearer $KEY" .../v1/devices/$H/deadletter/replay
 
 # Drain — drop the whole queue (or {"ids":[...]} for specific entries)
-curl -X DELETE -H "Authorization: Bearer $KEY" .../devices/$H/deadletter
+curl -X DELETE -H "Authorization: Bearer $KEY" .../v1/devices/$H/deadletter
 ```
 
 Replay preserves the original `request_id`/`session_id`/`rid`/`traceparent`; a

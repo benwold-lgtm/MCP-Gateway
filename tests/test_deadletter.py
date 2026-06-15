@@ -141,16 +141,16 @@ def test_endpoint_list_and_replay_and_purge(monkeypatch):
     app = _distributed_app(b, monkeypatch)
 
     with TestClient(app) as client:
-        listed = client.get("/devices/dev/deadletter")
+        listed = client.get("/v1/devices/dev/deadletter")
         assert listed.status_code == 200
         body = listed.json()
         assert body["count"] == 3 and body["entries"][0]["method"] == "tools/call"
 
-        replay = client.post("/devices/dev/deadletter/replay")
+        replay = client.post("/v1/devices/dev/deadletter/replay")
         assert replay.status_code == 200 and replay.json()["replayed"] == 3
 
         # DLQ now empty; purge of an empty stream removes it.
-        purge = client.request("DELETE", "/devices/dev/deadletter")
+        purge = client.request("DELETE", "/v1/devices/dev/deadletter")
         assert purge.status_code == 200
 
 
@@ -160,4 +160,4 @@ def test_endpoint_400_in_embedded_mode(monkeypatch):
     app = _distributed_app(b, monkeypatch)
     app.state.mode = "embedded"
     with TestClient(app) as client:
-        assert client.get("/devices/dev/deadletter").status_code == 400
+        assert client.get("/v1/devices/dev/deadletter").status_code == 400

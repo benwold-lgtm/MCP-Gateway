@@ -158,18 +158,18 @@ def _use(monkeypatch, role, token="tok"):
 
 def test_viewer_can_read_but_not_mutate(monkeypatch):
     h = _use(monkeypatch, "viewer")
-    assert client.get("/devices", headers=h).status_code == 200
-    assert client.get("/metrics/summary", headers=h).status_code == 200
-    assert client.get("/admin/overview", headers=h).status_code == 200  # devices:read
+    assert client.get("/v1/devices", headers=h).status_code == 200
+    assert client.get("/v1/metrics/summary", headers=h).status_code == 200
+    assert client.get("/v1/admin/overview", headers=h).status_code == 200  # devices:read
     # Mutations and tool calls require scopes the viewer lacks → 403.
-    assert client.post("/devices", headers=h, json={"hostname": "x", "base_url": "http://x"}).status_code == 403
-    assert client.delete("/devices/x", headers=h).status_code == 403
-    assert client.get("/devices/x/sse", headers=h).status_code == 403
-    assert client.post("/devices/x/messages?session_id=s", headers=h, json={}).status_code == 403
+    assert client.post("/v1/devices", headers=h, json={"hostname": "x", "base_url": "http://x"}).status_code == 403
+    assert client.delete("/v1/devices/x", headers=h).status_code == 403
+    assert client.get("/v1/devices/x/sse", headers=h).status_code == 403
+    assert client.post("/v1/devices/x/messages?session_id=s", headers=h, json={}).status_code == 403
 
 
 def test_admin_passes_authz_on_mutations(monkeypatch):
     h = _use(monkeypatch, "admin")
-    assert client.get("/devices", headers=h).status_code == 200
+    assert client.get("/v1/devices", headers=h).status_code == 200
     # Admin clears authz; a bad body now yields a 400 (validation), not 403 (authz).
-    assert client.post("/devices", headers=h, json={"hostname": "x"}).status_code == 400
+    assert client.post("/v1/devices", headers=h, json={"hostname": "x"}).status_code == 400

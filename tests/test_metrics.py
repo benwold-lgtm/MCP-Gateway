@@ -4,7 +4,7 @@
 """F10 slice 1 — Prometheus metrics (gateway).
 
 Covers the dedicated-port exposition helpers, route-template (low-cardinality)
-labelling, the `/metrics/summary` rename, and the device-gauge refresher.
+labelling, the `/v1/metrics/summary` rename, and the device-gauge refresher.
 """
 
 import asyncio
@@ -78,9 +78,9 @@ def test_request_counter_increments_with_route_template():
 def test_parametrised_route_uses_template_not_concrete_path():
     # Hits GET /devices/{hostname}; the endpoint runs (returns 404 for an unknown
     # device), so the label must be the *template*, never the concrete hostname.
-    client.get("/devices/some-unknown-host-xyz")
+    client.get("/v1/devices/some-unknown-host-xyz")
     body = metrics.generate_latest().decode()
-    assert 'route="/devices/{hostname}"' in body
+    assert 'route="/v1/devices/{hostname}"' in body
     assert "some-unknown-host-xyz" not in body
 
 
@@ -105,8 +105,8 @@ def test_metrics_summary_requires_auth(monkeypatch):
 
     admin = Principal(subject="key:test", scopes=ALL_SCOPES, auth_method="api_key")
     monkeypatch.setattr(gw_main.app.state, "authenticator", Authenticator({"secret-key": admin}, enabled=True))
-    assert client.get("/metrics/summary").status_code == 401
-    resp = client.get("/metrics/summary", headers={"Authorization": "Bearer secret-key"})
+    assert client.get("/v1/metrics/summary").status_code == 401
+    resp = client.get("/v1/metrics/summary", headers={"Authorization": "Bearer secret-key"})
     assert resp.status_code == 200
     data = resp.json()
     assert "total_registered" in data

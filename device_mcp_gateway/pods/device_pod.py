@@ -41,6 +41,27 @@ from device_mcp_gateway.pods.sse_server import SseTransport
 from device_mcp_gateway.pods.rate_limiter import TokenBucket
 from device_mcp_gateway.core.translator import McpManifest, McpTool
 
+# MCP protocol versions this gateway speaks, newest first. The `initialize`
+# handshake echoes the client's requested version when we support it, otherwise
+# it falls back to our preferred (newest) version per the MCP spec. Keeping this
+# as data — rather than a hardcoded literal in the handler — means version
+# support is one edit, and negotiation is testable in isolation (F-15).
+SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-06-18", "2025-03-26", "2024-11-05")
+PREFERRED_PROTOCOL_VERSION: str = SUPPORTED_PROTOCOL_VERSIONS[0]
+
+
+def negotiate_protocol_version(requested: Any) -> str:
+    """Resolve the MCP protocolVersion to advertise in the initialize response.
+
+    Echoes the client's requested version when supported; otherwise returns our
+    preferred (newest) version, signalling the client to retry on that version.
+    A missing/invalid request also yields the preferred version.
+    """
+    if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS:
+        return requested
+    return PREFERRED_PROTOCOL_VERSION
+
+
 # Headers a tool argument must never be able to set on the upstream request (Tier-0 F-25).
 # Without this, an `in: header` parameter could overwrite the device's auth header or
 # smuggle routing/cache headers, since untrusted header params were merged over auth.
@@ -346,7 +367,7 @@ class DevicePod:
                 "jsonrpc": "2.0",
                 "id": msg_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": negotiate_protocol_version(params.get("protocolVersion")),
                     "capabilities": {
                         "tools": {"listChanged": False},
                         "resources": {"listChanged": False, "subscribe": False},

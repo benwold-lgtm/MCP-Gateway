@@ -21,7 +21,7 @@ def test_register_and_metrics(client, mock_target_url):
     """
     # 1. Register device pointing to our mock API
     reg_payload = {"hostname": "mock-iot.local", "base_url": mock_target_url, "auth_type": "none", "transport": "sse"}
-    reg_resp = client.post("/devices", json=reg_payload)
+    reg_resp = client.post("/v1/devices", json=reg_payload)
     assert reg_resp.status_code == 200, f"Registration failed: {reg_resp.json()}"
     reg_data = reg_resp.json()
     assert reg_data["hostname"] == "mock-iot.local"
@@ -31,7 +31,7 @@ def test_register_and_metrics(client, mock_target_url):
     print("[+] Device registered via /devices endpoint")
 
     # 2. Verify device appears in the list and is reachable
-    dev_resp = client.get("/devices")
+    dev_resp = client.get("/v1/devices")
     assert dev_resp.status_code == 200
     devices = dev_resp.json().get("devices", [])
     mock_dev = next((d for d in devices if d["hostname"] == "mock-iot.local"), None)
@@ -40,7 +40,7 @@ def test_register_and_metrics(client, mock_target_url):
     print(f"[+] Device status verified: {mock_dev}")
 
     # 3. Verify metrics endpoint returns correct counts
-    met_resp = client.get("/metrics/summary")
+    met_resp = client.get("/v1/metrics/summary")
     assert met_resp.status_code == 200
     metrics = met_resp.json()
     assert metrics.get("total_registered", 0) >= 1, f"Total registered mismatch: {metrics}"
@@ -57,12 +57,12 @@ def test_register_and_metrics(client, mock_target_url):
     print(f"[+] Health endpoint verified: {health}")
 
     # 5. Verify deregistration works
-    del_resp = client.delete("/devices/mock-iot.local")
+    del_resp = client.delete("/v1/devices/mock-iot.local")
     assert del_resp.status_code == 200, f"Deregistration failed: {del_resp.json()}"
     print("[+] Device deregistered successfully")
 
     # Verify it's gone
-    dev_resp2 = client.get("/devices")
+    dev_resp2 = client.get("/v1/devices")
     devices2 = dev_resp2.json().get("devices", [])
     remaining = [d for d in devices2 if d["hostname"] == "mock-iot.local"]
     assert len(remaining) == 0, "Device should be removed from list"
@@ -79,12 +79,12 @@ def test_sse_transport_client_flow(client, mock_target_url):
         "auth_type": "none",
         "transport": "sse",
     }
-    reg_resp = client.post("/devices", json=reg_payload)
+    reg_resp = client.post("/v1/devices", json=reg_payload)
     assert reg_resp.status_code == 200, f"Registration failed: {reg_resp.json()}"
 
     start = time.time()
     while time.time() - start < 5:
-        dev_resp = client.get("/devices")
+        dev_resp = client.get("/v1/devices")
         assert dev_resp.status_code == 200
         devices = dev_resp.json().get("devices", [])
         mock_dev = next((d for d in devices if d["hostname"] == hostname), None)
@@ -94,7 +94,7 @@ def test_sse_transport_client_flow(client, mock_target_url):
     else:
         raise AssertionError("SSE device pod did not become active")
 
-    with client.stream("GET", f"/devices/{hostname}/sse") as event_resp:
+    with client.stream("GET", f"/v1/devices/{hostname}/sse") as event_resp:
         assert event_resp.status_code == 200
 
         # Single-pass iterator: read endpoint event first (server-assigned session_id),
@@ -117,7 +117,7 @@ def test_sse_transport_client_flow(client, mock_target_url):
                 if event_name == "endpoint" and data_payload and "session_id=" in data_payload:
                     session_id = data_payload.split("session_id=")[-1]
                     send_resp = client.post(
-                        f"/devices/{hostname}/messages?session_id={session_id}",
+                        f"/v1/devices/{hostname}/messages?session_id={session_id}",
                         json={
                             "jsonrpc": "2.0",
                             "id": 1,
@@ -151,7 +151,7 @@ def test_sse_transport_client_flow(client, mock_target_url):
         tool_result = json.loads(content[0]["text"])
         assert tool_result["body"]["status"] == "online"
 
-    del_resp = client.delete(f"/devices/{hostname}")
+    del_resp = client.delete(f"/v1/devices/{hostname}")
     assert del_resp.status_code == 200
     print("[PASS] SSE transport client flow verified.")
 
@@ -212,7 +212,7 @@ def test_register_unreachable_device_reports_failure(client):
     reachable=False / pod_active=False once provisioning settles."""
     hostname = "unreachable-device.local"
     resp = client.post(
-        "/devices",
+        "/v1/devices",
         json={
             "hostname": hostname,
             "base_url": "http://192.0.2.1",  # TEST-NET, guaranteed unreachable
@@ -229,7 +229,7 @@ def test_register_unreachable_device_reports_failure(client):
     deadline = time.time() + 30
     final = data
     while time.time() < deadline:
-        final = client.get(f"/devices/{hostname}").json()
+        final = client.get(f"/v1/devices/{hostname}").json()
         if final["reachable"] is False:
             break
         time.sleep(0.5)
@@ -237,5 +237,5 @@ def test_register_unreachable_device_reports_failure(client):
     assert final["pod_active"] is False
 
     # Clean up
-    client.delete(f"/devices/{hostname}")
+    client.delete(f"/v1/devices/{hostname}")
     print("[PASS] Unreachable device registration feedback verified.")
