@@ -24,6 +24,7 @@ import httpx
 from loguru import logger
 
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
+from device_mcp_gateway.core.manifest_diff import record_tool_change
 from device_mcp_gateway.core.spec_limits import (
     DEFAULT_MAX_SPEC_BYTES,
     DEFAULT_TRANSLATE_TIMEOUT,
@@ -168,8 +169,17 @@ class WorkerHealthLoop:
                     logger.warning(f"Spec for {hostname} rejected on update: {exc} (F-09)")
                     return
                 manifest_dict = _manifest_to_dict(manifest_obj)
+                # Governance: diff the new tool set against the manifest currently
+                # in Redis and record what changed / whether it was breaking, then
+                # bump the client-pollable revision (F-41).
+                old_manifest = await self._backend.get_manifest(hostname)
+                old_tools = (old_manifest or {}).get("tools", [])
+                diff = record_tool_change(hostname, old_tools, manifest_dict.get("tools", []))
                 await self._backend.set_manifest(hostname, manifest_dict, ttl=self._spec_cache_ttl)
-                await self._backend.update_device_fields(hostname, spec_hash=new_hash)
+                fields: dict[str, Any] = {"spec_hash": new_hash}
+                if not diff.empty:
+                    fields["tools_revision"] = (cfg.tools_revision or 0) + 1
+                await self._backend.update_device_fields(hostname, **fields)
                 # Signal worker to replace the pod
                 if self.on_spec_changed:
                     await self.on_spec_changed(hostname)

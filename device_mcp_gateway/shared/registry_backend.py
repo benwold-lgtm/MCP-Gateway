@@ -47,6 +47,10 @@ class DeviceConfig:
     last_check: float = field(default_factory=time.time)
     spawn_error: str | None = None
     worker_id: str | None = None
+    # Monotonic counter bumped whenever a spec change mutated the generated tool
+    # set (F-41). A client polls this to detect "the tools moved under me" and
+    # re-list; the audit stream records what changed and whether it was breaking.
+    tools_revision: int = 0
 
     # --- serialisation helpers ---
 
@@ -79,6 +83,7 @@ class DeviceConfig:
             last_check=float(h.get("last_check", "0") or "0"),
             spawn_error=_opt_str(h.get("spawn_error", "")),
             worker_id=_opt_str(h.get("worker_id", "")),
+            tools_revision=int(h.get("tools_revision", "0") or "0"),
         )
 
 
