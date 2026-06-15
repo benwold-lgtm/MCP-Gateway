@@ -117,6 +117,31 @@ class McpManifest:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def manifest_to_dict(manifest: Any) -> dict:
+    """Convert an McpManifest to a JSON-safe plain dict for storage/transport.
+
+    Lives next to the dataclass it serialises so both the embedded (PodSupervisor)
+    and distributed (worker health loop) sides share one canonical form — and so the
+    Redis round-trip and the REST ``/tools`` response can't drift apart. ``RequestBodySpec
+    .binary_fields`` is a ``set`` that ``json.dumps`` can't encode, so sets are
+    normalised to sorted lists (the worker's ``_dict_to_manifest`` restores them).
+    """
+    import dataclasses
+
+    def _dc(obj: Any) -> Any:
+        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            return {k: _dc(v) for k, v in dataclasses.asdict(obj).items()}
+        if isinstance(obj, dict):
+            return {k: _dc(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_dc(i) for i in obj]
+        if isinstance(obj, set):
+            return sorted(obj)
+        return obj
+
+    return _dc(manifest)
+
+
 def _sanitize_name(raw: str) -> str:
     """Convert a path segment or operationId into a valid MCP tool name."""
     import re

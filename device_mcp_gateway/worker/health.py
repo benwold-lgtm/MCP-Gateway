@@ -32,6 +32,7 @@ from device_mcp_gateway.core.spec_limits import (
     fetched_spec_or_none,
     run_translation,
 )
+from device_mcp_gateway.core.translator import manifest_to_dict
 from device_mcp_gateway.security.url_policy import build_guarded_client
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 
@@ -242,27 +243,7 @@ class WorkerHealthLoop:
             await self._http.aclose()
 
 
-def _manifest_to_dict(manifest: Any) -> dict:
-    """Convert McpManifest to a JSON-safe plain dict for Redis storage.
-
-    ``dataclasses.asdict`` recurses dataclasses but leaves ``set`` values intact
-    (notably ``RequestBodySpec.binary_fields``), and ``json.dumps`` can't encode a
-    set — so ``set_manifest`` crashed for any device whose OpenAPI declared a
-    multipart/binary request body (an F-40 regression that broke distributed mode
-    end-to-end for those devices). Normalise sets to sorted lists here;
-    ``_dict_to_manifest`` restores them on the way back.
-    """
-    import dataclasses
-
-    def _dc(obj: Any) -> Any:
-        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-            return {k: _dc(v) for k, v in dataclasses.asdict(obj).items()}
-        if isinstance(obj, dict):
-            return {k: _dc(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [_dc(i) for i in obj]
-        if isinstance(obj, set):
-            return sorted(obj)
-        return obj
-
-    return _dc(manifest)
+# The manifest serialiser now lives next to McpManifest in core.translator so the
+# embedded (PodSupervisor) and distributed (this loop) sides share one canonical
+# form. Re-exported under the original name for the worker.runner import.
+_manifest_to_dict = manifest_to_dict

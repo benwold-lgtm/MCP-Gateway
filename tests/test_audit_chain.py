@@ -170,3 +170,68 @@ def test_rotation_boundary_anchor(tmp_path):
     # ...but a wrong anchor flags the boundary.
     ok2, detail2 = verify_audit_chain(str(rotated), start_prev="0" * 64, start_seq=2)
     assert not ok2
+
+
+# --- multi-replica (one shared sink, independent per-replica sub-chains) ------
+
+
+def _emit_as(path, instance, specs, monkeypatch):
+    """Emit ``specs`` as audit records tagged with replica ``instance`` (its own chain
+    seeded at genesis), returning the serialised lines."""
+    import device_mcp_gateway.audit as audit
+
+    monkeypatch.setattr(audit, "_INSTANCE_ID", instance)  # restored after the test
+    reset_audit_chain()  # a fresh replica starts its own sub-chain at genesis
+    sink_id = logger.add(
+        str(path), level="INFO", serialize=True, filter=lambda rec: rec["extra"].get("event") == "audit"
+    )
+    try:
+        for s in specs:
+            audit_event(**s)
+    finally:
+        logger.remove(sink_id)
+    return _lines(path)
+
+
+_A_SPECS = [
+    dict(action="device.create", subject="key:admin", outcome="success", rid="a0", target="d0"),
+    dict(action="device.update", subject="key:admin", outcome="success", rid="a1", target="d0"),
+]
+_B_SPECS = [
+    dict(action="device.create", subject="key:ops", outcome="success", rid="b0", target="d1"),
+    dict(action="authz.check", subject="key:ops", outcome="denied", rid="b1", reason="missing_scope"),
+]
+
+
+def _interleaved_shared_log(tmp_path, monkeypatch):
+    """Two replicas (A, B) each with their own genesis-seeded chain, interleaved
+    line-by-line into one shared sink — A0, B0, A1, B1."""
+    a = _emit_as(tmp_path / "a.log", "replica-A", _A_SPECS, monkeypatch)
+    b = _emit_as(tmp_path / "b.log", "replica-B", _B_SPECS, monkeypatch)
+    p = tmp_path / "shared.log"
+    p.write_text("\n".join([a[0], b[0], a[1], b[1]]) + "\n")
+    return p
+
+
+def test_multi_replica_interleaved_chains_verify(tmp_path, monkeypatch):
+    # Pre-fix this was a false positive: replica B's seq-0/genesis record landing mid
+    # file (after A's seq-1) tripped the single global chain as a "chain break".
+    p = _interleaved_shared_log(tmp_path, monkeypatch)
+    ok, detail = verify_audit_chain(str(p))
+    assert ok, detail
+    assert "verified 4" in detail
+
+
+def test_multi_replica_tamper_in_one_subchain_is_detected(tmp_path, monkeypatch):
+    # Per-replica verification must not weaken tamper detection: editing one replica's
+    # record still fails the chain.
+    p = _interleaved_shared_log(tmp_path, monkeypatch)
+    lines = _lines(p)
+    rec = json.loads(lines[2])  # A's second record (seq 1)
+    rec["record"]["extra"]["target"] = "evil"
+    lines[2] = json.dumps(rec)
+    p.write_text("\n".join(lines) + "\n")
+
+    ok, detail = verify_audit_chain(str(p))
+    assert not ok
+    assert "altered" in detail

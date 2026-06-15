@@ -150,6 +150,32 @@ async def test_pod_supervisor_spawn_and_kill():
 
 
 @pytest.mark.asyncio
+async def test_pod_supervisor_caches_manifest_for_rest_introspection():
+    # Embedded mode never cached the manifest on spawn, so GET /devices/{h}/tools
+    # always 409'd "no manifest cached" even though MCP tools/list served fine from
+    # the live pod (review bug #4). spawn must populate the backend manifest.
+    from device_mcp_gateway.core.backoff import RetryPolicy
+
+    backend = MemoryRegistryBackend()
+    profile = _profile()
+    sup = PodSupervisor(
+        backend=backend,
+        config={"max_concurrent_pods": 50},
+        tls_verify=True,
+        retry_policy=RetryPolicy(),
+        spec_service=_StubSpecService(_SPEC_V2),
+        profiles={profile.hostname: profile},
+    )
+
+    await sup.spawn(profile)
+
+    manifest = await backend.get_manifest(profile.hostname)
+    assert manifest is not None  # was None pre-fix → endpoint 409
+    # The cached dict matches the live pod's manifest the REST view describes.
+    assert [t["name"] for t in manifest["tools"]] == [t.name for t in profile.pod.manifest.tools]
+
+
+@pytest.mark.asyncio
 async def test_pod_supervisor_fetches_spec_when_missing():
     profile = _profile()  # no spec_data yet
     stub = _StubSpecService(_SPEC_V2)
