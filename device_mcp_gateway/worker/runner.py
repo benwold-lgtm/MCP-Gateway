@@ -59,6 +59,10 @@ from device_mcp_gateway.worker.health import WorkerHealthLoop, _manifest_to_dict
 
 _ASSIGNMENTS_STREAM = "device:assignments"
 _WORKER_GROUP = "workers"
+# Broadcast unassign stream — every worker tails it independently (XREAD from "$"),
+# so the worker that actually owns the pod tears it down; non-owners no-op. Kept in
+# sync with registry_backend._UNASSIGN_STREAM.
+_UNASSIGN_STREAM = "device:unassignments"
 _HEARTBEAT_INTERVAL = 10  # seconds
 # Leader lock: exactly one worker runs the reconciler sweep at a time (SRE #1/#2).
 _RECONCILER_LOCK = "reconciler:leader"
@@ -267,14 +271,24 @@ class DeviceWorker:
         assert self._health is not None  # set just above in run()
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
         assignments_task = asyncio.create_task(self._consume_assignments(), name="assignments")
+        unassign_task = asyncio.create_task(self._consume_unassignments(), name="unassignments")
         health_task = asyncio.create_task(self._health.run_forever(self._assigned), name="health")
         metrics_task = asyncio.create_task(self._metrics_loop(), name="metrics")
         reconcile_task = asyncio.create_task(self._reconcile_loop(), name="reconcile")
         rebalance_task = asyncio.create_task(self._rebalance_loop(), name="rebalance")
-        tasks = [heartbeat_task, assignments_task, health_task, metrics_task, reconcile_task, rebalance_task]
+        tasks = [
+            heartbeat_task,
+            assignments_task,
+            unassign_task,
+            health_task,
+            metrics_task,
+            reconcile_task,
+            rebalance_task,
+        ]
         # Loops whose unexpected exit means this worker can no longer do its job;
-        # the heartbeat is withheld if any has crashed (SRE #8).
-        self._critical_tasks = [assignments_task, health_task, reconcile_task]
+        # the heartbeat is withheld if any has crashed (SRE #8). The unassign tail is
+        # critical too: without it a teardown/PUT-replace would never reach the owner.
+        self._critical_tasks = [assignments_task, unassign_task, health_task, reconcile_task]
         try:
             await self._stop_event.wait()
         finally:
@@ -655,6 +669,37 @@ class DeviceWorker:
                 break
             except Exception:
                 logger.exception("Assignment consumer error; retrying in ~2 s")
+                await asyncio.sleep(jittered(2))  # F-61: de-sync reconnect storms
+
+    async def _consume_unassignments(self) -> None:
+        """Tail the broadcast unassign stream and tear down any pod we own.
+
+        Unlike assignments (shared competing-consumers group: one worker acts), an
+        unassign must reach the *owner* of the pod. We read with a plain XREAD from
+        "$" — no consumer group — so every live worker sees every unassign and the
+        owner's idempotent _kill_pod tears its pod down (non-owners return early).
+        Starting at "$" is correct: a freshly-started worker owns nothing, and it
+        recovers its own prior devices from worker:{id}:devices, not from this stream.
+        """
+        last_id = "$"
+        while not self._stop_event.is_set():
+            self._assignment_progress = time.monotonic()
+            try:
+                results = await self._r.xread({_UNASSIGN_STREAM: last_id}, count=10, block=2000)
+                if not results:
+                    continue
+                for _stream, messages in results:
+                    for msg_id, fields in messages:
+                        last_id = msg_id
+                        hostname = _decode_fields(fields).get("hostname", "")
+                        try:
+                            await self._kill_pod(hostname)  # idempotent: no-op unless we own it
+                        except Exception:
+                            logger.exception(f"Failed to process unassign for {hostname}")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Unassignment consumer error; retrying in ~2 s")
                 await asyncio.sleep(jittered(2))  # F-61: de-sync reconnect storms
 
     # ------------------------------------------------------------------
@@ -1174,6 +1219,25 @@ class DeviceWorker:
 # ---------------------------------------------------------------------------
 
 
+def _dict_to_body_spec(d: dict | None) -> Any:
+    """Rebuild a RequestBodySpec from its plain-dict form (Redis round-trip).
+
+    ``binary_fields`` was stored as a sorted list (sets aren't JSON-encodable);
+    restore it to a set so the adapter's ``k in spec.binary_fields`` membership
+    test behaves as it does in embedded mode (F-40).
+    """
+    if not d:
+        return None
+    from device_mcp_gateway.core.translator import JSON_CONTENT, RequestBodySpec
+
+    return RequestBodySpec(
+        content_type=d.get("content_type", JSON_CONTENT),
+        binary_fields=set(d.get("binary_fields") or []),
+        raw=bool(d.get("raw", False)),
+        raw_field=d.get("raw_field"),
+    )
+
+
 def _dict_to_manifest(d: dict) -> Any:
     """Reconstruct an McpManifest from a plain dict (Redis round-trip)."""
     from device_mcp_gateway.core.translator import McpManifest, McpPrompt, McpResource, McpTool
@@ -1191,6 +1255,11 @@ def _dict_to_manifest(d: dict) -> Any:
                 path=t.get("path", "/"),
                 tags=t.get("tags", []),
                 param_locations=t.get("param_locations", {}),
+                # Without these two the cache-hit spawn path (manifest already in
+                # Redis) rebuilt tools with no body encoding and no F-04 rename map,
+                # so POST/PUT/PATCH tool calls went out malformed in distributed mode.
+                request_body=_dict_to_body_spec(t.get("request_body")),
+                param_wire_names=t.get("param_wire_names", {}),
             )
             for t in d.get("tools", [])
         ],

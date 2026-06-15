@@ -782,13 +782,16 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         _check_target_url(spec_url, "spec_url")
 
         _AUTH_KEYS = {"auth_type", "auth", "api_key"}
+        auth: AbstractAuth | None = None
+        keep_auth = False
         if _AUTH_KEYS & data.keys():
             auth = _parse_auth(data)
         else:
-            # Reconstruct auth from stored config
-            from device_mcp_gateway.registry.server import _auth_from_record
-
-            auth = _auth_from_record({"auth_config": existing.auth_config, "auth_type": existing.auth_type})
+            # No auth field in the PUT body → preserve the stored credentials. We must
+            # NOT reconstruct them here: in distributed mode existing.auth_config is
+            # Fernet ciphertext, and parsing it as JSON failed and silently wiped the
+            # device's credentials. Let the registry carry the stored record verbatim.
+            keep_auth = True
         transport = data.get("transport") or existing.transport
         _validate_transport(transport)
         rate_limit_rps = _parse_rate_limit(data)
@@ -800,6 +803,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             auth=auth,
             transport=transport,
             rate_limit_rps=rate_limit_rps,
+            keep_auth=keep_auth,
         )
 
         audit_request(request, "device.update", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
