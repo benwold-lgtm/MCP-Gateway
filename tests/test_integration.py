@@ -24,10 +24,14 @@ def test_register_and_metrics(client, mock_target_url):
     reg_resp = client.post("/v1/devices", json=reg_payload)
     assert reg_resp.status_code == 200, f"Registration failed: {reg_resp.json()}"
     reg_data = reg_resp.json()
-    assert reg_data["hostname"] == "mock-iot.local"
-    assert "pod_active" in reg_data
-    assert "reachable" in reg_data
-    assert "spawn_error" in reg_data
+    # F-19: write returns the write envelope + the full resulting device.
+    assert reg_data["status"] == "registered"
+    assert "provisioning" in reg_data
+    device = reg_data["device"]
+    assert device["hostname"] == "mock-iot.local"
+    assert "pod_active" in device
+    assert "reachable" in device
+    assert "spawn_error" in device
     print("[+] Device registered via /devices endpoint")
 
     # 2. Verify device appears in the list and is reachable
@@ -222,8 +226,8 @@ def test_register_unreachable_device_reports_failure(client):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["hostname"] == hostname
-    assert data["pod_active"] is False
+    assert data["device"]["hostname"] == hostname
+    assert data["device"]["pod_active"] is False
     # A device whose probe outlives the inline budget returns still-provisioning;
     # poll GET /devices/{h} until the background provisioning settles reachability.
     deadline = time.time() + 30

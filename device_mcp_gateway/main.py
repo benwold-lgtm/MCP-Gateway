@@ -59,8 +59,11 @@ from device_mcp_gateway.rbac import (
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.schemas import (
     BreakerState,
+    DeviceDetail,
     DeviceDiagnostics,
     DeviceListResponse,
+    DeviceMutationResult,
+    DeviceSummary,
     OverviewResponse,
 )
 from device_mcp_gateway.security.url_policy import UrlPolicyError, validate_target_url
@@ -652,6 +655,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     @protected.post(
         "/devices",
+        response_model=DeviceMutationResult,
         dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE)), Depends(rate_limit("60/minute", "devices_post"))],
     )
     async def register_device(request: Request):
@@ -686,18 +690,19 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         )
 
         audit_request(request, "device.create", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
-        return {
-            "status": "registered",
-            "hostname": hostname,
-            "pod_active": device_cfg.pod_active,
-            "reachable": device_cfg.reachable,
-            "spawn_error": device_cfg.spawn_error,
-            # Async registration (F-11): True when the device was accepted but its
-            # pod is still being provisioned in the background — poll GET /devices/{h}.
-            "provisioning": reg.is_provisioning(hostname),
-        }
+        # Async registration (F-11): provisioning=True when the device was accepted
+        # but its pod is still spawning in the background — poll GET /devices/{h}.
+        return DeviceMutationResult(
+            status="registered",
+            provisioning=reg.is_provisioning(hostname),
+            device=DeviceDetail.from_config(device_cfg),
+        )
 
-    @protected.put("/devices/{hostname}", dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))])
+    @protected.put(
+        "/devices/{hostname}",
+        response_model=DeviceMutationResult,
+        dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))],
+    )
     async def update_device(hostname: str, request: Request):
         reg: Registry = request.app.state.registry
         existing = await reg.get_device(hostname)
@@ -733,14 +738,11 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         )
 
         audit_request(request, "device.update", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
-        return {
-            "status": "updated",
-            "hostname": hostname,
-            "pod_active": device_cfg.pod_active,
-            "reachable": device_cfg.reachable,
-            "spawn_error": device_cfg.spawn_error,
-            "provisioning": reg.is_provisioning(hostname),  # F-11 (see register_device)
-        }
+        return DeviceMutationResult(
+            status="updated",
+            provisioning=reg.is_provisioning(hostname),  # F-11 (see register_device)
+            device=DeviceDetail.from_config(device_cfg),
+        )
 
     @protected.get(
         "/devices",
@@ -750,38 +752,19 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     async def list_devices(request: Request):
         reg: Registry = request.app.state.registry
         devices = await reg.list_devices()
-        return {
-            "devices": [
-                {
-                    "hostname": d.hostname,
-                    "base_url": d.base_url,
-                    "reachable": d.reachable,
-                    "pod_active": d.pod_active,
-                    "last_check": d.last_check,
-                    "transport": d.transport,
-                    "rate_limit_rps": d.rate_limit_rps,
-                }
-                for d in devices
-            ]
-        }
+        return DeviceListResponse(devices=[DeviceSummary.from_config(d) for d in devices])
 
-    @protected.get("/devices/{hostname}", dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))])
+    @protected.get(
+        "/devices/{hostname}",
+        response_model=DeviceDetail,
+        dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))],
+    )
     async def get_device(hostname: str, request: Request):
         reg: Registry = request.app.state.registry
         device = await reg.get_device(hostname)
         if not device:
             raise HTTPException(status_code=404, detail=f"Device '{hostname}' not found")
-        return {
-            "hostname": device.hostname,
-            "base_url": device.base_url,
-            "spec_url": device.spec_url,
-            "reachable": device.reachable,
-            "pod_active": device.pod_active,
-            "last_check": device.last_check,
-            "transport": device.transport,
-            "rate_limit_rps": device.rate_limit_rps,
-            "spawn_error": device.spawn_error,
-        }
+        return DeviceDetail.from_config(device)
 
     @protected.get("/devices/{hostname}/tools", dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))])
     async def get_device_tools(hostname: str, request: Request):
@@ -1168,18 +1151,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                     "reachable": reachable_count,
                     "unreachable": len(devices) - reachable_count,
                 },
-                "devices": [
-                    {
-                        "hostname": d.hostname,
-                        "base_url": d.base_url,
-                        "transport": d.transport,
-                        "reachable": d.reachable,
-                        "pod_active": d.pod_active,
-                        "last_check": d.last_check,
-                        "rate_limit_rps": d.rate_limit_rps,
-                    }
-                    for d in devices
-                ],
+                "devices": [DeviceSummary.from_config(d).model_dump() for d in devices],
             }
             etag = '"' + hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()[:16] + '"'
             cache.update(ts=now, etag=etag, body=body)

@@ -10,10 +10,17 @@ clients from /openapi.json instead of hand-maintaining mirror types.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from device_mcp_gateway.shared.registry_backend import DeviceConfig
 
 
 class DeviceSummary(BaseModel):
+    """Lean device projection for list/overview screens."""
+
     hostname: str
     base_url: str
     transport: str
@@ -22,9 +29,61 @@ class DeviceSummary(BaseModel):
     last_check: float | None = None
     rate_limit_rps: float | None = None
 
+    @classmethod
+    def from_config(cls, cfg: DeviceConfig) -> DeviceSummary:
+        """Project a registry ``DeviceConfig`` to the summary shape — the single
+        place this mapping lives, so adding a field is a one-line change here
+        rather than an edit at every read endpoint (F-19)."""
+        return cls(
+            hostname=cfg.hostname,
+            base_url=cfg.base_url,
+            transport=cfg.transport,
+            reachable=cfg.reachable,
+            pod_active=cfg.pod_active,
+            last_check=cfg.last_check or None,
+            rate_limit_rps=cfg.rate_limit_rps,
+        )
+
+
+class DeviceDetail(DeviceSummary):
+    """Full device projection for the single-device read — a superset of
+    :class:`DeviceSummary` adding the fields a detail/diagnostic view needs."""
+
+    spec_url: str | None = None
+    spec_hash: str | None = None
+    auth_type: str | None = None
+    spawn_error: str | None = None
+    worker_id: str | None = None
+
+    @classmethod
+    def from_config(cls, cfg: DeviceConfig) -> DeviceDetail:
+        return cls(
+            hostname=cfg.hostname,
+            base_url=cfg.base_url,
+            transport=cfg.transport,
+            reachable=cfg.reachable,
+            pod_active=cfg.pod_active,
+            last_check=cfg.last_check or None,
+            rate_limit_rps=cfg.rate_limit_rps,
+            spec_url=cfg.spec_url,
+            spec_hash=cfg.spec_hash,
+            auth_type=cfg.auth_type,
+            spawn_error=cfg.spawn_error,
+            worker_id=cfg.worker_id,
+        )
+
 
 class DeviceListResponse(BaseModel):
     devices: list[DeviceSummary]
+
+
+class DeviceMutationResult(BaseModel):
+    """Response for a register/update write: the write-time envelope plus the full
+    resulting device, so a client gets the resource back without a follow-up GET."""
+
+    status: str  # "registered" | "updated"
+    provisioning: bool  # F-11: pod still spawning in the background when True
+    device: DeviceDetail
 
 
 class OverviewCounts(BaseModel):
