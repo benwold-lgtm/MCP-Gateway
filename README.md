@@ -340,6 +340,10 @@ Pass it as an environment variable — never store it in `config.yaml` or the Ku
 export MCP_SECRET_KEY=<your-fernet-key>
 ```
 
+### Multitenancy
+
+The gateway is **single-tenant per stack**: it has no in-application tenant isolation. The device namespace is flat (keyed by `hostname`), RBAC scopes are global within a deployment, and co-located DevicePods share decrypted credentials in one worker process. Isolate tenants by running a **separate stack per tenant** — each with its own Redis, `MCP_SECRET_KEY`, and API keys. **Do not co-host tenants in one deployment.** See [docs/multitenancy.md](docs/multitenancy.md) for the deployment model and rules.
+
 ### Rate limiting
 
 The gateway enforces per-IP rate limits using `slowapi`. Limits are applied per gateway instance (not distributed across replicas — a Redis-backed store is recommended for multi-replica deployments). Requests that exceed the limit receive `HTTP 429`.
