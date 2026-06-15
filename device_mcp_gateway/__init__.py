@@ -5,7 +5,7 @@
 Device MCP Gateway - Universal API-to-MCP Translation Layer
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # External REST API version. All device-management endpoints are served under
 # this prefix (e.g. /v1/devices). Operational probes (/health, /readyz) and the

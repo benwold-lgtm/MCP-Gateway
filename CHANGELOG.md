@@ -8,6 +8,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the project is `0.x`, **minor releases may include breaking changes** — read
 the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.md).
 
+## [0.1.1] - 2026-06-15
+
+A security and correctness patch. A third-party re-review of v0.1.0 found six issues that
+the inaugural release's verification missed — the smoke test exercised only the embedded,
+no-request-body path, which was structurally blind to every one of them. All six are fixed
+here. v0.1.0 remains published; this is the first release with no known correctness
+regressions in either mode.
+
+### Security
+
+- **SSRF egress policy now covers redirects and every fetch path** (F-02 hardening). Spec
+  discovery / fetch followed HTTP redirects without re-validating the target, and workers
+  never consulted the policy at all — so a redirect or DNS-rebind to a private / loopback /
+  cloud-metadata address bypassed the front-door check. Outbound spec fetches now go through
+  an SSRF-guarded transport that validates **every hop**, and device tool-call dispatch no
+  longer follows cross-origin redirects (also closing an API-key/credential-leak vector).
+  `security.mtls.verify: false` now emits a startup warning. (Residual, documented: full
+  DNS-rebind / TOCTOU IP-pinning is not closed — the deterministic vectors are.)
+- **OAuth2 `token_endpoint` is validated against the egress policy.** A device registered
+  with an attacker-chosen `token_endpoint` could exfiltrate its client secret to an internal
+  or metadata address; it is now policy-checked like `base_url` / `spec_url`.
+
+### Fixed
+
+- **Distributed: manifest caching crashed for any device with a request body.**
+  `RequestBodySpec.binary_fields` (a set) wasn't JSON-encodable, so caching the manifest
+  raised and the device was unusable in distributed mode. The Redis round-trip also silently
+  dropped request-body and parameter-rename metadata. Both now round-trip losslessly.
+- **Distributed: a metadata-only `PUT /devices/{host}` wiped stored credentials.**
+  Reconstructing auth from the encrypted-at-rest record failed and re-registered the device
+  with no auth. A PUT that omits auth now preserves the stored credentials verbatim.
+- **Distributed: device unassignment / config-replace could be ignored.** Unassign events
+  were load-balanced to one arbitrary worker rather than the device's owner, so a pod could
+  keep running after teardown and a `PUT` replace might never apply its new config. Unassign
+  is now broadcast so the owning worker always tears down.
+- **Embedded: `GET /devices/{host}/tools` always returned 409.** The embedded path never
+  cached the manifest, so REST tool introspection failed even though MCP `tools/list` worked
+  off the live pod. The manifest is now cached on pod spawn.
+- **Audit chain reported false tampering under a multi-replica gateway.** Multiple replicas
+  appending to one shared audit sink interleaved independent hash chains, which the verifier
+  read as a break. Records are now tagged per replica and each replica's sub-chain is verified
+  independently; existing single-replica logs verify unchanged.
+
+### Added
+
+- `MCP_INSTANCE_ID` — overrides the per-replica audit-chain identity (defaults to `HOSTNAME`,
+  i.e. the pod name under Kubernetes). Only relevant when multiple gateway replicas write to a
+  shared audit sink.
+
+### Note
+
+The v0.1.0 notes stated every review finding (F-01–F-65) was resolved; the re-review showed
+that verification was incomplete. The changes above close that gap.
+
 ## [0.1.0] - 2026-06-15
 
 First tagged release. A universal bridge that converts any OpenAPI-documented device or
@@ -75,4 +129,5 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.1.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.1
 [0.1.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.0
