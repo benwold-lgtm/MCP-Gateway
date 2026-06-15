@@ -84,6 +84,31 @@ def test_parametrised_route_uses_template_not_concrete_path():
     assert "some-unknown-host-xyz" not in body
 
 
+def test_full_path_format_reattaches_router_prefix():
+    # Version-independent guard for the FastAPI >=0.137 behaviour where a prefixed
+    # router keeps inner routes' path_format relative (the /v1 lives outside it).
+    # _full_path_format must reconstruct the absolute template from the concrete
+    # path via the route's own (relative) regex, regardless of FastAPI internals.
+    import re
+
+    relative = SimpleNamespace(path_regex=re.compile(r"^/devices/(?P<hostname>[^/]+)$"))
+    scope = {"path": "/v1/devices/abc-123"}
+    assert metrics._full_path_format(scope, relative, "/devices/{hostname}") == "/v1/devices/{hostname}"
+
+    # Static route under a prefix (path_format is a bare suffix of the concrete path).
+    static = SimpleNamespace(path_regex=re.compile(r"^/devices$"))
+    assert metrics._full_path_format({"path": "/v1/devices"}, static, "/devices") == "/v1/devices"
+
+    # Already-absolute template (FastAPI <=0.136 flattens the prefix): unchanged.
+    absolute = SimpleNamespace(path_regex=re.compile(r"^/v1/devices/(?P<hostname>[^/]+)$"))
+    assert metrics._full_path_format({"path": "/v1/devices/abc"}, absolute, "/v1/devices/{hostname}") == (
+        "/v1/devices/{hostname}"
+    )
+
+    # Unprefixed static route: exact-match fast path, no regex walk needed.
+    assert metrics._full_path_format({"path": "/health"}, SimpleNamespace(path_regex=None), "/health") == "/health"
+
+
 def test_unmatched_path_collapses_to_sentinel():
     client.get("/no/such/path/at/all")
     body = metrics.generate_latest().decode()
