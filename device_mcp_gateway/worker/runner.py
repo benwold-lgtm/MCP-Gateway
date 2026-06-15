@@ -836,6 +836,11 @@ class DeviceWorker:
         # X-Request-Id from the gateway (SRE O2): bind it in the worker's audit log
         # so one trace id spans the gateway dispatch and the worker execution.
         rid = fields.get("rid", "-")
+        # Authenticated principal that issued the call (F-30 residual): the gateway
+        # authorized + logged it at the edge and rode the subject along the stream;
+        # bind it here so the worker-side execution audit carries the same actor
+        # attribution ("who called this tool"), not just the correlation id.
+        subject = fields.get("subject") or "-"
         try:
             message = json.loads(fields.get("message", "{}"))
             _method = message.get("method", "?") if isinstance(message, dict) else "?"
@@ -860,7 +865,14 @@ class DeviceWorker:
                     )
                 if request_id:
                     await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
-                audit_log("tool dispatch", hostname=hostname, method=_method, status="dead_letter", rid=rid)
+                audit_log(
+                    "tool dispatch",
+                    hostname=hostname,
+                    subject=subject,
+                    method=_method,
+                    status="dead_letter",
+                    rid=rid,
+                )
                 return
             # Idempotency guard (F-08): a reclaimed/redelivered call may already
             # have executed. Decide whether to (re-)run before touching the upstream.
@@ -888,7 +900,12 @@ class DeviceWorker:
                         await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
                     metrics.duplicate_calls_suppressed_total.labels(hostname=hostname, reason=decision).inc()
                     audit_log(
-                        "tool dispatch", hostname=hostname, method=_method, status=f"duplicate_{decision}", rid=rid
+                        "tool dispatch",
+                        hostname=hostname,
+                        subject=subject,
+                        method=_method,
+                        status=f"duplicate_{decision}",
+                        rid=rid,
                     )
                     return
             _t = time.perf_counter()
@@ -925,6 +942,7 @@ class DeviceWorker:
             audit_log(
                 "tool dispatch",
                 hostname=hostname,
+                subject=subject,
                 method=_method,
                 status=_status,
                 duration_ms=round(_dur * 1000, 1),

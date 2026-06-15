@@ -323,6 +323,10 @@ The interactive `authorization_code` grant and `jwt-bearer` assertions are inten
 
 ## Security
 
+The full security model — trust boundaries, adversaries, and the control addressing each
+threat — is in [docs/threat-model.md](docs/threat-model.md). The sections below summarize
+the key controls.
+
 ### Credential encryption
 
 Device credentials (OAuth2 `client_secret`, API keys) are encrypted at rest with a Fernet key (`MCP_SECRET_KEY`) on **both** storage paths — the SQLite store (embedded mode) and Redis (distributed mode). The gateway and workers share the same key and the same codec, so credentials are never written in plaintext when a key is set.
@@ -593,6 +597,18 @@ If `gateway.secret_key` was not set when a device was registered, its `auth_conf
 The per-IP rate limits are per gateway instance. In a multi-replica setup, a client that hits different replicas may see higher effective limits. For shared limits across replicas, configure a Redis-backed rate limiter (replace the in-memory `Limiter` in `main.py` with a `slowapi.Limiter` using a Redis storage backend).
 
 ---
+
+## Design, security & reliability docs
+
+Phase-0 / governance artifacts for reviewers and operators:
+
+| Doc | What it covers |
+|-----|----------------|
+| [docs/threat-model.md](docs/threat-model.md) | STRIDE threat model — trust boundaries, adversaries, control-per-threat, accepted risks |
+| [docs/failure-modes.md](docs/failure-modes.md) | FMEA matrix — per-component failure, detection (metric/alert), mitigation, operator action |
+| [docs/adr/](docs/adr/) | Architecture Decision Records — the load-bearing decisions (dual-mode, Redis control plane, single-owner, single-tenant, at-least-once+idempotency, fail-closed defaults) |
+| [docs/load-testing.md](docs/load-testing.md) | Load-baseline methodology + the runnable harness in [tools/loadtest/](tools/loadtest/) |
+| [docs/multitenancy.md](docs/multitenancy.md) | Single-tenant-per-stack deployment model (D-1) |
 
 ## Running Tests
 
