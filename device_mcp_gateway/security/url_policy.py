@@ -16,8 +16,12 @@ true`` (config) for a trusted internal device fleet to allow private targets.
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
+from typing import Any
 from urllib.parse import urlparse
+
+import httpx
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
@@ -70,3 +74,48 @@ def validate_target_url(url: str, *, allow_private: bool = False) -> None:
                 f"target host '{host}' resolves to a blocked address ({a}). Internal/loopback/"
                 "link-local targets are refused; set security.allow_private_targets: true to allow them."
             )
+
+
+def resolve_allow_private(cfg: dict[str, Any]) -> bool:
+    """The effective allow-private-targets setting: ``security.allow_private_targets``
+    (config) OR the ``MCP_ALLOW_PRIVATE_TARGETS`` env override. Centralised so every
+    server-side fetch path agrees with the gateway's register/PUT check (F-02)."""
+    if bool(cfg.get("security", {}).get("allow_private_targets", False)):
+        return True
+    return os.getenv("MCP_ALLOW_PRIVATE_TARGETS", "").lower() in ("1", "true", "yes")
+
+
+class SsrfGuardTransport(httpx.AsyncBaseTransport):
+    """Re-applies the SSRF policy to *every* outbound hop, including each redirect.
+
+    ``httpx`` follows 3xx redirects internally without re-consulting the caller, so a
+    target that passes ``validate_target_url`` at registration can still 302 to
+    ``http://169.254.169.254/...`` or an RFC-1918 host and be fetched (F-02/F-29). By
+    validating inside the transport — which httpx invokes once per hop — a redirect to
+    a blocked address is rejected at the hop instead of blindly followed.
+    """
+
+    def __init__(self, inner: httpx.AsyncBaseTransport, *, allow_private: bool) -> None:
+        self._inner = inner
+        self._allow_private = allow_private
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            validate_target_url(str(request.url), allow_private=self._allow_private)
+        except UrlPolicyError as exc:
+            raise UrlPolicyError(f"blocked outbound request to {request.url}: {exc}") from exc
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def build_guarded_client(*, verify: Any = True, allow_private: bool = False, **kwargs: Any) -> httpx.AsyncClient:
+    """An ``httpx.AsyncClient`` whose every request hop (initial + redirects) is checked
+    against the SSRF policy. Use for all server-side fetches of operator-supplied device
+    URLs — spec discovery and reachability — so workers and the gateway share one egress
+    guard rather than relying on a single front-door check (closes the "workers never
+    call the URL policy" gap and the redirect-follow bypass)."""
+    inner = httpx.AsyncHTTPTransport(verify=verify)
+    transport = SsrfGuardTransport(inner, allow_private=allow_private)
+    return httpx.AsyncClient(transport=transport, follow_redirects=True, **kwargs)

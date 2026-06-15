@@ -210,6 +210,13 @@ def warn_unsafe_settings(cfg: dict[str, Any], mode: str, auth_enabled: bool) -> 
             f"binding {host} (all interfaces) with authentication disabled — the API is reachable and "
             "unauthenticated on every network interface. Bind 127.0.0.1 or enable auth."
         )
+    mtls = cfg.get("security", {}).get("mtls")
+    if isinstance(mtls, dict) and mtls.get("verify") is False:
+        warnings.append(
+            "security.mtls.verify is false — outbound TLS certificate verification is DISABLED, so "
+            "device server certs are not checked (man-in-the-middle exposure). Set it true except on a "
+            "trusted closed test network."
+        )
     for w in warnings:
         logger.warning(f"Unsafe configuration ({mode} mode): {w}")
     return warnings
