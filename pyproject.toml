@@ -62,6 +62,7 @@ otel = [
 [project.scripts]
 device-mcp = "device_mcp_gateway.cli:main"
 device-mcp-worker = "device_mcp_gateway.cli:worker_main"
+device-mcp-rotate-secrets = "device_mcp_gateway.cli:rotate_secrets_main"
 
 [tool.setuptools.packages.find]
 include = ["device_mcp_gateway*"]

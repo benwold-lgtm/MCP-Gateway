@@ -26,6 +26,14 @@ gateway:
   # Override with MCP_SECRET_KEY environment variable.
   # Leave empty to store credentials as plaintext (not recommended for production).
   secret_key: ""
+  # Key rotation (F-34): to rotate without downtime, list multiple keys with the NEW
+  # key first and the OLD key(s) after. New writes use the first key; all keys can
+  # decrypt. Deploy with both keys, run `device-mcp-rotate-secrets` to re-encrypt every
+  # stored credential under the new key, then drop the old key. MCP_SECRET_KEY may also
+  # carry several keys, comma-separated ("<new>,<old>"). Takes precedence over secret_key.
+  # secret_keys:
+  #   - "<new-fernet-key>"
+  #   - "<old-fernet-key>"
   # Distributed mode persists device credentials to Redis. By default the gateway
   # and workers REFUSE to start in distributed mode without a secret_key so
   # credentials are never written in plaintext. Set true to override (dev only).

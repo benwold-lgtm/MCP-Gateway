@@ -25,6 +25,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "allow_anonymous": bool,
         "rbac": list,
         "secret_key": str,
+        "secret_keys": list,
         "allow_plaintext_credentials": bool,
         "max_body_bytes": int,
         "read_cache_ttl": _NUM,

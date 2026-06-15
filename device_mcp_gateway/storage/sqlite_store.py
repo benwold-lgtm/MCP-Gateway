@@ -103,6 +103,31 @@ class SqliteDeviceStore(AbstractDeviceStore):
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute("SELECT 1")
 
+    async def iter_raw_credentials(self) -> list[tuple[str, str]]:
+        """Return (hostname, raw encrypted auth_config) for every credentialled device.
+
+        Reads the stored ciphertext WITHOUT decrypting it, for the key-rotation
+        pass (F-34): rotation re-encrypts the token under the new primary key, so
+        a missing/old key surfaces as an error on that one record instead of the
+        decrypt-and-drop behaviour of load_all().
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT hostname, auth_config FROM devices WHERE auth_config IS NOT NULL AND auth_config != ''"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [(row["hostname"], row["auth_config"]) for row in rows]
+
+    async def set_raw_credential(self, hostname: str, raw_auth_config: str) -> None:
+        """Overwrite a device's stored ciphertext in place (key-rotation pass, F-34)."""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE devices SET auth_config = ? WHERE hostname = ?",
+                (raw_auth_config, hostname),
+            )
+            await db.commit()
+
     async def load_all(self) -> list[dict[str, Any]]:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
