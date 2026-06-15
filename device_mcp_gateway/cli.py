@@ -173,5 +173,88 @@ def worker_main() -> None:
         sys.exit(1)
 
 
+def rotate_secrets_main() -> None:
+    """Entry point for `device-mcp-rotate-secrets` — re-encrypt stored credentials (F-34).
+
+    Run during a key rotation, after deploying with the new key primary and the
+    old key still present (`secret_keys: [<new>, <old>]`). Re-encrypts every
+    stored device credential under the new primary key so the old key can be
+    retired. Idempotent and safe to re-run.
+    """
+    import asyncio
+
+    parser = argparse.ArgumentParser(
+        prog="device-mcp-rotate-secrets",
+        description="Re-encrypt stored device credentials under the current primary Fernet key (F-34)",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        default=os.getenv("MCP_CONFIG", "config.yaml"),
+        help="Path to config.yaml (default: $MCP_CONFIG or ./config.yaml)",
+    )
+    args = parser.parse_args()
+    os.environ["MCP_CONFIG"] = args.config
+
+    try:
+        from device_mcp_gateway.cfg import load_config, resolve_mode
+        from device_mcp_gateway.shared.crypto import CredentialCodec
+        from device_mcp_gateway.shared.rotate import rotate_redis_credentials, rotate_sqlite_credentials
+    except ImportError as exc:
+        print(f"Error: missing dependency — {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = load_config(args.config)
+
+    try:
+        codec = CredentialCodec.from_config(cfg)
+    except ValueError as exc:
+        print(f"Error: invalid MCP_SECRET_KEY / gateway.secret_key(s): {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not codec.enabled:
+        print(
+            "Error: no Fernet key configured — nothing to rotate. Set MCP_SECRET_KEY or "
+            "gateway.secret_keys (new key first, old key second).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not codec.multi_key:
+        print(
+            "Warning: only one key is configured, so rotation is a no-op. To rotate, set "
+            "gateway.secret_keys: [<new>, <old>] (or MCP_SECRET_KEY='<new>,<old>') and re-run.",
+            file=sys.stderr,
+        )
+
+    mode = resolve_mode(cfg)
+
+    async def _run() -> int:
+        if mode == "distributed":
+            from device_mcp_gateway.shared.redis_client import assert_redis_secure, create_redis
+            from device_mcp_gateway.shared.registry_backend import RedisRegistryBackend
+
+            try:
+                assert_redis_secure(cfg)
+            except RuntimeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            redis_client = await create_redis(cfg)
+            backend = RedisRegistryBackend(redis_client)
+            await backend.initialize()
+            result = await rotate_redis_credentials(backend, codec)
+        else:
+            from device_mcp_gateway.storage.sqlite_store import SqliteDeviceStore
+
+            db_path = cfg.get("storage", {}).get("db_path", "./data/devices.db")
+            store = SqliteDeviceStore(db_path=db_path, codec=codec)
+            await store.initialize()
+            result = await rotate_sqlite_credentials(store, codec)
+
+        print(f"Rotation complete ({mode} mode): {result.summary()}")
+        return 1 if result.failed else 0
+
+    sys.exit(asyncio.run(_run()))
+
+
 if __name__ == "__main__":
     main()

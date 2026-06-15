@@ -308,11 +308,13 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     try:
         _codec = CredentialCodec.from_config(cfg)
     except ValueError as exc:
-        raise RuntimeError(f"Invalid MCP_SECRET_KEY / gateway.secret_key: {exc}") from exc
+        raise RuntimeError(f"Invalid MCP_SECRET_KEY / gateway.secret_key(s): {exc}") from exc
 
     _allow_plaintext = bool(_gateway_cfg.get("allow_plaintext_credentials", False))
     if _codec.enabled:
-        logger.info("Credential encryption enabled")
+        # multi_key => a rotation window is active (new key primary, old key(s) still
+        # able to decrypt). Run `device-mcp-rotate-secrets` then retire the old key (F-34).
+        logger.info(f"Credential encryption enabled (key rotation in progress: {_codec.multi_key})")
     elif _mode == "distributed" and not _allow_plaintext:
         # Distributed mode persists credentials to Redis; refuse to run without a
         # key so secrets never land there in plaintext. Set gateway.
