@@ -41,6 +41,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "registration_provision_budget": _NUM,
         "reconcile_interval": _NUM,
         "max_concurrent_calls_per_device": int,
+        "max_concurrent_calls_per_worker": int,
         "rebalance_enabled": bool,
         "idempotency_guard": bool,
         "call_backlog_limit": int,

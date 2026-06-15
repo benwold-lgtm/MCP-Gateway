@@ -166,6 +166,15 @@ class DeviceWorker:
         # blocks on this when saturated rather than spawning unbounded tasks/outbound
         # requests, so a burst becomes visible stream lag instead of worker OOM.
         self._max_calls_per_device = config.get("registry", {}).get("max_concurrent_calls_per_device", 20)
+        # Aggregate in-flight cap across ALL co-located devices on this worker (F-13).
+        # The per-device cap above bounds one device; without a worker-wide ceiling a
+        # worker hosting N devices would admit up to N × _max_calls_per_device calls at
+        # once on a single shared event loop and HTTP pool. This semaphore is the global
+        # admission gate, acquired in addition to (after) the per-device slot, so a burst
+        # spread across many devices still becomes stream lag rather than unbounded
+        # concurrency. Shared by every per-device consume loop; default 200.
+        self._max_calls_per_worker = config.get("registry", {}).get("max_concurrent_calls_per_worker", 200)
+        self._worker_call_sem = asyncio.Semaphore(self._max_calls_per_worker)
         # Spec-ingestion bounds (F-09): reject oversized specs before parse/pool and
         # cap how long one translation may hold a worker's translation-pool slot.
         self._spec_max_bytes = config.get("registry", {}).get("spec_max_bytes", DEFAULT_MAX_SPEC_BYTES)
@@ -635,13 +644,26 @@ class DeviceWorker:
     async def _schedule_dispatch(
         self, sem: asyncio.Semaphore, hostname: str, stream: str, group: str, msg_id: str, fields: dict
     ) -> None:
-        """Acquire a per-device slot, then dispatch on a tracked task (SRE #5/#6).
+        """Acquire a per-device AND the worker-wide slot, then dispatch (SRE #5/#6, F-13).
 
-        The acquire blocks the caller (the consume loop) when the device is at its
-        concurrency cap — that is the backpressure. The task is tracked in
-        _inflight_calls so shutdown can drain it, and releases the slot when done.
+        Two-level backpressure: ``sem`` bounds this one device's in-flight calls; the
+        shared ``_worker_call_sem`` bounds the aggregate across every device the worker
+        hosts. Both are acquired by the consume loop *before* the dispatch task is
+        created, so when either is exhausted the loop stops reading new entries and the
+        burst stays as delivered-unacked stream lag instead of unbounded tasks. The
+        device slot is taken first so a device blocked on its own cap never holds a
+        scarce worker-wide slot. The task is tracked in _inflight_calls so shutdown can
+        drain it, and releases both slots when done.
         """
         await sem.acquire()
+        # A blocked worker-wide acquire is the worker-saturation signal (F-13).
+        if self._worker_call_sem.locked():
+            metrics.worker_calls_throttled_total.inc()
+        try:
+            await self._worker_call_sem.acquire()
+        except BaseException:
+            sem.release()  # never strand a device slot if the worker-wide wait is cancelled
+            raise
         task = asyncio.create_task(self._dispatch_guarded(sem, hostname, stream, group, msg_id, fields))
         self._inflight_calls.add(task)
         task.add_done_callback(self._inflight_calls.discard)
@@ -652,6 +674,7 @@ class DeviceWorker:
         try:
             await self._dispatch_call(hostname, stream, group, msg_id, fields)
         finally:
+            self._worker_call_sem.release()
             sem.release()
 
     async def _reclaim_pending(self, hostname: str, stream: str, group: str, sem: asyncio.Semaphore) -> None:

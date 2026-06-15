@@ -46,6 +46,7 @@ from device_mcp_gateway.ratelimit import (
     RedisRateLimiter,
     client_ip_key_func,
     rate_limit,
+    rate_limit_principal,
 )
 from device_mcp_gateway.rbac import (
     SCOPE_DEVICES_READ,
@@ -656,7 +657,15 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     @protected.post(
         "/devices",
         response_model=DeviceMutationResult,
-        dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE)), Depends(rate_limit("60/minute", "devices_post"))],
+        dependencies=[
+            Depends(require_scope(SCOPE_DEVICES_WRITE)),
+            # Per-IP burst guard + per-principal fair-share (F-16). The per-principal
+            # budget is set above a single IP's so a legitimate client spread over a
+            # few IPs isn't throttled, while one identity can't multiply its budget
+            # across unlimited source IPs.
+            Depends(rate_limit("60/minute", "devices_post")),
+            Depends(rate_limit_principal("120/minute", "devices_post")),
+        ],
     )
     async def register_device(request: Request):
         data = await request.json()
@@ -964,7 +973,13 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     @protected.post(
         "/devices/{hostname}/messages",
-        dependencies=[Depends(require_scope(SCOPE_TOOLS_CALL)), Depends(rate_limit("600/minute", "messages"))],
+        dependencies=[
+            Depends(require_scope(SCOPE_TOOLS_CALL)),
+            # Per-IP burst guard + per-principal fair-share for tool calls (F-16); the
+            # per-principal budget is the per-identity ceiling across all its IPs.
+            Depends(rate_limit("600/minute", "messages")),
+            Depends(rate_limit_principal("1200/minute", "messages")),
+        ],
     )
     async def device_sse_message(
         hostname: str,
