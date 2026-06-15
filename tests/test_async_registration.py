@@ -33,8 +33,8 @@ async def test_registration_returns_within_budget_and_provisions_in_background()
         return True
 
     registry.check_reachability = slow_reach
-    registry.fetch_spec = AsyncMock(return_value={})
-    registry._spawn_pod = AsyncMock()
+    registry._spec_service.fetch_spec = AsyncMock(return_value=False)
+    registry._pod_supervisor.spawn = AsyncMock()
 
     t0 = time.monotonic()
     cfg = await registry.register_device(hostname="slow", base_url="http://slow.local")
@@ -59,13 +59,13 @@ async def test_fast_registration_returns_ready_and_not_provisioning():
 
     async def fake_fetch(profile):
         profile.spec_data = {"openapi": "3.0.0"}
-        return profile.spec_data
+        return False
 
     async def fake_spawn(profile):
         profile.config.pod_active = True
 
-    registry.fetch_spec = fake_fetch
-    registry._spawn_pod = fake_spawn
+    registry._spec_service.fetch_spec = fake_fetch
+    registry._pod_supervisor.spawn = fake_spawn
 
     cfg = await registry.register_device(hostname="fast", base_url="http://fast.local")
 
@@ -121,7 +121,7 @@ async def test_discover_spec_parallel_first_valid_wins():
     spec = {"openapi": "3.0.0", "info": {"title": "x", "version": "1"}, "paths": {}}
     registry = Registry(config={"discovery": {"timeout": 5}})
     # The preferred path is slow + has no spec; a later path answers fast with one.
-    registry._http_client = _FakeClient(
+    registry._spec_service._http_client = _FakeClient(
         {
             "/openapi.json": (0.6, None),
             "/swagger.json": (0.05, spec),
@@ -130,7 +130,7 @@ async def test_discover_spec_parallel_first_valid_wins():
     )
 
     t0 = time.monotonic()
-    result = await registry._discover_spec("http://x.local")
+    result = await registry._spec_service._discover_spec("http://x.local")
     elapsed = time.monotonic() - t0
 
     assert result == spec
@@ -142,8 +142,8 @@ async def test_discover_spec_parallel_first_valid_wins():
 @pytest.mark.asyncio
 async def test_discover_spec_returns_none_when_no_path_has_spec():
     registry = Registry(config={"discovery": {"timeout": 5}})
-    registry._http_client = _FakeClient(
+    registry._spec_service._http_client = _FakeClient(
         {"/openapi.json": (0.02, None), "/swagger.json": (0.02, None), "/api-docs": (0.02, None)}
     )
-    assert await registry._discover_spec("http://x.local") is None
+    assert await registry._spec_service._discover_spec("http://x.local") is None
     await registry.shutdown()

@@ -20,30 +20,17 @@ In distributed mode (registry.mode = "distributed"):
 from __future__ import annotations
 
 import asyncio
-import atexit
-import hashlib
-import heapq
 import time
-from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
-from functools import partial
 from typing import Any
 
-import httpx
 from loguru import logger
 
 from device_mcp_gateway.audit import redact_url
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
-from device_mcp_gateway.core.spec_limits import (
-    DEFAULT_MAX_SPEC_BYTES,
-    DEFAULT_TRANSLATE_TIMEOUT,
-    SpecTooLargeError,
-    fetched_spec_or_none,
-    run_translation,
-)
-from device_mcp_gateway.core.translator import SpecTranslator
-from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.registry.models import DeviceProfile
+from device_mcp_gateway.registry.pod_supervisor import PodSupervisor
+from device_mcp_gateway.registry.spec_service import SpecService
 from device_mcp_gateway.security.mtls import build_verify
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
@@ -53,140 +40,9 @@ from device_mcp_gateway.shared.registry_backend import (
 )
 from device_mcp_gateway.storage.base import AbstractDeviceStore
 
-_spec_executor = ProcessPoolExecutor(max_workers=4)
-
-
-def _shutdown_spec_executor() -> None:
-    """Reap the spec-translation worker processes at interpreter exit (RC-5).
-
-    Registered with atexit rather than called from Registry.shutdown() because
-    the executor is process-global and shared across Registry instances —
-    shutting it down per-instance would break reuse.
-    """
-    _spec_executor.shutdown(wait=False)
-
-
-atexit.register(_shutdown_spec_executor)
-
-
-def _translate_spec_sync(spec: dict, hostname: str) -> Any:
-    """Run in a worker process to avoid blocking the event loop."""
-    return SpecTranslator().translate(spec, hostname)
-
-
-# ---------------------------------------------------------------------------
-# DeviceProfile — embedded-mode runtime state (wraps DeviceConfig + pod)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class DeviceProfile:
-    """Runtime device state used only in embedded mode.
-
-    Holds the DeviceConfig plus asyncio/pod references that cannot be
-    serialised to Redis.
-    """
-
-    config: DeviceConfig
-    auth: AbstractAuth | None = None
-    spec_data: dict[str, Any] | None = None
-    pod: DevicePod | None = None
-
-    # Convenience pass-throughs so call-sites don't need to know about .config
-    @property
-    def hostname(self) -> str:
-        return self.config.hostname
-
-    @property
-    def base_url(self) -> str:
-        return self.config.base_url
-
-    @property
-    def spec_url(self) -> str | None:
-        return self.config.spec_url
-
-    @property
-    def transport(self) -> str:
-        return self.config.transport
-
-    @property
-    def rate_limit_rps(self) -> float | None:
-        return self.config.rate_limit_rps
-
-    @property
-    def reachable(self) -> bool:
-        return self.config.reachable
-
-    @property
-    def pod_active(self) -> bool:
-        return self.config.pod_active
-
-    @property
-    def last_reachable_check(self) -> float:
-        return self.config.last_check
-
-    @property
-    def spawn_error(self) -> str | None:
-        return self.config.spawn_error
-
-    @property
-    def spec_hash(self) -> str | None:
-        return self.config.spec_hash
-
-
-# ---------------------------------------------------------------------------
-# SpecCache (embedded mode only)
-# ---------------------------------------------------------------------------
-
-
-class SpecCache:
-    """TTL-based in-memory cache for raw OpenAPI spec dicts.
-
-    Eviction is O(log n) via a min-heap ordered by insertion timestamp.
-    Stale heap entries (from updates to existing keys) are cleaned up lazily.
-    """
-
-    def __init__(self, ttl: int = 3600, max_entries: int = 200):
-        self._store: dict[str, dict[str, Any]] = {}
-        self._timestamps: dict[str, float] = {}
-        self._heap: list[tuple[float, str]] = []  # (inserted_at, key)
-        self._ttl = ttl
-        self._max = max_entries
-
-    def get(self, key: str) -> dict[str, Any] | None:
-        if key not in self._store:
-            return None
-        if time.time() - self._timestamps[key] > self._ttl:
-            del self._store[key]
-            del self._timestamps[key]
-            return None
-        return self._store[key]
-
-    def put(self, key: str, value: dict[str, Any]) -> None:
-        if len(self._store) >= self._max and key not in self._store:
-            self._evict_oldest()
-        ts = time.time()
-        self._store[key] = value
-        self._timestamps[key] = ts
-        heapq.heappush(self._heap, (ts, key))
-
-    def invalidate(self, key: str) -> None:
-        self._store.pop(key, None)
-        self._timestamps.pop(key, None)
-        # Heap entry becomes stale; cleaned up lazily on next eviction.
-
-    def _evict_oldest(self) -> None:
-        while self._heap:
-            ts, key = self._heap[0]
-            # Skip stale entries (key updated or invalidated since this was pushed).
-            if key not in self._timestamps or self._timestamps[key] != ts:
-                heapq.heappop(self._heap)
-                continue
-            heapq.heappop(self._heap)
-            del self._store[key]
-            del self._timestamps[key]
-            return
-
+# Re-exported for backward compatibility — DeviceProfile moved to registry.models
+# during the F-12 decomposition, but importers may still reference it here.
+__all__ = ["Registry", "DeviceProfile"]
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -217,10 +73,6 @@ class Registry:
         # Embedded-mode runtime state (not used in distributed mode)
         self._profiles: dict[str, DeviceProfile] = {}
         self._device_locks: dict[str, asyncio.Lock] = {}
-        self._spec_cache = SpecCache(
-            ttl=config.get("spec_cache_ttl", 3600),
-            max_entries=200,
-        )
         self._health_task: asyncio.Task | None = None
         self._health_interval = config.get("health_check_interval", 30)
         # Async registration (F-11): reachability probe + spec discovery + pod spawn
@@ -230,21 +82,28 @@ class Registry:
         # it returns and the task finishes in the background.
         self._registration_provision_budget = config.get("registration_provision_budget", 8)
         self._provision_tasks: dict[str, asyncio.Task] = {}
-        self._spec_poll_interval = config.get("spec_poll_interval", 300)
-        self._max_pods = config.get("max_concurrent_pods", 50)
-        # Spec-ingestion bounds (F-09): reject oversized specs before parse/pool and
-        # cap how long one translation may hold a pool worker.
-        self._spec_max_bytes = config.get("spec_max_bytes", DEFAULT_MAX_SPEC_BYTES)
-        self._spec_translate_timeout = config.get("spec_translate_timeout", DEFAULT_TRANSLATE_TIMEOUT)
-        self._http_client: httpx.AsyncClient | None = None
         # Outbound mutual-TLS for device calls (F-31): reachability/discovery GETs
-        # here, and tool calls in the pods we spawn, both present this client cert /
-        # honour this CA. True when nothing is configured (default httpx behaviour).
+        # (here, via the SpecService client), and tool calls in the pods we spawn,
+        # both present this client cert / honour this CA. True when nothing is
+        # configured (default httpx behaviour).
         self._tls_verify = build_verify(config.get("security", {}).get("mtls"))
         self._health_semaphore = asyncio.Semaphore(config.get("max_concurrent_health_checks", 10))
         # Bounded jittered retries for idempotent outbound GETs — reachability, spec
         # fetch, discovery (F-05). Shared by spawned pods for their tool calls too.
         self._retry_policy = RetryPolicy.from_config({"registry": config})
+        # F-12 decomposition: spec acquisition and pod lifecycle live in dedicated
+        # collaborators. The Registry orchestrates them (CRUD, provisioning, health).
+        self._spec_service = SpecService(
+            backend=self._backend, config=config, tls_verify=self._tls_verify, retry_policy=self._retry_policy
+        )
+        self._pod_supervisor = PodSupervisor(
+            backend=self._backend,
+            config=config,
+            tls_verify=self._tls_verify,
+            retry_policy=self._retry_policy,
+            spec_service=self._spec_service,
+            profiles=self._profiles,
+        )
 
     # ------------------------------------------------------------------
     # Shared helpers
@@ -254,11 +113,6 @@ class Registry:
         if hostname not in self._device_locks:
             self._device_locks[hostname] = asyncio.Lock()
         return self._device_locks[hostname]
-
-    def _get_client(self) -> httpx.AsyncClient:
-        if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(follow_redirects=True, verify=self._tls_verify)
-        return self._http_client
 
     # ------------------------------------------------------------------
     # Device management (shared between modes)
@@ -299,8 +153,8 @@ class Registry:
         async with self._lock_for(hostname):
             existing = self._profiles.get(hostname)
             if existing:
-                await self._kill_pod(existing)
-                self._spec_cache.invalidate(existing.base_url)
+                await self._pod_supervisor.kill(existing)
+                self._spec_service.invalidate(existing.base_url)
             profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
         # Re-provision off the request path (F-11), same as register_device.
         await self._provision_in_background(profile, wait_budget=self._registration_provision_budget)
@@ -315,7 +169,7 @@ class Registry:
         async with self._lock_for(hostname):
             profile = self._profiles.pop(hostname, None)
             if profile and profile.pod_active and profile.pod:
-                await self._kill_pod(profile)
+                await self._pod_supervisor.kill(profile)
         self._device_locks.pop(hostname, None)
         if self._store:
             await self._store.delete(hostname)
@@ -426,9 +280,9 @@ class Registry:
             try:
                 reachable = await self.check_reachability(profile)
                 if reachable:
-                    await self.fetch_spec(profile)
+                    await self._spec_service.fetch_spec(profile)
                     if profile.spec_data and not profile.pod_active:
-                        await self._spawn_pod(profile)
+                        await self._pod_supervisor.spawn(profile)
             except Exception as exc:
                 logger.exception(f"Error during provisioning for {profile.hostname}")
                 profile.config.spawn_error = str(exc)
@@ -489,98 +343,10 @@ class Registry:
             await self._backend.set_device(record["hostname"], cfg)
             await self._provision_device(profile)
 
-    async def fetch_spec(self, profile: DeviceProfile) -> dict[str, Any]:
-        cache_key = profile.base_url
-        cached = self._spec_cache.get(cache_key)
-        if cached and (time.time() - profile.config.last_check) < self._spec_poll_interval:
-            return cached
-
-        if profile.spec_url:
-            fetched = await self._http_get(profile.spec_url)
-        else:
-            fetched = await self._discover_spec(profile.base_url)
-
-        if fetched:
-            h = hashlib.sha256(str(fetched).encode()).hexdigest()[:16]
-            old_hash = profile.config.spec_hash
-            profile.config.spec_hash = h
-            profile.spec_data = fetched
-            profile.config.last_check = time.time()
-            self._spec_cache.put(cache_key, fetched)
-            await self._backend.update_device_fields(
-                profile.hostname, spec_hash=h, last_check=profile.config.last_check
-            )
-
-            if old_hash is not None and h != old_hash:
-                logger.info(f"Spec changed for {profile.hostname}: {old_hash} → {h}")
-                if profile.pod_active:
-                    logger.info(f"Replacing pod for {profile.hostname} due to spec change")
-                    await self._kill_pod(profile)
-                    await self._spawn_pod(profile)
-            else:
-                logger.debug(f"Spec fetched for {profile.hostname}: hash={h}")
-
-            return fetched
-        return {}
-
-    async def _discover_spec(self, base_url: str) -> dict[str, Any] | None:
-        paths = self._config.get("discovery", {}).get(
-            "spec_paths",
-            ["/openapi.json", "/swagger.json", "/api-docs"],
-        )
-        timeout = self._config.get("discovery", {}).get("timeout", 10)
-        client = self._get_client()
-
-        async def _probe(path: str) -> dict[str, Any] | None:
-            url = base_url.rstrip("/") + path
-            try:
-
-                async def _get(u: str = url) -> httpx.Response:
-                    return await client.get(u, timeout=timeout)
-
-                resp = await send_with_retry(_get, method="GET", policy=self._retry_policy)
-                return fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
-            except SpecTooLargeError as exc:
-                logger.warning(f"Spec discovery rejected oversized spec at {redact_url(url)}: {exc} (F-09)")
-                return None
-            except (httpx.HTTPError, ValueError) as exc:
-                logger.debug(f"Spec discovery probe failed for {redact_url(url)}: {exc}")
-                return None
-
-        # Probe candidate paths concurrently and take the first that yields a valid
-        # spec, so worst-case discovery latency is one path's timeout, not the sum of
-        # all of them (F-11). Losing probes are cancelled once we have a winner.
-        tasks = [asyncio.create_task(_probe(p)) for p in paths]
-        try:
-            for fut in asyncio.as_completed(tasks):
-                spec = await fut
-                if spec is not None:
-                    return spec
-            return None
-        finally:
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _http_get(self, url: str) -> dict[str, Any] | None:
-        try:
-            resp = await send_with_retry(
-                lambda: self._get_client().get(url, timeout=10), method="GET", policy=self._retry_policy
-            )
-            return fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
-        except SpecTooLargeError as exc:
-            logger.warning(f"Spec fetch rejected oversized spec at {redact_url(url)}: {exc} (F-09)")
-            return None
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.debug(f"Spec fetch failed for {redact_url(url)}: {exc}")
-            return None
-        return None
-
     async def check_reachability(self, profile: DeviceProfile) -> bool:
         try:
             resp = await send_with_retry(
-                lambda: self._get_client().get(profile.base_url, timeout=5),
+                lambda: self._spec_service.client().get(profile.base_url, timeout=5),
                 method="GET",
                 policy=self._retry_policy,
             )
@@ -600,12 +366,19 @@ class Registry:
                     return
                 try:
                     reachable = await self.check_reachability(profile)
+                    spec_changed = False
                     if reachable:
-                        await self.fetch_spec(profile)
+                        spec_changed = await self._spec_service.fetch_spec(profile)
                     if profile.reachable and not profile.pod_active:
-                        await self._spawn_pod(profile)
+                        await self._pod_supervisor.spawn(profile)
                     elif not profile.reachable and profile.pod_active:
-                        await self._kill_pod(profile)
+                        await self._pod_supervisor.kill(profile)
+                    elif spec_changed and profile.pod_active:
+                        # Spec acquisition is now side-effect-free (F-12); the
+                        # pod replace that used to live inside fetch_spec happens
+                        # here, where the orchestration belongs.
+                        logger.info(f"Replacing pod for {profile.hostname} due to spec change")
+                        await self._pod_supervisor.replace(profile)
                 except Exception:
                     logger.exception(f"Health check error for {profile.hostname}")
 
@@ -616,55 +389,6 @@ class Registry:
             if profiles:
                 await asyncio.gather(*[self._health_check_one(p) for p in profiles])
             await asyncio.sleep(jittered(self._health_interval))  # F-61: de-sync fleet health loops
-
-    async def _spawn_pod(self, profile: DeviceProfile) -> None:
-        if sum(1 for p in self._profiles.values() if p.pod_active) >= self._max_pods:
-            logger.warning("Max pods reached, skipping spawn")
-            return
-        spec = profile.spec_data or await self.fetch_spec(profile)
-        if not spec:
-            msg = f"No spec available for {profile.hostname}, cannot spawn pod"
-            logger.warning(msg)
-            profile.config.spawn_error = msg
-            return
-        try:
-            mcp_manifest = await run_translation(
-                _spec_executor,
-                partial(_translate_spec_sync, spec, profile.hostname),
-                timeout=self._spec_translate_timeout,
-                hostname=profile.hostname,
-            )
-        except (SpecTooLargeError, ValueError) as exc:
-            msg = f"Spec for {profile.hostname} rejected: {exc} (F-09)"
-            logger.warning(msg)
-            profile.config.spawn_error = msg
-            return
-        keep_alive = self._config.get("transport", {}).get("sse", {}).get("keep_alive_interval", 30)
-        pod = DevicePod(
-            hostname=profile.hostname,
-            manifest=mcp_manifest,
-            transport=profile.transport,
-            auth=profile.auth,
-            base_url=profile.base_url,
-            rate_limit_rps=profile.rate_limit_rps,
-            keep_alive_interval=keep_alive,
-            retry_policy=self._retry_policy,
-            tls_verify=self._tls_verify,
-        )
-        await pod.start()
-        profile.pod = pod
-        profile.config.pod_active = True
-        profile.config.spawn_error = None
-        await self._backend.update_device_fields(profile.hostname, pod_active=True, spawn_error=None)
-        logger.info(f"Pod spawned for {profile.hostname}")
-
-    async def _kill_pod(self, profile: DeviceProfile) -> None:
-        if profile.pod and profile.pod_active:
-            profile.pod.stop()
-            await profile.pod.aclose()
-            profile.config.pod_active = False
-            await self._backend.update_device_fields(profile.hostname, pod_active=False)
-            logger.info(f"Pod killed for {profile.hostname}")
 
     # ------------------------------------------------------------------
     # Embedded mode: backward-compat accessor (used by main.py routes)
@@ -682,9 +406,8 @@ class Registry:
             await asyncio.gather(*self._provision_tasks.values(), return_exceptions=True)
             self._provision_tasks.clear()
         for profile in self._profiles.values():
-            await self._kill_pod(profile)
-        if self._http_client and not self._http_client.is_closed:
-            await self._http_client.aclose()
+            await self._pod_supervisor.kill(profile)
+        await self._spec_service.aclose()
         logger.info("Registry shutdown complete")
 
 

@@ -177,7 +177,7 @@ async def test_spec_change_replaces_pod():
 
     registry = Registry(config={"spec_cache_ttl": 10, "health_check_interval": 10, "max_concurrent_pods": 10})
     registry.check_reachability = AsyncMock(return_value=True)
-    registry._discover_spec = AsyncMock(return_value=spec_v1)
+    registry._spec_service._discover_spec = AsyncMock(return_value=spec_v1)
 
     device_cfg = await registry.register_device(hostname="spec-change-test", base_url="http://test.local")
     assert device_cfg.pod_active, "Pod should be active after initial registration"
@@ -189,11 +189,13 @@ async def test_spec_change_replaces_pod():
     assert len(profile.pod.manifest.tools) == 1, "Initial pod should have 1 tool"
 
     # Simulate upstream spec update
-    registry._discover_spec = AsyncMock(return_value=spec_v2)
-    registry._spec_cache._store.clear()
+    registry._spec_service._discover_spec = AsyncMock(return_value=spec_v2)
+    registry._spec_service._cache._store.clear()
     profile.config.last_check = 0.0  # force cache miss so fetch_spec re-fetches
 
-    await registry.fetch_spec(profile)
+    # Spec re-fetch is now side-effect-free (F-12); the health-loop orchestration
+    # is what detects the change and replaces the pod, so drive that path.
+    await registry._health_check_one(profile)
 
     profile = registry.get_profile("spec-change-test")  # re-fetch after pod replacement
     assert profile.pod_active, "Pod should still be active after spec change"

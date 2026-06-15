@@ -3,13 +3,14 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """Regression coverage for S1 real-concern RC-5.
 
-The module-level spec-translation ProcessPoolExecutors in registry.server and
-worker.health are reaped at interpreter exit via atexit-registered shutdown
-functions. These tests exercise the shutdown wiring against a fake executor so
-the real (process-global) executors are left intact for the rest of the suite.
+The module-level spec-translation ProcessPoolExecutors in registry.pod_supervisor
+(moved there from registry.server in the F-12 decomposition) and worker.health are
+reaped at interpreter exit via atexit-registered shutdown functions. These tests
+exercise the shutdown wiring against a fake executor so the real (process-global)
+executors are left intact for the rest of the suite.
 """
 
-import device_mcp_gateway.registry.server as server_mod
+import device_mcp_gateway.registry.pod_supervisor as pod_supervisor_mod
 import device_mcp_gateway.worker.health as health_mod
 
 
@@ -28,8 +29,8 @@ def test_health_spec_executor_shutdown_is_non_blocking(monkeypatch):
     assert fake.shutdown_calls == [False]  # wait=False — don't block exit
 
 
-def test_server_spec_executor_shutdown_is_non_blocking(monkeypatch):
+def test_pod_supervisor_spec_executor_shutdown_is_non_blocking(monkeypatch):
     fake = _FakeExecutor()
-    monkeypatch.setattr(server_mod, "_spec_executor", fake)
-    server_mod._shutdown_spec_executor()
+    monkeypatch.setattr(pod_supervisor_mod, "_spec_executor", fake)
+    pod_supervisor_mod._shutdown_spec_executor()
     assert fake.shutdown_calls == [False]
