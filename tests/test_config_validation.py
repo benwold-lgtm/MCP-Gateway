@@ -101,3 +101,20 @@ def test_bind_all_alone_is_not_warned_when_auth_enabled():
 def test_safe_config_yields_no_warnings():
     cfg = {"server": {"host": "127.0.0.1"}, "cors": {"allowed_origins": ["https://app.example.com"]}}
     assert warn_unsafe_settings(cfg, "embedded", auth_enabled=True) == []
+
+
+def test_bind_host_env_override_suppresses_false_bind_all_warning(monkeypatch):
+    # `device-mcp --host 127.0.0.1` over a 0.0.0.0 config exports MCP_BIND_HOST; the
+    # warning must reflect the effective bind, not the config value (no false positive).
+    monkeypatch.setenv("MCP_BIND_HOST", "127.0.0.1")
+    cfg = {"server": {"host": "0.0.0.0"}}
+    warnings = warn_unsafe_settings(cfg, "embedded", auth_enabled=False)
+    assert not any("all interfaces" in w for w in warnings)
+
+
+def test_bind_host_env_override_can_surface_bind_all_warning(monkeypatch):
+    # Conversely, --host 0.0.0.0 over a loopback config must still warn (no auth).
+    monkeypatch.setenv("MCP_BIND_HOST", "0.0.0.0")
+    cfg = {"server": {"host": "127.0.0.1"}}
+    warnings = warn_unsafe_settings(cfg, "embedded", auth_enabled=False)
+    assert any("all interfaces" in w for w in warnings)

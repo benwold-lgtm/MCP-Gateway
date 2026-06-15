@@ -73,6 +73,14 @@ curl -X POST http://localhost:8000/v1/devices \
 # 5. Connect an MCP client (see MCP Client Integration below)
 ```
 
+> **Registering a device on a private/LAN address?** By default the gateway refuses
+> targets that resolve to private, loopback, or link-local addresses (the Tier-0 SSRF
+> guard — see [`security.allow_private_targets`](config.yaml)), so a `base_url` like the
+> `192.168.1.42` above returns `400` until you opt in. For a trusted device fleet on
+> private addresses, start with `MCP_ALLOW_PRIVATE_TARGETS=true` (or set
+> `security.allow_private_targets: true`). Leave it off when devices are reachable over
+> public DNS/addresses.
+
 ## Quick Start (distributed mode)
 
 ```bash
