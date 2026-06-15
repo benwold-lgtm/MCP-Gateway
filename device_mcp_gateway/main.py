@@ -480,6 +480,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                 **cfg.get("registry", {}),
                 "discovery": cfg.get("discovery", {}),
                 "transport": cfg.get("transport", {}),
+                "security": cfg.get("security", {}),
                 "mode": "embedded",
             },
             backend=_backend,
@@ -509,7 +510,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             backend = RedisRegistryBackend(redis_client)
             await backend.initialize()
             registry = Registry(
-                config={**cfg.get("registry", {}), "mode": "distributed"}, backend=backend, codec=_codec
+                config={**cfg.get("registry", {}), "security": cfg.get("security", {}), "mode": "distributed"},
+                backend=backend,
+                codec=_codec,
             )
             app.state.redis = redis_client
             app.state.pubsub_redis = pubsub_client

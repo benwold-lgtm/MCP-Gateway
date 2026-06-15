@@ -205,6 +205,19 @@ security:
   # Env override: MCP_ALLOW_PRIVATE_TARGETS=true.
   allow_private_targets: false
 
+  # Outbound mutual-TLS to devices (F-31). When set, every outbound HTTPS call to a
+  # device — tool calls, reachability probes, spec fetches, health checks — presents
+  # this client certificate and/or verifies the device's server certificate against
+  # the given CA. Omit the whole block for default behaviour (anonymous client, public
+  # CA verification via certifi). One global config applies to all devices; see
+  # docs/security-mtls.md for per-device PKI (planned).
+  # mtls:
+  #   client_cert: /etc/mcp/tls/client.crt      # PEM client cert (may also contain the key)
+  #   client_key: /etc/mcp/tls/client.key       # PEM private key (omit if combined into client_cert)
+  #   client_key_password: ""                   # prefer env MCP_TLS_CLIENT_KEY_PASSWORD over config
+  #   ca_bundle: /etc/mcp/tls/device-ca.pem     # verify device server certs against THIS CA (replaces public set)
+  #   verify: true                              # set false ONLY on a trusted closed test network — disables verification
+
 metrics:
   # Prometheus exposition is served on a DEDICATED port, separate from the API
   # port — point a ServiceMonitor / scrape config at this port (named "metrics"),

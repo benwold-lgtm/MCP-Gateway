@@ -73,7 +73,16 @@ _CONFIG_SCHEMA: dict[str, Any] = {
     "discovery": {"spec_paths": list, "timeout": _NUM},
     "storage": {"type": str, "db_path": str},
     "cors": {"allowed_origins": list},
-    "security": {"allow_private_targets": bool},
+    "security": {
+        "allow_private_targets": bool,
+        "mtls": {
+            "client_cert": str,
+            "client_key": str,
+            "client_key_password": str,
+            "ca_bundle": str,
+            "verify": bool,
+        },
+    },
     "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM, "auth_token": str},
     "tracing": {
         "enabled": bool,

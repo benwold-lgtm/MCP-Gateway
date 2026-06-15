@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
+import ssl
 import time
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
@@ -65,6 +66,7 @@ class WorkerHealthLoop:
         retry_policy: RetryPolicy | None = None,
         spec_max_bytes: int = DEFAULT_MAX_SPEC_BYTES,
         spec_translate_timeout: float = DEFAULT_TRANSLATE_TIMEOUT,
+        tls_verify: ssl.SSLContext | bool = True,
     ) -> None:
         self._worker_id = worker_id
         self._backend = backend
@@ -86,6 +88,9 @@ class WorkerHealthLoop:
         # _check_device's finally, so a longer TTL never blocks the next cycle.
         self._lock_ttl = lock_ttl if lock_ttl is not None else max(self._interval * 2, 120)
         self._http: httpx.AsyncClient | None = None
+        # Outbound mutual-TLS for reachability/spec GETs to devices (F-31). All
+        # assigned devices share one config today, so one client is sufficient.
+        self._tls_verify = tls_verify
         # Per-device timestamp of the last spec poll. Tracked separately from
         # cfg.last_check (which updates every health cycle) so the much longer
         # spec_poll_interval is honoured instead of always short-circuiting.
@@ -95,7 +100,7 @@ class WorkerHealthLoop:
 
     def _client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
-            self._http = httpx.AsyncClient(follow_redirects=True)
+            self._http = httpx.AsyncClient(follow_redirects=True, verify=self._tls_verify)
         return self._http
 
     async def run_forever(self, assigned: set[str]) -> None:
