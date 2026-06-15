@@ -10,6 +10,7 @@ Pods are spawned/teared by the Registry based on device health and spec availabi
 
 import asyncio
 import json
+import ssl
 from typing import Any
 from urllib.parse import quote
 
@@ -130,6 +131,7 @@ class DevicePod:
         keep_alive_interval: int = 30,
         request_timeout: float = 15,
         retry_policy: RetryPolicy | None = None,
+        tls_verify: "ssl.SSLContext | bool" = True,
     ):
         self.hostname = hostname
         self.manifest = manifest
@@ -138,6 +140,10 @@ class DevicePod:
         self.base_url = base_url
         self._keep_alive_interval = keep_alive_interval
         self._request_timeout = request_timeout
+        # Outbound TLS for tool calls to this device (F-31). True = httpx default
+        # certifi server verification; an SSLContext carries a client cert and/or
+        # a private CA for mutual TLS.
+        self._tls_verify = tls_verify
         # Bounded jittered retries for idempotent tool calls (F-05/F-44).
         self._retry_policy = retry_policy or RetryPolicy()
         # One reused HTTP client per pod (created lazily) instead of one per
@@ -176,7 +182,9 @@ class DevicePod:
     def _client(self) -> httpx.AsyncClient:
         """Return the pod's shared HTTP client, creating it on first use."""
         if self._http is None or self._http.is_closed:
-            self._http = httpx.AsyncClient(timeout=self._request_timeout, follow_redirects=True)
+            self._http = httpx.AsyncClient(
+                timeout=self._request_timeout, follow_redirects=True, verify=self._tls_verify
+            )
         return self._http
 
     async def aclose(self) -> None:

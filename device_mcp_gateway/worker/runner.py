@@ -48,6 +48,7 @@ from device_mcp_gateway.core.spec_limits import (
 )
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.security.mtls import build_verify
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.shared.session_router import SessionRouter
@@ -131,6 +132,11 @@ class DeviceWorker:
         self._stop_event = asyncio.Event()
 
         self._keep_alive = config.get("transport", {}).get("sse", {}).get("keep_alive_interval", 30)
+        # Outbound mutual-TLS for device calls (F-31): shared by this worker's pods
+        # (tool calls), spec fetches, and the health loop's reachability/spec GETs,
+        # so an mTLS-protected device is reachable on every path. True (httpx default
+        # certifi verification) when no security.mtls block is configured.
+        self._tls_verify = build_verify(config.get("security", {}).get("mtls"))
         # Device-claim lease TTL (RC-6). Outlives the heartbeat interval so a
         # claim refreshed each heartbeat never lapses while the pod runs, but
         # expires soon after a worker dies so another worker can take over.
@@ -201,6 +207,7 @@ class DeviceWorker:
             retry_policy=self._retry_policy,
             spec_max_bytes=self._spec_max_bytes,
             spec_translate_timeout=self._spec_translate_timeout,
+            tls_verify=self._tls_verify,
         )
         self._health.on_spec_changed = self._replace_pod
         await backend.initialize()
@@ -952,6 +959,7 @@ class DeviceWorker:
             rate_limit_rps=cfg.rate_limit_rps,
             keep_alive_interval=self._keep_alive,
             retry_policy=self._retry_policy,
+            tls_verify=self._tls_verify,
         )
         await pod.start(with_sse=False)  # distributed mode: no in-process SSE transport
         self._pods[hostname] = pod
@@ -1014,7 +1022,7 @@ class DeviceWorker:
         import httpx
 
         discovery = self._config.get("discovery", {})
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, verify=self._tls_verify) as client:
             if cfg.spec_url:
                 try:
                     resp = await client.get(cfg.spec_url, timeout=10)

@@ -44,6 +44,7 @@ from device_mcp_gateway.core.spec_limits import (
 )
 from device_mcp_gateway.core.translator import SpecTranslator
 from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.security.mtls import build_verify
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
     AbstractRegistryBackend,
@@ -236,6 +237,10 @@ class Registry:
         self._spec_max_bytes = config.get("spec_max_bytes", DEFAULT_MAX_SPEC_BYTES)
         self._spec_translate_timeout = config.get("spec_translate_timeout", DEFAULT_TRANSLATE_TIMEOUT)
         self._http_client: httpx.AsyncClient | None = None
+        # Outbound mutual-TLS for device calls (F-31): reachability/discovery GETs
+        # here, and tool calls in the pods we spawn, both present this client cert /
+        # honour this CA. True when nothing is configured (default httpx behaviour).
+        self._tls_verify = build_verify(config.get("security", {}).get("mtls"))
         self._health_semaphore = asyncio.Semaphore(config.get("max_concurrent_health_checks", 10))
         # Bounded jittered retries for idempotent outbound GETs — reachability, spec
         # fetch, discovery (F-05). Shared by spawned pods for their tool calls too.
@@ -252,7 +257,7 @@ class Registry:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(follow_redirects=True)
+            self._http_client = httpx.AsyncClient(follow_redirects=True, verify=self._tls_verify)
         return self._http_client
 
     # ------------------------------------------------------------------
@@ -644,6 +649,7 @@ class Registry:
             rate_limit_rps=profile.rate_limit_rps,
             keep_alive_interval=keep_alive,
             retry_policy=self._retry_policy,
+            tls_verify=self._tls_verify,
         )
         await pod.start()
         profile.pod = pod
