@@ -43,6 +43,8 @@ __all__ = [
     "reconciler_leader",
     "rebalance_shed_total",
     "duplicate_calls_suppressed_total",
+    "calls_rejected_overload_total",
+    "worker_calls_throttled_total",
     "tool_call_timeouts_total",
     "sse_messages_dropped_total",
     "dead_letter_total",
@@ -210,6 +212,13 @@ calls_rejected_overload_total = Counter(
     "exceeded the admission watermark (F-06) — rejected up front instead of "
     "being silently trimmed at MAXLEN.",
     ["hostname"],
+)
+worker_calls_throttled_total = Counter(
+    "mcp_worker_calls_throttled_total",
+    "Tool-call dispatches that had to wait on the worker-wide concurrency cap "
+    "(registry.max_concurrent_calls_per_worker, F-13) because every aggregate slot "
+    "was in use. The worker-level backpressure signal — distinct from the per-device "
+    "cap — indicating a worker is saturated across all the devices it hosts.",
 )
 
 

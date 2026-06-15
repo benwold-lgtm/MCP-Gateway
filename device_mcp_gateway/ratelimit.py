@@ -53,6 +53,20 @@ def client_ip_key_func(trust_proxy: bool):
     return _key
 
 
+def principal_key_func(request: Request) -> str:
+    """Map a request to its authenticated rate-limit identity (F-16).
+
+    ``authenticate_request`` (rbac) stashes ``request.state.principal`` before any
+    route dependency runs, so the per-principal limiter can key on the caller's
+    ``subject``. Unauthenticated/anonymous callers collapse to one shared bucket.
+    This dimension is orthogonal to the per-IP one: it caps a single identity even
+    when spread across many source IPs (which the IP limiter alone would miss).
+    """
+    principal = getattr(request.state, "principal", None)
+    subject = getattr(principal, "subject", None)
+    return subject or "anonymous"
+
+
 class RateLimiter(Protocol):
     async def hit(self, key: str, limit: int, window: int) -> tuple[bool, int]:
         """Record a hit; return (allowed, retry_after_seconds)."""
@@ -98,8 +112,19 @@ class RedisRateLimiter:
         return True, 0
 
 
+async def _enforce(limiter: RateLimiter, key: str, limit: int, window: int) -> None:
+    """Record a hit on `key` and raise 429 (with Retry-After) if over the limit."""
+    allowed, retry_after = await limiter.hit(key, limit, window)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
 def rate_limit(spec: str, scope: str):
-    """FastAPI dependency enforcing `spec` (e.g. "60/minute") for `scope`.
+    """FastAPI dependency enforcing `spec` (e.g. "60/minute") per client IP for `scope`.
 
     Reads the active limiter and key function from app.state, so embedded vs
     distributed selection and proxy-trust config live in one place (create_app).
@@ -108,14 +133,27 @@ def rate_limit(spec: str, scope: str):
 
     async def _dependency(request: Request) -> None:
         limiter: RateLimiter = request.app.state.rate_limiter
-        key_func = request.app.state.rate_limit_key
-        client = key_func(request)
-        allowed, retry_after = await limiter.hit(f"{scope}:{client}", limit, window)
-        if not allowed:
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded",
-                headers={"Retry-After": str(retry_after)},
-            )
+        client = request.app.state.rate_limit_key(request)
+        await _enforce(limiter, f"{scope}:{client}", limit, window)
+
+    return _dependency
+
+
+def rate_limit_principal(spec: str, scope: str):
+    """FastAPI dependency enforcing `spec` per authenticated principal for `scope` (F-16).
+
+    Composes with (does not replace) the per-IP :func:`rate_limit` on the same route:
+    an expensive call must satisfy *both* its per-IP and its per-identity budget, so
+    neither one principal fanning out across many IPs nor many principals behind one
+    NAT can evade their fair share. Reuses the same app.state limiter backend, so it
+    is per-process in embedded mode and shared across replicas in distributed mode.
+    Order this dependency after ``authenticate_request`` so the principal is resolved.
+    """
+    limit, window = parse_limit(spec)
+
+    async def _dependency(request: Request) -> None:
+        limiter: RateLimiter = request.app.state.rate_limiter
+        subject = principal_key_func(request)
+        await _enforce(limiter, f"principal:{scope}:{subject}", limit, window)
 
     return _dependency

@@ -110,6 +110,13 @@ registry:
   # When saturated the worker stops reading that device's call stream (backpressure),
   # so a burst shows up as Redis-stream lag rather than unbounded worker memory.
   max_concurrent_calls_per_device: 20
+  # Distributed mode: aggregate cap on concurrent in-flight tool calls across ALL
+  # devices a worker hosts (F-13). The per-device cap above bounds a single device;
+  # this bounds the worker as a whole, so a worker owning many devices can't run
+  # devices × max_concurrent_calls_per_device calls at once on its one shared event
+  # loop and HTTP pool. When saturated, dispatches wait (the burst becomes Redis-stream
+  # lag) and mcp_worker_calls_throttled_total increments. Keep ≥ the per-device cap.
+  max_concurrent_calls_per_worker: 200
   # Distributed mode: admission watermark (F-06). When a device's call stream has
   # this many undelivered calls (consumer-group lag), the gateway fast-fails new
   # tool calls with HTTP 429 instead of queuing behind work that would be silently

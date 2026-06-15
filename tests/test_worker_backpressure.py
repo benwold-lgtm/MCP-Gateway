@@ -114,6 +114,70 @@ async def test_schedule_dispatch_caps_concurrency(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_worker_cap_bounds_aggregate_across_devices(monkeypatch):
+    """The worker-wide cap (F-13) bounds total in-flight calls across ALL devices,
+    even when each device's own cap would allow far more. A burst spread over many
+    devices becomes stream lag, not devices × per-device concurrency."""
+    from device_mcp_gateway import metrics
+
+    cfg = {"registry": {"health_check_interval": 30, "max_concurrent_calls_per_worker": 2}}
+    worker = DeviceWorker(worker_id="w", config=cfg, redis_client=_shared_redis())
+    gate = asyncio.Event()
+    running = {"n": 0, "max": 0}
+
+    async def _fake_dispatch(hostname, stream, group, msg_id, fields):
+        running["n"] += 1
+        running["max"] = max(running["max"], running["n"])
+        await gate.wait()
+        running["n"] -= 1
+
+    monkeypatch.setattr(worker, "_dispatch_call", _fake_dispatch)
+    # Two devices, each with a roomy per-device cap, so only the worker-wide cap binds.
+    sem_a, sem_b = asyncio.Semaphore(10), asyncio.Semaphore(10)
+
+    await worker._schedule_dispatch(sem_a, "a", "s", "g", "1", {})
+    await worker._schedule_dispatch(sem_b, "b", "s", "g", "1", {})
+    await asyncio.sleep(0.02)
+    assert running["n"] == 2  # worker-wide cap (2) reached ACROSS the two devices
+
+    throttled_before = metrics.worker_calls_throttled_total._value.get()
+    # A 3rd call blocks on the worker-wide sem even though device b's own slot is free.
+    third = asyncio.create_task(worker._schedule_dispatch(sem_b, "b", "s", "g", "2", {}))
+    await asyncio.sleep(0.02)
+    assert not third.done()  # blocked on the worker-wide cap
+    assert running["n"] == 2  # aggregate cap held; device-b slot was free but worker full
+    assert sem_b._value == 8  # device slot taken FIRST and held during the worker-wide wait
+    assert metrics.worker_calls_throttled_total._value.get() == throttled_before + 1  # saturation signal
+
+    gate.set()  # free a slot → the 3rd proceeds
+    await asyncio.wait_for(third, timeout=1)
+    await asyncio.gather(*list(worker._inflight_calls), return_exceptions=True)
+    assert running["max"] == 2  # worker-wide cap never exceeded
+
+
+@pytest.mark.asyncio
+async def test_worker_cap_releases_both_slots_on_completion():
+    """A finished dispatch frees both its device slot and its worker-wide slot, so a
+    later call on another device can run (no leak of the aggregate slot)."""
+    cfg = {"registry": {"health_check_interval": 30, "max_concurrent_calls_per_worker": 1}}
+    worker = DeviceWorker(worker_id="w", config=cfg, redis_client=_shared_redis())
+
+    async def _noop(*a):
+        return None
+
+    worker._dispatch_call = _noop  # type: ignore[method-assign]
+    sem_a, sem_b = asyncio.Semaphore(10), asyncio.Semaphore(10)
+
+    await worker._schedule_dispatch(sem_a, "a", "s", "g", "1", {})
+    await asyncio.gather(*list(worker._inflight_calls), return_exceptions=True)
+    await asyncio.sleep(0)
+    # Worker-wide slot was released, so a different device can dispatch despite cap=1.
+    await asyncio.wait_for(worker._schedule_dispatch(sem_b, "b", "s", "g", "1", {}), timeout=1)
+    await asyncio.gather(*list(worker._inflight_calls), return_exceptions=True)
+    assert worker._worker_call_sem._value == 1  # back to full capacity, nothing stranded
+
+
+@pytest.mark.asyncio
 async def test_schedule_dispatch_tracks_inflight():
     """Scheduled dispatches are tracked (so shutdown can drain them) and untracked
     on completion."""
