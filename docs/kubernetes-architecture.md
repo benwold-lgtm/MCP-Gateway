@@ -20,7 +20,7 @@ flowchart TB
             SVC["Service: device-mcp-gateway\ntype: ClusterIP  ·  port: 8000"]
 
             subgraph GW_DEP["Deployment: device-mcp-gateway  (stateless — scale freely)"]
-                CTRL["FastAPI Control Plane  :8000\n─────────────────────────────────────\nPOST  /devices          register device\nGET   /devices/{n}/sse  open MCP stream\nPOST  /devices/{n}/messages  invoke tool\nGET   /health  ·  GET  /readyz  ·  GET  /metrics/summary\nProm /metrics on :9100 (dedicated port)\nRate limiting  ·  CORS  ·  X-Request-Id"]
+                CTRL["FastAPI Control Plane  :8000\n─────────────────────────────────────\nPOST  /v1/devices          register device\nGET   /v1/devices/{n}/sse  open MCP stream\nPOST  /v1/devices/{n}/messages  invoke tool\nGET   /health  ·  GET  /readyz  ·  GET  /v1/metrics/summary\nProm /metrics on :9100 (dedicated port)\nRate limiting  ·  CORS  ·  X-Request-Id"]
             end
 
             PDB_GW["PodDisruptionBudget\ndevice-mcp-gateway-pdb\nminAvailable: 1"]
@@ -47,7 +47,7 @@ flowchart TB
     end
 
     LLM      -- "① MCP call  (SSE)" --> ING
-    ING      -- "② TLS · route /devices/..." --> SVC
+    ING      -- "② TLS · route /v1/devices/..." --> SVC
     SVC      -- "③ forward" --> CTRL
     CTRL     -- "④ publish assignment / tool call" --> REDIS_SVC
     REDIS_SVC --> REDIS
@@ -99,7 +99,7 @@ sequenceDiagram
     participant WK as Worker
     participant API as Device API
 
-    Admin->>GW: POST /devices<br/>{ hostname, base_url, auth_type, auth }
+    Admin->>GW: POST /v1/devices<br/>{ hostname, base_url, auth_type, auth }
     GW->>REDIS: HSET device:{hostname}:config ...<br/>SADD devices:all {hostname}
     GW->>REDIS: XADD device:assignments<br/>{ action: "assign", hostname }
     GW-->>Admin: 200 OK { status: "registered", pod_active: false }
@@ -116,7 +116,7 @@ sequenceDiagram
 
 #### Registration latency — provisioning is off the request path (F-11)
 
-`POST /devices` never blocks on a slow or unreachable device. In **distributed mode** the gateway only persists the device and publishes an `assign`, returning `200 { pod_active: false }` immediately; a worker does reachability + spec discovery + translation + spawn out of band (the diagram above). In **embedded mode** the gateway runs that same provisioning on a background task and waits inline only up to `registry.registration_provision_budget` (default 8 s): a fast/healthy device finishes within the budget so the response already reflects the spawned pod, while a slow device returns promptly with `"provisioning": true` and the work continues in the background (also re-checked by the health loop). Either way the caller polls `GET /devices/{hostname}` for the settled `reachable` / `pod_active` / `spawn_error`.
+`POST /v1/devices` never blocks on a slow or unreachable device. In **distributed mode** the gateway only persists the device and publishes an `assign`, returning `200 { pod_active: false }` immediately; a worker does reachability + spec discovery + translation + spawn out of band (the diagram above). In **embedded mode** the gateway runs that same provisioning on a background task and waits inline only up to `registry.registration_provision_budget` (default 8 s): a fast/healthy device finishes within the budget so the response already reflects the spawned pod, while a slow device returns promptly with `"provisioning": true` and the work continues in the background (also re-checked by the health loop). Either way the caller polls `GET /v1/devices/{hostname}` for the settled `reachable` / `pod_active` / `spawn_error`.
 
 Spec **discovery probes candidate paths concurrently** (both the embedded registry and the worker) and takes the first path that returns a valid spec, so worst-case discovery latency is one path's timeout rather than the sum across all of `spec_paths`. Translation is bounded separately by `registry.spec_translate_timeout` (F-09).
 
@@ -132,12 +132,12 @@ sequenceDiagram
     participant WK as Worker (pod owner)
     participant API as Device API
 
-    LLM->>GW: GET /devices/sensor-api/sse
+    LLM->>GW: GET /v1/devices/sensor-api/sse
     GW->>REDIS: HSET session:{uuid} hostname gateway_id TTL
-    GW-->>LLM: event: endpoint<br/>data: /devices/sensor-api/messages?session_id={uuid}
+    GW-->>LLM: event: endpoint<br/>data: /v1/devices/sensor-api/messages?session_id={uuid}
     Note over GW: Subscribe to session:{uuid}:results (pub/sub)
 
-    LLM->>GW: POST /devices/sensor-api/messages?session_id={uuid}<br/>{ jsonrpc: "2.0", method: "tools/call", ... }
+    LLM->>GW: POST /v1/devices/sensor-api/messages?session_id={uuid}<br/>{ jsonrpc: "2.0", method: "tools/call", ... }
     GW->>REDIS: XADD device:sensor-api:calls<br/>{ request_id, session_id, gateway_id, message }
     GW-->>LLM: 200 OK { status: "accepted" }
 
@@ -275,7 +275,7 @@ Sites that previously only logged a failure now also increment a counter, so req
 
 ### Fleet gauges are leader-gated (SRE O4)
 
-`mcp_registered_devices`, `mcp_active_pods`, and `mcp_reachable_devices` are fleet-wide. To avoid every gateway replica running a full `list_devices()` each cycle (×replicas Redis load), only the replica holding the `gateway:gauge-leader` lock computes them. **Consequence:** these gauges are populated on one replica at a time — aggregate them with `max()` across replicas in Prometheus. (Embedded mode is a single process and always refreshes.) The `/admin/overview` read aggregate is likewise served from a short-TTL per-replica cache with an `ETag` (`gateway.read_cache_ttl`, default 5 s) so a polling UI doesn't trigger a fresh `list_devices()` per request.
+`mcp_registered_devices`, `mcp_active_pods`, and `mcp_reachable_devices` are fleet-wide. To avoid every gateway replica running a full `list_devices()` each cycle (×replicas Redis load), only the replica holding the `gateway:gauge-leader` lock computes them. **Consequence:** these gauges are populated on one replica at a time — aggregate them with `max()` across replicas in Prometheus. (Embedded mode is a single process and always refreshes.) The `/v1/admin/overview` read aggregate is likewise served from a short-TTL per-replica cache with an `ETag` (`gateway.read_cache_ttl`, default 5 s) so a polling UI doesn't trigger a fresh `list_devices()` per request.
 
 ### End-to-end tracing (SRE O2)
 
@@ -290,7 +290,7 @@ In distributed mode tool calls execute on the worker, so the **gateway's** audit
 If the UI runs as a gateway-pod sidecar, do **not** make it depend on tailing `logs/gateway.log`: that file rotates (50 MB × 5) and, more importantly, **worker logs — tool execution, latency, dead-letters — live in a different pod the sidecar cannot see**. The supported sourcing model is:
 
 - **Metrics** (RED, failure-mode counters, latency histogram) from each pod's `:9100` Prometheus endpoint, aggregated by a Prometheus server;
-- **Fleet/device state** from the gateway read APIs (`GET /admin/overview`, `GET /metrics/summary`, `GET /devices`);
+- **Fleet/device state** from the gateway read APIs (`GET /v1/admin/overview`, `GET /v1/metrics/summary`, `GET /v1/devices`);
 - **Structured logs**, if needed, shipped from *all* pods (gateway and worker) to a central log store and queried by `rid` — never read from one pod's local file.
 
 ---
@@ -322,7 +322,7 @@ Register the two devices shown in the diagrams after the gateway is running. Rep
 
 **Sensor API** — API key authentication:
 ```bash
-curl -X POST https://mcp-gateway.example.com/devices \
+curl -X POST https://mcp-gateway.example.com/v1/devices \
   -H "Authorization: Bearer <gateway-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -336,7 +336,7 @@ curl -X POST https://mcp-gateway.example.com/devices \
 
 **Actuator API** — OAuth2 client credentials:
 ```bash
-curl -X POST https://mcp-gateway.example.com/devices \
+curl -X POST https://mcp-gateway.example.com/v1/devices \
   -H "Authorization: Bearer <gateway-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -353,7 +353,7 @@ curl -X POST https://mcp-gateway.example.com/devices \
   }'
 ```
 
-In distributed mode, the gateway immediately returns `{ pod_active: false }` — the pod becomes active asynchronously as a worker picks up the assignment. Poll `GET /devices/{hostname}` until `pod_active: true`.
+In distributed mode, the gateway immediately returns `{ pod_active: false }` — the pod becomes active asynchronously as a worker picks up the assignment. Poll `GET /v1/devices/{hostname}` until `pod_active: true`.
 
 ---
 

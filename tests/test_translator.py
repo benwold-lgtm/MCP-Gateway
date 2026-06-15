@@ -560,7 +560,7 @@ class TestComponentRefResolution:
         spec["components"]["parameters"] = {
             "DeviceId": {"name": "device_id", "in": "path", "required": True, "schema": {"type": "string"}}
         }
-        spec["paths"]["/devices/{device_id}"] = {
+        spec["paths"]["/v1/devices/{device_id}"] = {
             "get": {
                 "operationId": "get_device",
                 "parameters": [{"$ref": "#/components/parameters/DeviceId"}],

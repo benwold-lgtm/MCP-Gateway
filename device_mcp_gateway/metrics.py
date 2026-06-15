@@ -261,21 +261,48 @@ def start_metrics_server(port: int, auth_token: str | None = None) -> bool:
         return False
 
 
+def _full_path_format(scope, route, path_format: str) -> str:
+    """Re-attach any router prefix to a relative ``path_format``.
+
+    FastAPI >=0.137 includes a prefixed router via a wrapper that keeps the inner
+    routes' ``path_format`` *relative* (e.g. ``/devices/{hostname}`` for a route
+    mounted under ``/v1``), with the matched ``Route`` on the scope being that inner
+    route — so ``path_format`` alone drops the ``/v1`` and a dashboard can't tell API
+    versions apart. (FastAPI <=0.136 flattened the prefix into ``path_format``, so
+    there is nothing to re-attach.) The route's own anchored ``path_regex`` matches
+    the concrete path *relative* to the prefix; the prefix is therefore the leftmost
+    path boundary from which that regex still matches. This is version-independent:
+    when ``path_format`` is already absolute the regex matches at offset 0 and the
+    prefix is empty.
+    """
+    concrete = scope.get("path") or ""
+    regex = getattr(route, "path_regex", None)
+    # Fast path: an unprefixed static route's concrete path == its template.
+    if concrete == path_format or not concrete or regex is None:
+        return path_format
+    for i, ch in enumerate(concrete):
+        if ch == "/" and regex.match(concrete[i:]):
+            return concrete[:i] + path_format
+    return path_format
+
+
 def route_template(request) -> str:
-    """Return the matched route's path template (e.g. ``/devices/{hostname}``).
+    """Return the matched route's path template (e.g. ``/v1/devices/{hostname}``).
 
     Starlette (1.3+) puts the matched ``Route`` on the scope, whose ``path_format``
     is the low-cardinality template directly — robust across the endpoint-wrapping
     changes that broke the older ``scope["endpoint"]`` identity match. Older
     Starlette only exposed ``scope["endpoint"]``, so we keep an endpoint→path_format
-    cache as a fallback. Unmatched requests (404 from scanners) collapse to
-    ``__unmatched__`` so they cannot explode the label set.
+    cache as a fallback. A router ``prefix`` (e.g. ``/v1``) may live outside the inner
+    route's ``path_format``, so we re-attach it via ``_full_path_format``. Unmatched
+    requests (404 from scanners) collapse to ``__unmatched__`` so they cannot explode
+    the label set.
     """
     route = request.scope.get("route")
     if route is not None:
         path_format = getattr(route, "path_format", None) or getattr(route, "path", None)
         if path_format:
-            return path_format
+            return _full_path_format(request.scope, route, path_format)
     endpoint = request.scope.get("endpoint")
     if endpoint is None:
         return "__unmatched__"

@@ -10,7 +10,7 @@ The gateway supports two modes selected by `registry.mode` in `config.yaml`.
 
 ```
 LLM clients
-    │  SSE (GET /devices/{hostname}/sse)
+    │  SSE (GET /v1/devices/{hostname}/sse)
     ▼
 ┌───────────────────────────────────────────────────┐
 │  Gateway (stateless, scale N replicas)            │
@@ -66,7 +66,7 @@ device-mcp
 # device-mcp --host 0.0.0.0 --port 8000 --config /path/to/config.yaml
 
 # 4. Register a device
-curl -X POST http://localhost:8000/devices \
+curl -X POST http://localhost:8000/v1/devices \
   -H "Content-Type: application/json" \
   -d '{"hostname": "my-sensor", "base_url": "http://192.168.1.42", "transport": "sse"}'
 
@@ -87,7 +87,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 docker compose up -d --scale worker=2
 
 # 3. Register a device (any gateway instance)
-curl -X POST http://localhost:8000/devices \
+curl -X POST http://localhost:8000/v1/devices \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"hostname": "my-sensor", "base_url": "http://192.168.1.42", "transport": "sse"}'
@@ -109,7 +109,7 @@ Add the device's SSE endpoint to your Claude Desktop config file:
   "mcpServers": {
     "my-sensor": {
       "type": "sse",
-      "url": "http://localhost:8000/devices/my-sensor/sse"
+      "url": "http://localhost:8000/v1/devices/my-sensor/sse"
     }
   }
 }
@@ -124,18 +124,18 @@ The SSE transport uses a two-step protocol. The server assigns a session ID — 
 **Step 1 — Open the event stream:**
 ```bash
 curl -N -H "Authorization: Bearer <api-key>" \
-  http://localhost:8000/devices/my-sensor/sse
+  http://localhost:8000/v1/devices/my-sensor/sse
 ```
 
 The first event is `endpoint` and its `data` is the POST URL for this session:
 ```
 event: endpoint
-data: /devices/my-sensor/messages?session_id=<server-assigned-uuid>
+data: /v1/devices/my-sensor/messages?session_id=<server-assigned-uuid>
 ```
 
 **Step 2 — Send a tool invocation on that session:**
 ```bash
-curl -X POST "http://localhost:8000/devices/my-sensor/messages?session_id=<uuid-from-step-1>" \
+curl -X POST "http://localhost:8000/v1/devices/my-sensor/messages?session_id=<uuid-from-step-1>" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <api-key>" \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -155,30 +155,32 @@ All endpoints except `/health` and `/readyz` require `Authorization: Bearer <api
 | Role | Scopes | Can |
 |------|--------|-----|
 | `admin` | `devices:read`, `devices:write`, `tools:call`, `metrics:read` | everything |
-| `viewer` | `devices:read`, `metrics:read` | read device state + `/metrics/summary`; **no** mutations or tool calls (403) |
+| `viewer` | `devices:read`, `metrics:read` | read device state + `/v1/metrics/summary`; **no** mutations or tool calls (403) |
 
 Configure keys via `gateway.api_key` (legacy single key = `admin`), `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY`, or a `gateway.rbac` list of `{name, key, role}` (see [config.yaml](config.yaml)). If no key is set anywhere, auth is disabled (all requests permitted). The authenticated principal is recorded as `subject` in audit logs. The seam (`authenticate()` → `Principal{subject, scopes}`) is built to swap to JWT/OIDC later without touching routes.
 
-Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /devices` — 60 req/min; `POST /messages` — 600 req/min. Returns 429 on excess.
+Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /v1/devices` — 60 req/min; `POST /messages` — 600 req/min. Returns 429 on excess.
+
+> **API versioning.** The management API is served under a `/v1` prefix (e.g. `POST /v1/devices`). Operational probes (`/health`, `/readyz`) and the Prometheus scrape endpoint are intentionally **unversioned** — they are infra contracts consumed by Kubernetes and Prometheus, not application clients. A backward-incompatible change to the management API will introduce `/v2` and dual-mount `/v1` for a deprecation window.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Liveness probe — process status, active pod count |
 | `GET` | `/readyz` | Readiness probe — backend connectivity (Redis or SQLite) |
-| `POST` | `/devices` | Register a device |
-| `PUT` | `/devices/{hostname}` | Update a device config (replaces and restarts pod) |
-| `DELETE` | `/devices/{hostname}` | Unregister a device |
-| `GET` | `/devices` | List all registered devices |
-| `GET` | `/devices/{hostname}` | Get a single device's status |
-| `GET` | `/devices/{hostname}/tools` | List a device's MCP tools |
-| `GET` | `/devices/{hostname}/diagnostics` | "Why is my device down?" — status, last check + age, spec/manifest state, spawn error, circuit breaker (`devices:read`) |
-| `GET` | `/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
-| `POST` | `/devices/{hostname}/messages` | Send a JSON-RPC 2.0 message via SSE |
-| `GET` | `/devices/{hostname}/deadletter` | Inspect dead-lettered tool calls (distributed mode; `devices:read`) |
-| `POST` | `/devices/{hostname}/deadletter/replay` | Re-publish dead-lettered calls onto the call stream; optional `{"ids":[...]}` (`devices:write`) |
-| `DELETE` | `/devices/{hostname}/deadletter` | Drain the dead-letter queue; optional `{"ids":[...]}` (`devices:write`) |
-| `GET` | `/metrics/summary` | Reachability counts and per-device rate-limit state (JSON, auth-protected) |
-| `GET` | `/admin/overview` | Aggregate fleet counts + device list in one call (UI/BFF enabler; `devices:read`) |
+| `POST` | `/v1/devices` | Register a device |
+| `PUT` | `/v1/devices/{hostname}` | Update a device config (replaces and restarts pod) |
+| `DELETE` | `/v1/devices/{hostname}` | Unregister a device |
+| `GET` | `/v1/devices` | List all registered devices |
+| `GET` | `/v1/devices/{hostname}` | Get a single device's status |
+| `GET` | `/v1/devices/{hostname}/tools` | List a device's MCP tools |
+| `GET` | `/v1/devices/{hostname}/diagnostics` | "Why is my device down?" — status, last check + age, spec/manifest state, spawn error, circuit breaker (`devices:read`) |
+| `GET` | `/v1/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
+| `POST` | `/v1/devices/{hostname}/messages` | Send a JSON-RPC 2.0 message via SSE |
+| `GET` | `/v1/devices/{hostname}/deadletter` | Inspect dead-lettered tool calls (distributed mode; `devices:read`) |
+| `POST` | `/v1/devices/{hostname}/deadletter/replay` | Re-publish dead-lettered calls onto the call stream; optional `{"ids":[...]}` (`devices:write`) |
+| `DELETE` | `/v1/devices/{hostname}/deadletter` | Drain the dead-letter queue; optional `{"ids":[...]}` (`devices:write`) |
+| `GET` | `/v1/metrics/summary` | Reachability counts and per-device rate-limit state (JSON, auth-protected) |
+| `GET` | `/v1/admin/overview` | Aggregate fleet counts + device list in one call (UI/BFF enabler; `devices:read`) |
 
 Prometheus metrics are exposed separately on a **dedicated metrics port** (`metrics.port`, default `9100`) at `GET /metrics`, not on the API port — point a `ServiceMonitor`/scrape config at that port and restrict it with a NetworkPolicy. Set `metrics.enabled: false` (or `MCP_METRICS_ENABLED=0`) to disable.
 
@@ -213,7 +215,7 @@ Prometheus metrics are exposed separately on a **dedicated metrics port** (`metr
 
 ### Response shapes
 
-**`GET /devices/{hostname}`:**
+**`GET /v1/devices/{hostname}`:**
 ```json
 {
   "hostname": "my-sensor",
@@ -228,7 +230,7 @@ Prometheus metrics are exposed separately on a **dedicated metrics port** (`metr
 }
 ```
 
-**`GET /devices/{hostname}/diagnostics`:**
+**`GET /v1/devices/{hostname}/diagnostics`:**
 ```json
 {
   "hostname": "my-sensor",
@@ -250,7 +252,7 @@ Prometheus metrics are exposed separately on a **dedicated metrics port** (`metr
 ```
 In distributed mode the breaker runs on the worker, so `breaker` is `{"available": false, "note": "pod runs on a worker; ..."}`.
 
-**`POST /devices` / `PUT /devices/{hostname}`:**
+**`POST /v1/devices` / `PUT /v1/devices/{hostname}`:**
 ```json
 {"status": "registered", "hostname": "my-sensor", "pod_active": true, "reachable": true, "spawn_error": null}
 ```
@@ -551,9 +553,9 @@ failed client call with the corresponding gateway and worker log entries.
 
 ### Device registered but `pod_active: false`
 
-The pod failed to start. Check `spawn_error` in `GET /devices/{hostname}`:
+The pod failed to start. Check `spawn_error` in `GET /v1/devices/{hostname}`:
 ```bash
-curl http://localhost:8000/devices/my-sensor
+curl http://localhost:8000/v1/devices/my-sensor
 ```
 
 Common causes:

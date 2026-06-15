@@ -25,7 +25,7 @@ the clean stream to forward to a retained SIEM/WORM store. Schema:
 
 | Action | When |
 |--------|------|
-| `device.create` / `device.update` / `device.delete` | a privileged `POST` / `PUT` / `DELETE /devices…` succeeds |
+| `device.create` / `device.update` / `device.delete` | a privileged `POST` / `PUT` / `DELETE /v1/devices…` succeeds |
 | `auth.authenticate` (`denied`) | a request fails authentication (**401**) |
 | `authz.check` (`denied`) | an authenticated caller lacks the required scope (**403**) |
 | `tool dispatch` | a tool call executes (gateway embedded dispatch / worker) |
