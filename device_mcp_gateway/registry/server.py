@@ -146,13 +146,38 @@ class Registry:
         auth: AbstractAuth | None = None,
         transport: str = "sse",
         rate_limit_rps: float | None = None,
+        *,
+        keep_auth: bool = False,
     ) -> DeviceConfig:
-        """PUT semantics: kill existing pod and re-register atomically."""
+        """PUT semantics: kill existing pod and re-register atomically.
+
+        ``keep_auth`` means the caller (a PUT that omitted any auth field) wants the
+        stored credentials preserved. We carry the existing record through verbatim
+        rather than reconstructing an ``AbstractAuth`` — in distributed mode the
+        stored ``auth_config`` is Fernet ciphertext, so reconstructing it parsed the
+        ciphertext as JSON, failed, and silently re-registered the device with NO
+        credentials (the PUT-wipes-credentials bug).
+        """
         if self._mode == "distributed":
             await self._backend.publish_assignment("unassign", hostname)
+            if keep_auth:
+                prev = await self._backend.get_device(hostname)
+                # Pass the stored ciphertext straight through — no decrypt/re-encrypt.
+                return await self._write_distributed(
+                    hostname,
+                    base_url,
+                    spec_url,
+                    prev.auth_type if prev else None,
+                    prev.auth_config if prev else None,
+                    transport,
+                    rate_limit_rps,
+                )
             return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
         async with self._lock_for(hostname):
             existing = self._profiles.get(hostname)
+            if keep_auth and existing:
+                # Embedded keeps the live auth object on the profile; reuse it directly.
+                auth = existing.auth
             if existing:
                 await self._pod_supervisor.kill(existing)
                 self._spec_service.invalidate(existing.base_url)
@@ -210,6 +235,26 @@ class Registry:
         # Encrypt credentials before they land in Redis (distributed mode).
         if auth_config_str:
             auth_config_str = self._codec.encrypt(auth_config_str)
+        return await self._write_distributed(
+            hostname, base_url, spec_url, auth_type, auth_config_str, transport, rate_limit_rps
+        )
+
+    async def _write_distributed(
+        self,
+        hostname: str,
+        base_url: str,
+        spec_url: str | None,
+        auth_type: str | None,
+        auth_config_str: str | None,
+        transport: str,
+        rate_limit_rps: float | None,
+    ) -> DeviceConfig:
+        """Persist a device record (auth_config already encrypted) and publish assign.
+
+        Split out of ``_register_distributed`` so ``replace_device(keep_auth=True)``
+        can write back the previously-stored ciphertext without round-tripping it
+        through decrypt/re-encrypt or an ``AbstractAuth`` reconstruction.
+        """
         cfg = DeviceConfig(
             hostname=hostname,
             base_url=base_url,

@@ -267,6 +267,14 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
 _DEVICES_SET = "devices:all"
 _ASSIGNMENTS_STREAM = "device:assignments"
 _WORKER_GROUP = "workers"
+# Unassign is delivered on a SEPARATE stream that every worker tails independently
+# (broadcast), not via the shared competing-consumers group. An "assign" only needs
+# one worker to act, but an "unassign" must reach whichever worker actually owns the
+# pod — and on the shared group it landed on one arbitrary worker that usually wasn't
+# the owner, so the pod was never torn down and a PUT-replace never applied its new
+# config. Bounded so a churny fleet can't grow it without limit.
+_UNASSIGN_STREAM = "device:unassignments"
+_UNASSIGN_STREAM_MAXLEN = 10_000
 # Cap a device's pending tool-call stream so a backlog (slow/crashed worker, no
 # consumer) can't grow Redis without bound (SRE #4). Approximate trimming keeps
 # XADD O(1); the real backpressure is the worker's per-device concurrency cap.
@@ -354,7 +362,14 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         await self._r.delete(f"device:{hostname}:manifest")
 
     async def publish_assignment(self, action: str, hostname: str) -> None:
-        await self._r.xadd(_ASSIGNMENTS_STREAM, {"action": action, "hostname": hostname})
+        if action == "unassign":
+            # Broadcast: every worker tails this stream so the actual owner tears down
+            # its pod (non-owners no-op). See _UNASSIGN_STREAM rationale above.
+            await self._r.xadd(
+                _UNASSIGN_STREAM, {"hostname": hostname}, maxlen=_UNASSIGN_STREAM_MAXLEN, approximate=True
+            )
+        else:
+            await self._r.xadd(_ASSIGNMENTS_STREAM, {"action": action, "hostname": hostname})
         logger.debug(f"Published assignment: action={action} hostname={hostname}")
 
     async def publish_tool_call(
