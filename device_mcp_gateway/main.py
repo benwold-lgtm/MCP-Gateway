@@ -1110,6 +1110,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                     message=payload,
                     rid=_rid,
                     traceparent=_carrier.get("traceparent", ""),
+                    subject=_subject,
                 )
             # Guard against a lost call (no worker consuming): if no result is
             # marked within the timeout, emit an error event on the SSE stream

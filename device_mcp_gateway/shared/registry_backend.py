@@ -152,6 +152,7 @@ class AbstractRegistryBackend(ABC):
         message: dict,
         rid: str = "",
         traceparent: str = "",
+        subject: str = "",
     ) -> None:
         """Push a tool-call message onto the device's Redis Stream.
 
@@ -159,7 +160,11 @@ class AbstractRegistryBackend(ABC):
         stream so the worker can bind it in its audit log, giving one trace id
         across the gateway→worker hop (SRE O2). `traceparent` is the optional W3C
         trace-context (F-14): when tracing is on, the worker starts its execution
-        span as a child of it so the call is one end-to-end trace.
+        span as a child of it so the call is one end-to-end trace. `subject` is
+        the authenticated principal that issued the call (F-30 residual): it
+        rides the stream so the worker's execution-audit record carries the same
+        actor attribution the gateway logged at dispatch, extending the audit
+        trail past the gateway edge.
         """
         ...
 
@@ -250,6 +255,7 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
         message: dict,
         rid: str = "",
         traceparent: str = "",
+        subject: str = "",
     ) -> None:
         pass  # no-op; embedded mode routes calls in-process
 
@@ -360,6 +366,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         message: dict,
         rid: str = "",
         traceparent: str = "",
+        subject: str = "",
     ) -> None:
         await self._r.xadd(
             f"device:{hostname}:calls",
@@ -369,6 +376,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
                 "gateway_id": gateway_id,
                 "rid": rid,
                 "traceparent": traceparent,
+                "subject": subject,
                 "message": json.dumps(message),
             },
             maxlen=_CALL_STREAM_MAXLEN,
