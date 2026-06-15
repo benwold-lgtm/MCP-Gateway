@@ -34,6 +34,7 @@ from device_mcp_gateway.core.spec_limits import (
     fetched_spec_or_none,
 )
 from device_mcp_gateway.registry.models import DeviceProfile
+from device_mcp_gateway.security.url_policy import build_guarded_client, resolve_allow_private
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 
 
@@ -104,6 +105,7 @@ class SpecService:
         self._spec_max_bytes = config.get("spec_max_bytes", DEFAULT_MAX_SPEC_BYTES)
         self._spec_poll_interval = config.get("spec_poll_interval", 300)
         self._cache = SpecCache(ttl=config.get("spec_cache_ttl", 3600), max_entries=200)
+        self._allow_private = resolve_allow_private(config)
         self._http_client: httpx.AsyncClient | None = None
 
     def client(self) -> httpx.AsyncClient:
@@ -113,7 +115,9 @@ class SpecService:
         reachability and spec-fetch GETs to the same device.
         """
         if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(follow_redirects=True, verify=self._tls_verify)
+            # SSRF-guarded: every hop (incl. redirects) is re-checked against the URL
+            # policy, so a device can't 302 a spec fetch to an internal address (F-02).
+            self._http_client = build_guarded_client(verify=self._tls_verify, allow_private=self._allow_private)
         return self._http_client
 
     def invalidate(self, base_url: str) -> None:

@@ -283,3 +283,109 @@ async def test_oversized_response_is_capped():
     assert result["status"] == 502
     assert result["error"]["type"] == "response_too_large"
     assert "too large" in result["error"]["message"]
+
+
+# --- R1 / SSRF-1: redirect-following + worker fetch-time validation ----------
+
+
+@pytest.mark.asyncio
+async def test_ssrf_guard_transport_blocks_redirect_to_internal():
+    """A validated public host that 302-redirects to an internal address must be
+    rejected at the redirect hop, not followed (the F-02 redirect bypass)."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    public_ip = "93.184.216.34"  # public IP literal — passes policy without DNS
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == public_ip:
+            return httpx.Response(302, headers={"location": "http://127.0.0.1/latest/meta-data/"})
+        return httpx.Response(200, text="REACHED INTERNAL")
+
+    guard = SsrfGuardTransport(httpx.MockTransport(handler), allow_private=False)
+    async with httpx.AsyncClient(transport=guard, follow_redirects=True) as client:
+        with pytest.raises(UrlPolicyError):
+            await client.get(f"http://{public_ip}/")
+
+
+@pytest.mark.asyncio
+async def test_ssrf_guard_transport_allows_public_hop():
+    """The guard must not block a legitimate public request."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    public_ip = "93.184.216.34"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="ok")
+
+    guard = SsrfGuardTransport(httpx.MockTransport(handler), allow_private=False)
+    async with httpx.AsyncClient(transport=guard) as client:
+        resp = await client.get(f"http://{public_ip}/")
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_ssrf_guard_transport_allow_private_follows_redirect():
+    """With allow_private (trusted fleet), an internal redirect target is permitted."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    public_ip = "93.184.216.34"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == public_ip:
+            return httpx.Response(302, headers={"location": "http://127.0.0.1/ok"})
+        return httpx.Response(200, text="internal-ok")
+
+    guard = SsrfGuardTransport(httpx.MockTransport(handler), allow_private=True)
+    async with httpx.AsyncClient(transport=guard, follow_redirects=True) as client:
+        resp = await client.get(f"http://{public_ip}/")
+    assert resp.status_code == 200
+    assert resp.text == "internal-ok"
+
+
+def test_device_pod_dispatch_client_does_not_follow_redirects():
+    """The tool-dispatch hot path must not follow redirects (SSRF + header-leak via 3xx)."""
+    manifest = McpManifest(server_name="m", server_version="1", hostname="dev")
+    pod = DevicePod(hostname="dev", manifest=manifest, transport="sse", base_url="http://dev.local")
+    assert pod._client().follow_redirects is False
+
+
+# --- R1 / SSRF-2: OAuth2 token_endpoint is an outbound target ----------------
+
+
+def test_register_route_rejects_ssrf_token_endpoint(tmp_path, monkeypatch):
+    """An oauth2 device whose token_endpoint resolves to an internal address is
+    refused — the gateway POSTs the client_secret there, so it is SSRF-sensitive."""
+    from fastapi.testclient import TestClient
+
+    from device_mcp_gateway.main import create_app
+
+    monkeypatch.delenv("MCP_ALLOW_PRIVATE_TARGETS", raising=False)
+    cfg = {
+        "registry": {"mode": "embedded"},
+        "storage": {"db_path": str(tmp_path / "devices.db")},
+        "security": {"allow_private_targets": False},
+        "metrics": {"enabled": False},
+    }
+    app = create_app(override_config=cfg)
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/devices",
+        json={
+            "hostname": "oauthdev",
+            "base_url": "https://example.com",
+            "auth_type": "oauth2",
+            "auth": {
+                "token_endpoint": "http://169.254.169.254/token",
+                "client_id": "id",
+                "client_secret": "secret",
+            },
+        },
+    )
+    assert resp.status_code == 400
+    assert "token_endpoint" in resp.json()["detail"]

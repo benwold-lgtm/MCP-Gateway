@@ -51,6 +51,7 @@ from device_mcp_gateway.core.spec_limits import (
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.security.mtls import build_verify
+from device_mcp_gateway.security.url_policy import build_guarded_client, resolve_allow_private
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.shared.session_router import SessionRouter
@@ -243,6 +244,7 @@ class DeviceWorker:
             spec_max_bytes=self._spec_max_bytes,
             spec_translate_timeout=self._spec_translate_timeout,
             tls_verify=self._tls_verify,
+            allow_private=resolve_allow_private(self._config),
         )
         self._health.on_spec_changed = self._replace_pod
         await backend.initialize()
@@ -1121,10 +1123,12 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     async def _fetch_spec(self, cfg: Any) -> dict | None:
-        import httpx
-
         discovery = self._config.get("discovery", {})
-        async with httpx.AsyncClient(follow_redirects=True, verify=self._tls_verify) as client:
+        # SSRF-guarded client: the worker validates every fetched URL (incl. redirects)
+        # against the policy, closing the gap where workers never consulted it (F-02).
+        async with build_guarded_client(
+            verify=self._tls_verify, allow_private=resolve_allow_private(self._config)
+        ) as client:
             if cfg.spec_url:
                 try:
                     resp = await client.get(cfg.spec_url, timeout=10)

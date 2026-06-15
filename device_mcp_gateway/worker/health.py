@@ -32,6 +32,7 @@ from device_mcp_gateway.core.spec_limits import (
     fetched_spec_or_none,
     run_translation,
 )
+from device_mcp_gateway.security.url_policy import build_guarded_client
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 
 _spec_executor = ProcessPoolExecutor(max_workers=2)
@@ -68,6 +69,7 @@ class WorkerHealthLoop:
         spec_max_bytes: int = DEFAULT_MAX_SPEC_BYTES,
         spec_translate_timeout: float = DEFAULT_TRANSLATE_TIMEOUT,
         tls_verify: ssl.SSLContext | bool = True,
+        allow_private: bool = False,
     ) -> None:
         self._worker_id = worker_id
         self._backend = backend
@@ -92,6 +94,7 @@ class WorkerHealthLoop:
         # Outbound mutual-TLS for reachability/spec GETs to devices (F-31). All
         # assigned devices share one config today, so one client is sufficient.
         self._tls_verify = tls_verify
+        self._allow_private = allow_private
         # Per-device timestamp of the last spec poll. Tracked separately from
         # cfg.last_check (which updates every health cycle) so the much longer
         # spec_poll_interval is honoured instead of always short-circuiting.
@@ -101,7 +104,9 @@ class WorkerHealthLoop:
 
     def _client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
-            self._http = httpx.AsyncClient(follow_redirects=True, verify=self._tls_verify)
+            # SSRF-guarded: the worker re-checks every reachability/spec hop against the
+            # URL policy (incl. redirects), so it can't be steered to an internal address.
+            self._http = build_guarded_client(verify=self._tls_verify, allow_private=self._allow_private)
         return self._http
 
     async def run_forever(self, assigned: set[str]) -> None:

@@ -67,7 +67,7 @@ from device_mcp_gateway.schemas import (
     DeviceSummary,
     OverviewResponse,
 )
-from device_mcp_gateway.security.url_policy import UrlPolicyError, validate_target_url
+from device_mcp_gateway.security.url_policy import UrlPolicyError, resolve_allow_private, validate_target_url
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
     MemoryRegistryBackend,
@@ -384,9 +384,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # SSRF policy for device target URLs (Tier-0 F-02). base_url/spec_url are fetched
     # server-side, so reject internal/loopback/link-local targets unless explicitly allowed
     # (security.allow_private_targets, or the MCP_ALLOW_PRIVATE_TARGETS env override).
-    _allow_private_targets = bool(cfg.get("security", {}).get("allow_private_targets", False)) or os.getenv(
-        "MCP_ALLOW_PRIVATE_TARGETS", ""
-    ).lower() in ("1", "true", "yes")
+    _allow_private_targets = resolve_allow_private(cfg)
 
     def _check_target_url(url: str | None, field: str) -> None:
         if not url:
@@ -430,6 +428,11 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=400, detail="oauth2 requires token_endpoint, client_id, and client_secret"
                 )
+            # SSRF-2: the gateway POSTs the client_secret to token_endpoint, so it is an
+            # outbound device target too — run it through the same URL policy as base_url/
+            # spec_url. Without this a devices:write caller could exfiltrate the secret to
+            # an internal/metadata address (F-02/F-29).
+            _check_target_url(token_endpoint, "token_endpoint")
             # F-42: optional grant/style/audience and provider-specific knobs.
             try:
                 return OAuth2Auth(

@@ -118,3 +118,16 @@ def test_bind_host_env_override_can_surface_bind_all_warning(monkeypatch):
     cfg = {"server": {"host": "127.0.0.1"}}
     warnings = warn_unsafe_settings(cfg, "embedded", auth_enabled=False)
     assert any("all interfaces" in w for w in warnings)
+
+
+def test_warns_when_mtls_verify_disabled():
+    # Disabling outbound cert verification is a fleet-wide MITM foot-gun (R1).
+    cfg = {"server": {"host": "127.0.0.1"}, "security": {"mtls": {"verify": False}}}
+    warnings = warn_unsafe_settings(cfg, "distributed", auth_enabled=True)
+    assert any("mtls.verify" in w for w in warnings)
+
+
+def test_no_mtls_warning_when_verify_true():
+    cfg = {"server": {"host": "127.0.0.1"}, "security": {"mtls": {"verify": True, "ca_bundle": "/x"}}}
+    warnings = warn_unsafe_settings(cfg, "distributed", auth_enabled=True)
+    assert not any("mtls.verify" in w for w in warnings)

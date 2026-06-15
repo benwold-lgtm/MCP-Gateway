@@ -203,8 +203,13 @@ class DevicePod:
     def _client(self) -> httpx.AsyncClient:
         """Return the pod's shared HTTP client, creating it on first use."""
         if self._http is None or self._http.is_closed:
+            # Do NOT follow redirects on the tool-dispatch hot path: a device that 3xx-
+            # redirects an authenticated call could (a) steer it to an internal address
+            # (SSRF, F-02/F-29) and (b) leak the device's API-key/custom auth headers to
+            # the redirect target (httpx only strips Authorization across origins, not
+            # custom headers). The base_url is already policy-checked at registration.
             self._http = httpx.AsyncClient(
-                timeout=self._request_timeout, follow_redirects=True, verify=self._tls_verify
+                timeout=self._request_timeout, follow_redirects=False, verify=self._tls_verify
             )
         return self._http
 
