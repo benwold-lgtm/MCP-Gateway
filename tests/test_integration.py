@@ -205,6 +205,8 @@ async def test_spec_change_replaces_pod():
     assert profile.pod_active, "Pod should still be active after spec change"
     assert profile.pod is not initial_pod, "A new pod should have been spawned"
     assert len(profile.pod.manifest.tools) == 2, "New pod should expose 2 tools from spec v2"
+    # F-41 governance: the additive tool-set change bumped the client-pollable revision.
+    assert profile.config.tools_revision == 1, "tools_revision should bump on a tool-set change"
 
     await registry.shutdown()
     print("[PASS] Spec change pod replacement verified.")

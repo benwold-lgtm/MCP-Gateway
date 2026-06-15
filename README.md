@@ -163,6 +163,8 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /v1/
 
 > **API versioning.** The management API is served under a `/v1` prefix (e.g. `POST /v1/devices`). Operational probes (`/health`, `/readyz`) and the Prometheus scrape endpoint are intentionally **unversioned** — they are infra contracts consumed by Kubernetes and Prometheus, not application clients. A backward-incompatible change to the management API will introduce `/v2` and dual-mount `/v1` for a deprecation window.
 
+> **Tool-set change governance & webhooks.** A device's tools are generated from its upstream OpenAPI spec, so they change when the spec changes. Every change is classified (compatible vs. **breaking**), recorded to the audit stream + a `mcp_device_tools_changed_total` metric, and surfaced to clients as a monotonic `tools_revision` on `GET /v1/devices/{hostname}` — poll it to detect a change and re-list tools. OpenAPI `webhooks`/`callbacks` are **not** translated: the gateway is pull-only (request→response), with no inbound event surface. See [docs/api-change-governance.md](docs/api-change-governance.md).
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Liveness probe — process status, active pod count |

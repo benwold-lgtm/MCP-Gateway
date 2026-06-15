@@ -28,6 +28,7 @@ from loguru import logger
 from device_mcp_gateway.audit import redact_url
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
+from device_mcp_gateway.core.manifest_diff import record_tool_change
 from device_mcp_gateway.registry.models import DeviceProfile
 from device_mcp_gateway.registry.pod_supervisor import PodSupervisor
 from device_mcp_gateway.registry.spec_service import SpecService
@@ -378,7 +379,17 @@ class Registry:
                         # pod replace that used to live inside fetch_spec happens
                         # here, where the orchestration belongs.
                         logger.info(f"Replacing pod for {profile.hostname} due to spec change")
+                        old_tools = list(profile.pod.manifest.tools) if profile.pod else []
                         await self._pod_supervisor.replace(profile)
+                        # Governance: record what changed in the tool set and bump
+                        # the client-pollable revision (F-41).
+                        new_tools = list(profile.pod.manifest.tools) if profile.pod else []
+                        diff = record_tool_change(profile.hostname, old_tools, new_tools)
+                        if not diff.empty:
+                            profile.config.tools_revision += 1
+                            await self._backend.update_device_fields(
+                                profile.hostname, tools_revision=profile.config.tools_revision
+                            )
                 except Exception:
                     logger.exception(f"Health check error for {profile.hostname}")
 

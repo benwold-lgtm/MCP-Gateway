@@ -54,6 +54,9 @@ class DeviceDetail(DeviceSummary):
     auth_type: str | None = None
     spawn_error: str | None = None
     worker_id: str | None = None
+    # Bumps whenever a spec change mutated the tool set (F-41); poll to detect a
+    # change and re-list tools.
+    tools_revision: int = 0
 
     @classmethod
     def from_config(cls, cfg: DeviceConfig) -> DeviceDetail:
@@ -70,6 +73,7 @@ class DeviceDetail(DeviceSummary):
             auth_type=cfg.auth_type,
             spawn_error=cfg.spawn_error,
             worker_id=cfg.worker_id,
+            tools_revision=cfg.tools_revision,
         )
 
 
@@ -130,5 +134,6 @@ class DeviceDiagnostics(BaseModel):
     spec_hash: str | None = None
     has_manifest: bool
     tool_count: int
+    tools_revision: int = 0
     spawn_error: str | None = None
     breaker: BreakerState

@@ -162,6 +162,17 @@ spec:
           annotations:
             summary: "Reconciler reassignment churn (lease flapping)"
             description: "Devices are being reassigned at {{ $value }}/s sustained over 15m — well above the once-per-worker-death baseline. Likely claim-lease flap (F-62): raise registry.claim_ttl / reconcile_orphan_grace_cycles, or investigate GC pauses / Redis latency."
+        - alert: MCPDeviceToolsBreakingChange
+          # A device's upstream spec changed in a backwards-incompatible way (tool
+          # or parameter removed, parameter newly required, method changed) — live
+          # MCP clients calling the old shape will start failing (F-41).
+          expr: sum(rate(mcp_device_tools_changed_total{breaking="true"}[1h])) > 0
+          for: 5m
+          labels:
+            severity: ticket
+          annotations:
+            summary: "Breaking tool-set change on a device"
+            description: "An upstream spec changed its tool surface incompatibly at {{ $value }}/s over 1h — clients calling the old tools/parameters will fail. Check the device.tools_changed audit records for which device and what changed."
         - alert: MCPDeadLetterGrowing
           expr: sum(rate(mcp_dead_letter_total[5m])) > 0
           for: 5m

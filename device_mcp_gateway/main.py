@@ -897,6 +897,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             spec_hash=device.spec_hash,
             has_manifest=manifest_dict is not None,
             tool_count=tool_count,
+            tools_revision=device.tools_revision,
             spawn_error=device.spawn_error,
             breaker=breaker,
         )

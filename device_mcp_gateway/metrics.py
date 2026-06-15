@@ -192,6 +192,17 @@ gauge_leader = Gauge(
     "1 if this gateway replica currently holds the device-gauge-refresh leader "
     "lock, else 0 (distributed mode only).",
 )
+# A device's spec changed and its generated tool set mutated (F-41). `breaking`
+# distinguishes a backwards-incompatible mutation (tool/parameter removed,
+# parameter newly required, HTTP method changed) — clients calling the old shape
+# break — from a compatible one (tool/optional-parameter added). A sustained
+# breaking rate ⇒ upstream APIs changing under live MCP clients without governance.
+device_tools_changed_total = Counter(
+    "mcp_device_tools_changed_total",
+    "Tool-set mutations detected on a device spec change, labelled by whether the "
+    "change was backwards-breaking (F-41).",
+    ["hostname", "breaking"],
+)
 
 # --- Failure-mode counters (SRE O1) ------------------------------------------
 # Counters at the exact sites where requests fail or are shed, so failures are
