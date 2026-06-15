@@ -92,6 +92,21 @@ registry:
   # devices (claim lease lapsed because the owning worker died) and republishes
   # their assignments so a live worker takes over. One worker leads at a time.
   reconcile_interval: 30
+  # Distributed mode: lease-flap hysteresis (F-62). A device whose claim lease has
+  # lapsed is treated as orphaned (its owner died) — but a GC pause / Redis stall /
+  # network blip longer than the claim TTL can lapse a HEALTHY worker's claim and get
+  # it wrongly reassigned (transient double-pod churn). The reconciler must observe a
+  # device orphaned across this many CONSECUTIVE leader sweeps before reassigning, so
+  # a single transient lapse self-heals on the owner's next heartbeat. This adds
+  # ~grace × reconcile_interval of margin on top of the claim TTL. 1 = no hysteresis
+  # (reassign on the first missed sweep). Watch mcp_reconciler_reassignments_total —
+  # a sustained rate means leases are flapping; raise this or the claim TTL.
+  reconcile_orphan_grace_cycles: 2
+  # Distributed mode: path to the local file the worker touches on every healthy
+  # heartbeat, checked by a cheap K8s exec liveness probe (F-17). Defaults to
+  # <system-temp-dir>/mcp-worker-alive. If you override this, update the probe
+  # command in worker-deployment.yaml to match.
+  # liveness_file: /var/run/mcp-worker-alive
   # Distributed mode: periodic load rebalancing on scale-out (F-07). Each worker
   # sheds devices above the per-worker target (ceil(total_devices / live_workers))
   # so a newly added/idle worker actually picks up load instead of early workers

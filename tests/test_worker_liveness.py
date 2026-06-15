@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import os
 import time
 
 import pytest
@@ -88,6 +89,66 @@ async def test_loops_healthy_while_shutting_down():
     worker._stop_event.set()
     worker._assignment_progress = time.monotonic() - 1000
     assert worker._loops_healthy() is True
+
+
+# --- F-17: local liveness file backs the cheap exec probe -------------------
+
+
+@pytest.mark.asyncio
+async def test_liveness_file_default_path_in_tempdir():
+    """With no override the liveness file lands in the system temp dir (no hardcoded
+    /tmp literal), matching the K8s probe's expected path."""
+    import tempfile
+
+    worker = _worker("w", _shared_redis())
+    assert worker._liveness_file == os.path.join(tempfile.gettempdir(), "mcp-worker-alive")
+
+
+@pytest.mark.asyncio
+async def test_liveness_file_honours_config_override(tmp_path):
+    cfg = {"registry": {"health_check_interval": 30, "liveness_file": str(tmp_path / "alive")}}
+    worker = DeviceWorker(worker_id="w", config=cfg, redis_client=_shared_redis())
+    assert worker._liveness_file == str(tmp_path / "alive")
+
+
+@pytest.mark.asyncio
+async def test_touch_liveness_file_writes_fresh_mtime(tmp_path):
+    """A healthy heartbeat bumps the file's mtime — the freshness the probe checks."""
+    path = tmp_path / "alive"
+    cfg = {"registry": {"health_check_interval": 30, "liveness_file": str(path)}}
+    worker = DeviceWorker(worker_id="w", config=cfg, redis_client=_shared_redis())
+
+    worker._touch_liveness_file()
+    assert path.exists()
+    assert time.time() - path.stat().st_mtime < 5  # fresh
+
+
+@pytest.mark.asyncio
+async def test_touch_liveness_file_swallows_oserror(tmp_path):
+    """A filesystem error must never crash the heartbeat loop (Redis stays the
+    authoritative liveness signal)."""
+    # Point at a path whose parent dir does not exist → open() raises OSError.
+    cfg = {"registry": {"health_check_interval": 30, "liveness_file": str(tmp_path / "nope" / "alive")}}
+    worker = DeviceWorker(worker_id="w", config=cfg, redis_client=_shared_redis())
+    worker._touch_liveness_file()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_touches_file_only_when_healthy(tmp_path, monkeypatch):
+    """The heartbeat writes the liveness file when loops are healthy and withholds it
+    when they aren't — so an unhealthy worker's file goes stale and the probe fails."""
+    path = tmp_path / "alive"
+    cfg = {"registry": {"health_check_interval": 30, "liveness_file": str(path)}}
+    worker = DeviceWorker(worker_id="w", config=cfg, redis_client=_shared_redis())
+
+    # Run one healthy beat, then stop the loop.
+    monkeypatch.setattr(worker, "_loops_healthy", lambda: True)
+    monkeypatch.setattr("device_mcp_gateway.worker.runner._HEARTBEAT_INTERVAL", 0.01)
+    beat = asyncio.create_task(worker._heartbeat_loop())
+    await asyncio.sleep(0.05)
+    worker._stop_event.set()
+    await asyncio.wait_for(beat, timeout=1)
+    assert path.exists()  # healthy → touched
 
 
 # --- #8: dead-worker pruning ------------------------------------------------

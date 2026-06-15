@@ -240,7 +240,10 @@ async def test_reconciler_heals_orphaned_device(real_redis):
     await backend.set_device(
         "dev1", DeviceConfig(hostname="dev1", base_url="http://dev1", pod_active=True, worker_id="dead-worker")
     )
-    worker = DeviceWorker(worker_id="live", config={}, redis_client=real_redis)
+    # grace=1: heal on the first orphaned sweep (F-62 hysteresis is exercised in its own unit tests).
+    worker = DeviceWorker(
+        worker_id="live", config={"registry": {"reconcile_orphan_grace_cycles": 1}}, redis_client=real_redis
+    )
     worker._backend = backend
 
     assert await real_redis.get("claim:dev1") is None  # lease lapsed

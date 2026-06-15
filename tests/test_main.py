@@ -214,3 +214,33 @@ def test_valid_hostname_accepted(good_hostname):
     )
     assert response.status_code == 200
     client.delete(f"/v1/devices/{good_hostname}")
+
+
+# --- F-17: /livez event-loop liveness probe ---------------------------------
+
+
+def test_livez_alive_when_loop_ticking():
+    """Inside the lifespan the heartbeat ticker runs, so /livez reports alive and
+    does no auth/Redis work (it's the K8s liveness target)."""
+    with TestClient(gw_main.app) as c:
+        response = c.get("/livez")
+    assert response.status_code == 200
+    assert response.json()["status"] == "alive"
+
+
+def test_livez_503_when_heartbeat_stale(monkeypatch):
+    """A wedged event loop can't advance the tick; /livez then flips to 503 so K8s
+    restarts the pod — the 'wedged-but-serving' case /health would miss."""
+    import time as _time
+
+    # Force the last tick far enough in the past to exceed the staleness budget.
+    monkeypatch.setattr(gw_main.app.state, "loop_heartbeat", _time.monotonic() - 3600)
+    response = client.get("/livez")
+    assert response.status_code == 503
+    assert response.json()["status"] == "not alive"
+
+
+def test_livez_does_not_require_auth(monkeypatch):
+    _enable_admin_auth(monkeypatch)
+    with TestClient(gw_main.app) as c:
+        assert c.get("/livez").status_code == 200

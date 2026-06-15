@@ -82,9 +82,14 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+          # Liveness uses /livez (F-17): a no-I/O check that the event loop is
+          # turning. /health does Redis/registry work (it's really readiness) and a
+          # gateway whose loop is wedged can keep serving cached responses — /livez
+          # catches that "wedged-but-serving" case; a wedged loop also can't answer
+          # the probe, so it fails either way. Restart the pod on a stalled loop.
           livenessProbe:
             httpGet:
-              path: /health
+              path: /livez
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 10

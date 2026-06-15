@@ -41,6 +41,8 @@ __all__ = [
     "worker_assignments_lag",
     "worker_undelivered_calls",
     "reconciler_leader",
+    "reconciler_reassignments_total",
+    "gauge_leader",
     "rebalance_shed_total",
     "duplicate_calls_suppressed_total",
     "calls_rejected_overload_total",
@@ -170,6 +172,25 @@ worker_undelivered_calls = Gauge(
 reconciler_leader = Gauge(
     "mcp_reconciler_leader",
     "1 if this worker currently holds the reconciler leader lease, else 0.",
+)
+# Reassignment churn (F-62). The reconciler republishes an 'assign' for a device
+# whose owner's claim lapsed. Under normal operation this fires once per real
+# worker death; a sustained elevated rate means leases are FLAPPING — healthy
+# workers being declared dead under GC pauses / Redis latency, causing transient
+# double-pod churn. Alert on rate() to catch the flap (F-62 / F-21).
+reconciler_reassignments_total = Counter(
+    "mcp_reconciler_reassignments_total",
+    "Orphaned devices the reconciler republished an assignment for, after their "
+    "owner's claim lapsed past the grace window. Sustained rate ⇒ lease flapping.",
+)
+# 1 on the gateway replica that currently holds the device-gauge-refresh leader
+# lock, 0 on the others (distributed mode only — absent in embedded). Summed
+# across replicas it must be exactly 1; sum == 0 means the fleet gauges are no
+# longer being refreshed by any replica — alertable coordination SPOF (F-21).
+gauge_leader = Gauge(
+    "mcp_gateway_gauge_leader",
+    "1 if this gateway replica currently holds the device-gauge-refresh leader "
+    "lock, else 0 (distributed mode only).",
 )
 
 # --- Failure-mode counters (SRE O1) ------------------------------------------

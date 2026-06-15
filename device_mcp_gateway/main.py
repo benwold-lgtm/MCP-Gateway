@@ -277,6 +277,11 @@ async def _refresh_device_gauges(app: FastAPI, interval: float) -> None:
         try:
             reg = app.state.registry
             is_leader = redis is None or await _acquire_gauge_leadership(redis, leader_id, lock_ttl)
+            # Export leadership so an alert fires when no replica holds it — the
+            # gauge-refresh election is a coordination SPOF (F-21). Only meaningful
+            # in distributed mode (multiple replicas contend); embedded has no Redis.
+            if redis is not None:
+                metrics.gauge_leader.set(1 if is_leader else 0)
             if reg is not None and is_leader:
                 devices = await reg.list_devices()
                 metrics.registered_devices.set(len(devices))
@@ -287,6 +292,24 @@ async def _refresh_device_gauges(app: FastAPI, interval: float) -> None:
         except Exception:
             logger.warning("device gauge refresh failed")
         await asyncio.sleep(jittered(interval))  # F-61: de-sync leader-election/refresh across replicas
+
+
+_LOOP_HEARTBEAT_INTERVAL = 1.0  # seconds between event-loop liveness ticks
+
+
+async def _event_loop_heartbeat(app: FastAPI) -> None:
+    """Stamp a monotonic tick every second so /livez can prove the loop is turning.
+
+    A liveness probe against /health does real Redis work, so it answers readiness,
+    not liveness, and a gateway whose event loop is wedged by a long blocking call
+    can keep *serving* cached responses while the data path stalls (F-17). This tiny
+    task can only advance the tick if the loop is actually scheduling coroutines;
+    when the loop is wedged the tick goes stale and /livez flips to 503 — a true
+    "wedged-but-serving" signal — with no I/O of its own.
+    """
+    while True:
+        app.state.loop_heartbeat = time.monotonic()
+        await asyncio.sleep(_LOOP_HEARTBEAT_INTERVAL)
 
 
 def create_app(override_config: dict | None = None) -> FastAPI:
@@ -443,6 +466,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.redis = None
     _app.state.pubsub_redis = None
     _app.state.session_router = None
+    # Event-loop liveness tick (F-17). Seeded now so /livez works before the lifespan
+    # heartbeat task starts (e.g. a bare TestClient); refreshed every second once up.
+    _app.state.loop_heartbeat = time.monotonic()
     # Strong refs to fire-and-forget timeout watchers so they aren't GC'd.
     _app.state.bg_tasks = set()
     # Embedded-mode session→owner map for principal↔session binding (F-37). In
@@ -504,6 +530,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         logger.info(f"Device MCP Gateway starting up (mode={_mode})")
 
+        # Event-loop liveness ticker — backs /livez (F-17). Runs in every mode.
+        loop_hb_task = asyncio.create_task(_event_loop_heartbeat(app))
+
         if _mode == "distributed":
             from device_mcp_gateway.shared.redis_client import create_redis
             from device_mcp_gateway.shared.session_router import SessionRouter
@@ -543,6 +572,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         try:
             yield
         finally:
+            loop_hb_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await loop_hb_task
             if gauge_task is not None:
                 gauge_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -622,6 +654,27 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                 payload["status"] = "degraded"
 
         return payload
+
+    @_app.get("/livez", dependencies=[Depends(rate_limit("300/minute", "livez"))])
+    async def liveness_check(request: Request):
+        """Lightweight liveness probe — proves the event loop is turning (F-17).
+
+        Unlike /health (which does Redis/registry work and is really a readiness
+        signal), this does no I/O: it only checks that the background heartbeat tick
+        is fresh. A wedged event loop can't advance the tick (and can't run this
+        handler either), so the probe fails — catching a "wedged-but-serving"
+        gateway that /health, answering from cache, would miss. K8s livenessProbe
+        target.
+        """
+        last = getattr(request.app.state, "loop_heartbeat", None)
+        # Stale if the ticker hasn't run for several intervals — loop wedged/starved.
+        staleness_budget = _LOOP_HEARTBEAT_INTERVAL * 5
+        if last is None or (time.monotonic() - last) > staleness_budget:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not alive", "reason": "event loop heartbeat stale"},
+            )
+        return {"status": "alive"}
 
     @_app.get("/readyz", dependencies=[Depends(rate_limit("300/minute", "readyz"))])
     async def readiness_check(request: Request):
@@ -1180,7 +1233,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         )
 
     # Version the entire management API under /v1 (e.g. /v1/devices). Probes
-    # (/health, /readyz) and the Prometheus scrape endpoint stay unversioned.
+    # (/health, /livez, /readyz) and the Prometheus scrape endpoint stay unversioned.
     _app.include_router(protected, prefix=API_V1_PREFIX)
     return _app
 
