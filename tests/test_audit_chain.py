@@ -39,7 +39,10 @@ def _emit(path, n, *, reset=True):
 
 
 def _lines(path):
-    return path.read_text().splitlines()
+    # Explicit UTF-8: the serialized audit records are UTF-8, and read_text() defaults to
+    # the locale encoding (cp1252 on Windows), which mis-decodes them and fails the chain
+    # tests on a non-UTF-8 box. Production audit.py already reads with encoding="utf-8".
+    return path.read_text(encoding="utf-8").splitlines()
 
 
 # --- happy path --------------------------------------------------------------

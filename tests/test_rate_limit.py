@@ -179,6 +179,39 @@ async def test_redis_limiter_shared_across_instances():
     assert (await a.hit("k", 2, 60))[0] is False  # third hit blocked regardless of replica
 
 
+@pytest.mark.asyncio
+async def test_redis_limiter_key_always_has_ttl_no_immortal_key():
+    # #9: the very first hit must leave the key with an expiry. The old code set EXPIRE
+    # as a separate call only on count==1, so a crash/failed EXPIRE left a TTL-less key
+    # that throttled the client forever; the INCR+EXPIRE-NX MULTI/EXEC can't.
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    await RedisRateLimiter(r).hit("k", 5, 60)
+    assert await r.ttl("rl:k") > 0
+
+
+@pytest.mark.asyncio
+async def test_redis_limiter_does_not_refresh_window():
+    # Fixed window: EXPIRE ... NX must not push the expiry out on later hits, or a steady
+    # stream of requests would keep the bucket alive forever (a sliding window).
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    limiter = RedisRateLimiter(r)
+    await limiter.hit("k", 5, 60)
+    await r.expire("rl:k", 30)  # simulate the window having partly elapsed
+    await limiter.hit("k", 5, 60)
+    assert await r.ttl("rl:k") <= 30  # NOT bumped back to 60
+
+
+@pytest.mark.asyncio
+async def test_redis_limiter_heals_a_key_left_without_ttl():
+    # Defense in depth: a key that somehow lost its TTL (a legacy immortal key) gets one
+    # re-applied on the next hit rather than throttling forever.
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    await r.set("rl:k", 3)  # no expiry
+    assert await r.ttl("rl:k") == -1
+    await RedisRateLimiter(r).hit("k", 5, 60)
+    assert await r.ttl("rl:k") > 0
+
+
 # --- real Redis: cross-replica sharing for real -----------------------------
 
 

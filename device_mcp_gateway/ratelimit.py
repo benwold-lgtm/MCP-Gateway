@@ -102,10 +102,17 @@ class RedisRateLimiter:
 
     async def hit(self, key: str, limit: int, window: int) -> tuple[bool, int]:
         rkey = f"rl:{key}"
-        count = await self._r.incr(rkey)
-        if count == 1:
-            # Only the request that created the key sets the window expiry.
-            await self._r.expire(rkey, window)
+        # INCR + EXPIRE in one MULTI/EXEC so they execute as an atomic server-side unit.
+        # The previous code set EXPIRE only on the first hit (count == 1) as a separate
+        # call, so a crash or a failed EXPIRE between the two left a TTL-less key that
+        # throttled the client forever (the "immortal key"). EXPIRE ... NX (Redis 7+)
+        # sets the window only when the key has none — so it preserves the fixed window
+        # (won't refresh a live TTL) AND re-applies a missing one on the next hit, making
+        # a counted-but-unexpiring key impossible to persist.
+        pipe = self._r.pipeline(transaction=True)
+        pipe.incr(rkey)
+        pipe.expire(rkey, window, nx=True)
+        count, _ = await pipe.execute()
         if count > limit:
             ttl = await self._r.ttl(rkey)
             return False, ttl if ttl and ttl > 0 else window

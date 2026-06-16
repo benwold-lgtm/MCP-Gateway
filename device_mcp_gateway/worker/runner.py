@@ -40,7 +40,7 @@ from device_mcp_gateway import metrics
 from device_mcp_gateway.audit import audit_log
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered
-from device_mcp_gateway.core.errors import RPC_DUPLICATE, RPC_NO_WORKER, rpc_error
+from device_mcp_gateway.core.errors import RPC_DUPLICATE, RPC_INTERNAL_ERROR, RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.core.spec_limits import (
     DEFAULT_MAX_SPEC_BYTES,
     DEFAULT_TRANSLATE_TIMEOUT,
@@ -888,6 +888,10 @@ class DeviceWorker:
         # bind it here so the worker-side execution audit carries the same actor
         # attribution ("who called this tool"), not just the correlation id.
         subject = fields.get("subject") or "-"
+        # Initialised before the try so the failure path below can dead-letter/notify
+        # even if json.loads itself raises.
+        message: Any = {}
+        _method = "?"
         try:
             message = json.loads(fields.get("message", "{}"))
             _method = message.get("method", "?") if isinstance(message, dict) else "?"
@@ -995,8 +999,40 @@ class DeviceWorker:
                 duration_ms=round(_dur * 1000, 1),
                 rid=rid,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception(f"Tool call dispatch error for {hostname} session {session_id} rid={rid}")
+            # The call was delivered but raised (e.g. an upstream failure that survived
+            # the retry policy). Don't let the ack below drop it silently: dead-letter it
+            # for inspect/replay, and return a definitive error to the client instead of
+            # letting it hang to the F6 timeout (#10). Replay stays safe for a partially-
+            # applied non-idempotent op — the F-08 guard refuses a duplicate on re-run.
+            try:
+                await self._dead_letter(hostname, fields, f"dispatch error: {exc}")
+                metrics.tool_calls_total.labels(hostname=hostname, method=_method, status="dead_letter").inc()
+                msg_id_val = message.get("id") if isinstance(message, dict) else None
+                if session_id and msg_id_val is not None:
+                    await self._session_router.publish_result(
+                        session_id,
+                        rpc_error(
+                            RPC_INTERNAL_ERROR,
+                            msg_id_val,
+                            rid=rid,
+                            request_id=request_id,
+                            message=f"Tool call to {hostname} failed and was dead-lettered",
+                        ),
+                    )
+                if request_id:
+                    await self._r.set(f"result:{request_id}", "1", ex=self._result_marker_ttl)
+                audit_log(
+                    "tool dispatch",
+                    hostname=hostname,
+                    subject=subject,
+                    method=_method,
+                    status="dead_letter",
+                    rid=rid,
+                )
+            except Exception:
+                logger.exception(f"Failed to dead-letter failed call {msg_id} for {hostname}")
         finally:
             await self._r.xack(stream, group, msg_id)
 
