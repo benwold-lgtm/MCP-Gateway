@@ -40,6 +40,7 @@ from device_mcp_gateway.core.errors import (
 from device_mcp_gateway.pods.sse_server import SseTransport
 from device_mcp_gateway.pods.rate_limiter import TokenBucket
 from device_mcp_gateway.core.translator import McpManifest, McpTool
+from device_mcp_gateway.security.url_policy import build_guarded_client
 
 # MCP protocol versions this gateway speaks, newest first. The `initialize`
 # handshake echoes the client's requested version when we support it, otherwise
@@ -153,6 +154,7 @@ class DevicePod:
         request_timeout: float = 15,
         retry_policy: RetryPolicy | None = None,
         tls_verify: "ssl.SSLContext | bool" = True,
+        allow_private: bool = False,
     ):
         self.hostname = hostname
         self.manifest = manifest
@@ -165,6 +167,12 @@ class DevicePod:
         # certifi server verification; an SSLContext carries a client cert and/or
         # a private CA for mutual TLS.
         self._tls_verify = tls_verify
+        # SSRF egress posture for tool-call dispatch (F-02). Propagated to an auth
+        # handler that makes its own outbound calls (OAuth2 token fetch) so it shares
+        # the same policy as the dispatch client.
+        self._allow_private = allow_private
+        if self.auth is not None:
+            self.auth.configure_egress(allow_private=allow_private)
         # Bounded jittered retries for idempotent tool calls (F-05/F-44).
         self._retry_policy = retry_policy or RetryPolicy()
         # One reused HTTP client per pod (created lazily) instead of one per
@@ -203,13 +211,21 @@ class DevicePod:
     def _client(self) -> httpx.AsyncClient:
         """Return the pod's shared HTTP client, creating it on first use."""
         if self._http is None or self._http.is_closed:
-            # Do NOT follow redirects on the tool-dispatch hot path: a device that 3xx-
-            # redirects an authenticated call could (a) steer it to an internal address
-            # (SSRF, F-02/F-29) and (b) leak the device's API-key/custom auth headers to
-            # the redirect target (httpx only strips Authorization across origins, not
-            # custom headers). The base_url is already policy-checked at registration.
-            self._http = httpx.AsyncClient(
-                timeout=self._request_timeout, follow_redirects=False, verify=self._tls_verify
+            # SSRF-guarded dispatch client (F-02/F-29):
+            #  - follow_redirects=False — a device that 3xx-redirects an authenticated
+            #    call could steer it to an internal address AND leak the device's
+            #    API-key/custom auth headers to the redirect target (httpx only strips
+            #    Authorization across origins, not custom headers).
+            #  - the SsrfGuardTransport re-validates the target host on EVERY call, so a
+            #    DNS-rebind of a registered device to an internal/metadata address is
+            #    caught at dispatch time, not only at registration (closes that residual;
+            #    costs one host resolution per call). The validate→connect window is the
+            #    documented residual that full IP-pinning would close.
+            self._http = build_guarded_client(
+                verify=self._tls_verify,
+                allow_private=self._allow_private,
+                follow_redirects=False,
+                timeout=self._request_timeout,
             )
         return self._http
 

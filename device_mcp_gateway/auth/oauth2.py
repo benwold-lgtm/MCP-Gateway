@@ -25,6 +25,8 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from device_mcp_gateway.security.url_policy import build_guarded_client, resolve_allow_private
+
 from .base import AbstractAuth
 
 _BODY_GRANTS = ("client_credentials", "password", "refresh_token")
@@ -56,6 +58,15 @@ class OAuth2Auth(AbstractAuth):
         self._token_expiry: float = 0.0
         self._scopes = self.scopes or ["read"]
         self._lock: asyncio.Lock = asyncio.Lock()
+        # Egress posture for the token fetch. token_endpoint is validated at register/PUT,
+        # but a DNS-rebind between then and the fetch would otherwise POST client_secret to
+        # a rebound internal/metadata host — so the fetch goes through the SSRF guard too.
+        # Default to the env override; the owning pod overrides with the resolved config
+        # value via configure_egress() at wire-up.
+        self._allow_private = resolve_allow_private({})
+
+    def configure_egress(self, *, allow_private: bool) -> None:
+        self._allow_private = allow_private
 
     async def ensure_token(self) -> None:
         async with self._lock:
@@ -88,7 +99,9 @@ class OAuth2Auth(AbstractAuth):
         post_kwargs: dict[str, Any] = {"data": data}
         if basic is not None:
             post_kwargs["auth"] = basic
-        async with httpx.AsyncClient(timeout=10) as client:
+        # SSRF-guarded: validate_target_url runs on the token POST and every redirect
+        # hop, so client_secret can't be steered to a private/loopback/metadata address.
+        async with build_guarded_client(allow_private=self._allow_private, timeout=10) as client:
             try:
                 resp = await client.post(self.token_endpoint, **post_kwargs)
                 resp.raise_for_status()

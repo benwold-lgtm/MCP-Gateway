@@ -1109,6 +1109,7 @@ class DeviceWorker:
             keep_alive_interval=self._keep_alive,
             retry_policy=self._retry_policy,
             tls_verify=self._tls_verify,
+            allow_private=resolve_allow_private(self._config),
         )
         await pod.start(with_sse=False)  # distributed mode: no in-process SSE transport
         self._pods[hostname] = pod

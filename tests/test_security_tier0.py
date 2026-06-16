@@ -389,3 +389,59 @@ def test_register_route_rejects_ssrf_token_endpoint(tmp_path, monkeypatch):
     )
     assert resp.status_code == 400
     assert "token_endpoint" in resp.json()["detail"]
+
+
+# --- R4: egress residuals (dispatch re-validation + OAuth2 token-fetch guard) -
+
+
+def test_device_pod_dispatch_client_is_ssrf_guarded():
+    """The dispatch client re-validates the target host on every call (DNS-rebind of a
+    registered device) while still not following redirects (header-leak)."""
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    manifest = McpManifest(server_name="m", server_version="1", hostname="dev")
+    pod = DevicePod(hostname="dev", manifest=manifest, transport="sse", base_url="http://dev.local")
+    client = pod._client()
+    assert isinstance(client._transport, SsrfGuardTransport)
+    assert client.follow_redirects is False
+
+
+@pytest.mark.asyncio
+async def test_oauth2_token_fetch_blocks_private_endpoint(monkeypatch):
+    """OAuth2 token fetch is SSRF-guarded: a token_endpoint that resolves to a metadata/
+    internal address is refused at fetch time, so client_secret can't be exfiltrated by a
+    DNS-rebind after registration."""
+    from device_mcp_gateway.auth.oauth2 import OAuth2Auth
+
+    monkeypatch.delenv("MCP_ALLOW_PRIVATE_TARGETS", raising=False)
+    auth = OAuth2Auth(token_endpoint="http://169.254.169.254/token", client_id="id", client_secret="secret")
+    with pytest.raises(UrlPolicyError):
+        await auth.ensure_token()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_configure_egress_allows_private_when_enabled(monkeypatch):
+    """A trusted-fleet override (allow_private=True, propagated from the pod) lets the
+    token fetch reach a private endpoint — it then fails on connection, NOT on policy."""
+    from device_mcp_gateway.auth.oauth2 import OAuth2Auth
+
+    monkeypatch.delenv("MCP_ALLOW_PRIVATE_TARGETS", raising=False)
+    # 127.0.0.1:1 — loopback, refused fast (no slow connect to a metadata IP).
+    auth = OAuth2Auth(token_endpoint="http://127.0.0.1:1/token", client_id="id", client_secret="secret")
+    auth.configure_egress(allow_private=True)
+    with pytest.raises(Exception) as ei:
+        await auth.ensure_token()
+    assert not isinstance(ei.value, UrlPolicyError)  # got past the policy, failed to connect
+
+
+def test_device_pod_propagates_egress_policy_to_oauth2_auth():
+    """The pod pushes its allow_private posture into an auth handler that makes its own
+    outbound calls, so the OAuth2 token fetch shares the dispatch egress policy."""
+    from device_mcp_gateway.auth.oauth2 import OAuth2Auth
+
+    auth = OAuth2Auth(token_endpoint="https://idp.example.com/token", client_id="id", client_secret="secret")
+    manifest = McpManifest(server_name="m", server_version="1", hostname="dev")
+    DevicePod(
+        hostname="dev", manifest=manifest, transport="sse", base_url="http://dev.local", auth=auth, allow_private=True
+    )
+    assert auth._allow_private is True

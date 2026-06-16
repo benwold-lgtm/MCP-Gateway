@@ -25,6 +25,7 @@ from loguru import logger
 from device_mcp_gateway.core.spec_limits import DEFAULT_TRANSLATE_TIMEOUT, SpecTooLargeError, run_translation
 from device_mcp_gateway.core.translator import SpecTranslator, manifest_to_dict
 from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.security.url_policy import resolve_allow_private
 from device_mcp_gateway.registry.models import DeviceProfile
 from device_mcp_gateway.registry.spec_service import SpecService
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
@@ -105,6 +106,7 @@ class PodSupervisor:
             keep_alive_interval=keep_alive,
             retry_policy=self._retry_policy,
             tls_verify=self._tls_verify,
+            allow_private=resolve_allow_private(self._config),
         )
         await pod.start()
         profile.pod = pod
