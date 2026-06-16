@@ -298,15 +298,23 @@ class SpecTranslator:
                 result[combiner] = branches
                 return self._finalize_schema(result)
 
-        if schema.get("type") == "object" and "properties" in schema:
-            return self._finalize_schema(
-                {
-                    **schema,
-                    "properties": {k: self._resolve_schema(v, seen) for k, v in schema["properties"].items()},
-                }
-            )
-
-        return self._finalize_schema(dict(schema))
+        # Descend into every nested schema so a $ref (or allOf/anyOf) inside it is
+        # resolved too. Previously only object `properties` were descended, so a $ref
+        # in array `items` or map `additionalProperties` was left dangling in the
+        # emitted tool schema and the MCP client couldn't resolve it (#11).
+        result = dict(schema)
+        props = result.get("properties")
+        if isinstance(props, dict):
+            result["properties"] = {k: self._resolve_schema(v, seen) for k, v in props.items()}
+        items = result.get("items")
+        if isinstance(items, dict):
+            result["items"] = self._resolve_schema(items, seen)
+        elif isinstance(items, list):  # tuple/positional item schemas
+            result["items"] = [self._resolve_schema(i, seen) if isinstance(i, dict) else i for i in items]
+        addl = result.get("additionalProperties")
+        if isinstance(addl, dict):  # a schema for map values (not the bool form)
+            result["additionalProperties"] = self._resolve_schema(addl, seen)
+        return self._finalize_schema(result)
 
     @staticmethod
     def _finalize_schema(schema: dict) -> dict:

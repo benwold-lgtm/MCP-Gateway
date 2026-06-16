@@ -757,3 +757,45 @@ class TestCompositionKeywords:
         }
         tool = SpecTranslator().translate(spec).tools[0]
         assert "x" in tool.schema["properties"]
+
+
+class TestRefResolutionInContainers:
+    """#11: a $ref nested in array `items` or map `additionalProperties` must resolve,
+    not just one in object `properties` — otherwise the emitted tool schema carries a
+    dangling $ref the MCP client can't follow."""
+
+    def _translator_with_thing(self):
+        t = SpecTranslator()
+        t._spec = fresh_spec(
+            components={"schemas": {"Thing": {"type": "object", "properties": {"id": {"type": "integer"}}}}}
+        )
+        return t
+
+    def test_ref_in_array_items_is_resolved(self):
+        t = self._translator_with_thing()
+        resolved = t._resolve_schema({"type": "array", "items": {"$ref": "#/components/schemas/Thing"}})
+        assert "$ref" not in resolved["items"]
+        assert resolved["items"]["type"] == "object"
+        assert "id" in resolved["items"]["properties"]
+
+    def test_ref_in_additional_properties_is_resolved(self):
+        t = self._translator_with_thing()
+        resolved = t._resolve_schema({"type": "object", "additionalProperties": {"$ref": "#/components/schemas/Thing"}})
+        ap = resolved["additionalProperties"]
+        assert "$ref" not in ap
+        assert ap["type"] == "object"
+        assert "id" in ap["properties"]
+
+    def test_ref_in_tuple_items_list_is_resolved(self):
+        t = self._translator_with_thing()
+        resolved = t._resolve_schema(
+            {"type": "array", "items": [{"$ref": "#/components/schemas/Thing"}, {"type": "string"}]}
+        )
+        assert resolved["items"][0]["properties"]["id"]["type"] == "integer"
+        assert resolved["items"][1] == {"type": "string"}
+
+    def test_additional_properties_bool_is_preserved(self):
+        # additionalProperties: false is a bool (not a schema) and must be left untouched.
+        t = self._translator_with_thing()
+        resolved = t._resolve_schema({"type": "object", "additionalProperties": False})
+        assert resolved["additionalProperties"] is False

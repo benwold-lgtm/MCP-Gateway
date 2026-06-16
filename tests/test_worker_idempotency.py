@@ -231,3 +231,43 @@ async def test_dispatch_guard_disabled_allows_double_execute():
     _s, _g, mid2 = await _deliver(r, HOST, fields)
     await w._dispatch_call(HOST, s, g, mid2, fields)
     assert len(pod.calls) == 2  # guard off → at-least-once for every method
+
+
+# --- dispatch failure: dead-letter, don't drop (#10) -------------------------
+
+
+class _RaisingPod:
+    """Pod whose call_tool raises — models an upstream failure that survived retries."""
+
+    def __init__(self, *tools):
+        self.manifest = _Manifest(list(tools))
+
+    async def call_tool(self, message):
+        raise RuntimeError("upstream blew up")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_failure_dead_letters_and_notifies_client():
+    from device_mcp_gateway.core.errors import RPC_INTERNAL_ERROR
+
+    r = _redis()
+    w = _worker(r)
+    await _attach_pod(w, _RaisingPod(_Tool("get_thing", "GET")))
+    fields = _fields(_msg("get_thing", msg_id=7), request_id="r7")
+    s, g, mid = await _deliver(r, HOST, fields)
+
+    await w._dispatch_call(HOST, s, g, mid, fields)
+
+    # Dead-lettered for inspect/replay instead of silently dropped on the ack.
+    dead = await r.xrange(f"device:{HOST}:calls:dead")
+    assert len(dead) == 1
+    assert "dispatch error" in dead[0][1]["reason"]
+    # Client gets a definitive error instead of hanging to the F6 timeout.
+    results = await _results(r)
+    assert len(results) == 1
+    assert results[0]["id"] == 7
+    assert results[0]["error"]["code"] == RPC_INTERNAL_ERROR
+    # Completion marker set (timeout watcher stands down) and the entry is acked (no PEL).
+    assert await r.exists("result:r7")
+    pending = await r.xpending(s, g)
+    assert pending["pending"] == 0
