@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the project is `0.x`, **minor releases may include breaking changes** — read
 the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.md).
 
+## [0.1.2] - 2026-06-16
+
+A second hardening patch. A follow-up third-party review confirmed every v0.1.1 fix was
+genuine and test-backed, and flagged five lower-severity tails — two narrow SSRF residuals
+and three reliability/correctness bugs. All five are fixed here.
+
+### Security
+
+- **OAuth2 token fetch is now SSRF-guarded.** `token_endpoint` was validated at register/PUT
+  but the token request — which carries the `client_secret` in its body — went through an
+  unguarded client, so a DNS-rebind between registration and fetch could exfiltrate the
+  secret to an internal/metadata address. The fetch now re-validates the endpoint (and every
+  redirect hop) against the egress policy.
+- **Device tool-call dispatch re-validates the target on every call.** Dispatch already
+  refused to follow redirects; it now also runs the SSRF guard per call, so a rebind of an
+  already-registered device to an internal address is caught at dispatch time, not only at
+  registration. (The validate→connect window remains the documented residual that full
+  IP-pinning would close.)
+
+### Fixed
+
+- **A failed tool-call dispatch is no longer silently dropped.** In distributed mode, a call
+  whose execution raised was acked without a dead-letter or a client response, so the caller
+  hung until timeout. It is now dead-lettered (for inspect/replay) and the client receives a
+  definitive error.
+- **The shared rate-limiter can no longer leave an "immortal" counter.** A crash between the
+  counter increment and its expiry could leave a key with no TTL, throttling that client
+  forever. The increment and expiry now run as one atomic step, and a missing expiry
+  self-heals on the next request. (Requires Redis 7, the documented deployment target.)
+- **`$ref`s nested in array items or map values are now resolved.** A `$ref` inside an
+  array's `items` or an object's `additionalProperties` was left dangling in the generated
+  tool schema; both are now resolved like object properties.
+
 ## [0.1.1] - 2026-06-15
 
 A security and correctness patch. A third-party re-review of v0.1.0 found six issues that
@@ -129,5 +162,6 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.1.2]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.2
 [0.1.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.1
 [0.1.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.0
