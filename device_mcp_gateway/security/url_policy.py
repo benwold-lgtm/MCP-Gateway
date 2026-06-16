@@ -110,12 +110,21 @@ class SsrfGuardTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
-def build_guarded_client(*, verify: Any = True, allow_private: bool = False, **kwargs: Any) -> httpx.AsyncClient:
-    """An ``httpx.AsyncClient`` whose every request hop (initial + redirects) is checked
-    against the SSRF policy. Use for all server-side fetches of operator-supplied device
-    URLs — spec discovery and reachability — so workers and the gateway share one egress
-    guard rather than relying on a single front-door check (closes the "workers never
-    call the URL policy" gap and the redirect-follow bypass)."""
+def build_guarded_client(
+    *, verify: Any = True, allow_private: bool = False, follow_redirects: bool = True, **kwargs: Any
+) -> httpx.AsyncClient:
+    """An ``httpx.AsyncClient`` whose every request hop is checked against the SSRF policy.
+
+    Use for all server-side fetches of operator-supplied URLs — spec discovery,
+    reachability, OAuth2 token fetch, and device tool-call dispatch — so workers and the
+    gateway share one egress guard rather than relying on a single front-door check
+    (closes the "workers never call the URL policy" gap and the redirect-follow bypass).
+
+    ``follow_redirects=False`` is for the tool-call dispatch hot path: redirects are NOT
+    followed there (httpx leaks custom auth headers across a cross-origin redirect — it
+    only strips ``Authorization``), but the guard still re-validates the target host on
+    every call, so a DNS-rebind of a registered device to an internal address is caught at
+    dispatch time, not only at registration."""
     inner = httpx.AsyncHTTPTransport(verify=verify)
     transport = SsrfGuardTransport(inner, allow_private=allow_private)
-    return httpx.AsyncClient(transport=transport, follow_redirects=True, **kwargs)
+    return httpx.AsyncClient(transport=transport, follow_redirects=follow_redirects, **kwargs)
