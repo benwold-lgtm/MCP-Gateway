@@ -1,0 +1,51 @@
+# ServiceMonitor — Prometheus Operator scrape config for the gateway and worker
+# metrics ports (:9100). OPTIONAL and NOT in kustomization.yaml by default: it
+# needs the Prometheus Operator CRD (monitoring.coreos.com/v1). Apply it only if
+# you run the Operator — and prefer it over the pods' prometheus.io/scrape
+# annotations so that metric discovery and the prometheus-rules.yaml alert rules
+# assume the *same* Prometheus setup.
+#
+#   kubectl apply -f deploy/kubernetes/servicemonitor.yaml
+#
+# The `release: <name>` label below must match your Operator's serviceMonitorSelector
+# (e.g. `release: kube-prometheus-stack` for the common Helm chart). Adjust to taste.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: device-mcp-gateway
+  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+    release: kube-prometheus-stack   # match your Operator's serviceMonitorSelector
+spec:
+  namespaceSelector:
+    matchNames:
+      - mcp-gateway
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: device-mcp-gateway
+  endpoints:
+    - port: metrics          # the named :9100 port on the gateway Service
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: device-mcp-worker
+  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-worker
+    release: kube-prometheus-stack   # match your Operator's serviceMonitorSelector
+spec:
+  namespaceSelector:
+    matchNames:
+      - mcp-gateway
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: device-mcp-worker
+  endpoints:
+    - port: metrics          # the named :9100 port on the headless worker Service
+      path: /metrics
+      interval: 30s

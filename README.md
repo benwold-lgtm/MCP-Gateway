@@ -456,6 +456,46 @@ volumes:
 
 Pre-built manifests live in [`deploy/kubernetes/`](deploy/kubernetes/). The manifests assume distributed mode (`registry.mode: "distributed"` is set in the ConfigMap).
 
+### Cluster prerequisites
+
+The bundled manifests assume the following are already installed in the target cluster:
+
+| Prerequisite | Needed for | Notes |
+|--------------|-----------|-------|
+| **Ingress controller (ingress-nginx)** | `ingress.yaml` | Uses `ingressClassName: nginx` and `nginx.ingress.kubernetes.io/*` annotations. Swap both if you run a different controller. |
+| **metrics-server** | the CPU-based HPAs (`hpa.yaml`) | Without it the HPAs report `<unknown>` CPU and never scale. |
+| **A default StorageClass** | the Redis `StatefulSet` PVC | Or set `storageClassName` explicitly in `redis.yaml`. |
+| **Prometheus Operator** (optional) | `prometheus-rules.yaml`, `servicemonitor.yaml` | Only if you want the SLO/alert rules. **Not applied by default** — see [Observability](#observability) and the note in `kustomization.yaml`. |
+
+> **Single-node test clusters (kind / minikube / k3s)** work: the pod anti-affinity is
+> `preferred` (won't block scheduling) and the PDBs allow rolling updates at `replicas: 2`.
+> On `kind`, skip the registry push and load the image directly (see below).
+
+### Build and push the image
+
+The manifests reference `image: device-mcp-gateway:latest` as a placeholder. **There is no
+published image** — build one and push it to a registry your cluster can pull from, then set
+that reference in **both** `deployment.yaml` and `worker-deployment.yaml` (they share one image).
+
+```bash
+# Build (the repo root holds the Dockerfile)
+docker build -t <your-registry>/device-mcp-gateway:0.1.2 .
+
+# Push to a registry the cluster can reach (Docker Hub, GHCR, ECR, GCR, ACR, …)
+docker push <your-registry>/device-mcp-gateway:0.1.2
+
+# Point both deployments at it (never ship :latest in production — pin a tag or digest)
+sed -i 's#image: device-mcp-gateway:latest#image: <your-registry>/device-mcp-gateway:0.1.2#' \
+  deploy/kubernetes/deployment.yaml deploy/kubernetes/worker-deployment.yaml
+```
+
+> **kind / minikube shortcut.** To skip a registry entirely, build locally and load the image
+> into the cluster: `kind load docker-image device-mcp-gateway:0.1.2` (or
+> `minikube image load …`). The manifests' `imagePullPolicy: IfNotPresent` then uses the
+> loaded image. Keep the `device-mcp-gateway:0.1.2` tag in both manifests in that case.
+
+### Deploy
+
 ```bash
 # Create namespace and secrets (never store secrets in the ConfigMap)
 # Distributed mode requires an API key (F-23) and an authenticated Redis (F-24);
@@ -469,21 +509,37 @@ kubectl create secret generic gateway-secrets \
   --from-literal=redis-password="$REDIS_PW" \
   --from-literal=redis-url="redis://:$REDIS_PW@redis:6379/0"   # rediss:// when Redis terminates TLS
 
+# TLS for the Ingress: the Ingress references secretName: mcp-gateway-tls.
+# Either let cert-manager issue it (add an Issuer + the cert-manager.io/cluster-issuer
+# annotation to ingress.yaml), or create a cert manually — e.g. a self-signed cert
+# for a test deployment:
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout tls.key -out tls.crt -subj "/CN=mcp-gateway.example.com"
+kubectl create secret tls mcp-gateway-tls \
+  --namespace=mcp-gateway --cert=tls.crt --key=tls.key
+
 # Customise before deploying:
-#   deploy/kubernetes/ingress.yaml   — set your hostname
-#   deploy/kubernetes/deployment.yaml — set your image tag (never use :latest)
+#   Build + push the image and set it in deployment.yaml + worker-deployment.yaml
+#     (see "Build and push the image" above)
+#   deploy/kubernetes/ingress.yaml   — set your hostname (replaces mcp-gateway.example.com)
 #   deploy/kubernetes/worker-deployment.yaml — adjust replicas / resources
 
-# Deploy everything
+# Deploy everything (Prometheus Operator CRDs are NOT required — they are excluded
+# from the default kustomization; see Observability to enable them)
 kubectl apply -k deploy/kubernetes/
 ```
 
 Key resources deployed:
-- **Redis** StatefulSet + PVC (shared state)
-- **Gateway** Deployment (stateless, scale freely) — readiness probes on `/readyz`
-- **Worker** Deployment (stateful, scale independently) — liveness probe via Redis heartbeat key
+- **Redis** StatefulSet + PVC (shared state) — **single replica; out of scope for these
+  manifests as an HA component.** It is a single point of failure (see `redis.yaml`); for a
+  resilience/failover test, point `MCP_REDIS_URL` at managed Redis or a Sentinel/Cluster
+  endpoint instead.
+- **Gateway** Deployment (stateless, 2 replicas, HPA to 10) — readiness on `/readyz`, liveness on `/livez`
+- **Worker** Deployment (stateful, scale independently) — liveness via a local heartbeat file
 - **PodDisruptionBudgets** for gateway and worker (`minAvailable: 1`)
-- **NetworkPolicy** limiting ingress to the gateway port
+- **Pod anti-affinity** (preferred) spreading gateway and worker replicas across nodes
+- **Hardened pod security** — non-root, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp
+- **NetworkPolicy** limiting ingress to the gateway/metrics ports and egress to DNS, Redis, and device-API ports (80/443/8080/8443 — a device on a non-standard port needs an added rule)
 - **Ingress** for TLS termination
 
 See [`docs/kubernetes-architecture.md`](docs/kubernetes-architecture.md) for the full architecture diagram and message-flow walkthrough.

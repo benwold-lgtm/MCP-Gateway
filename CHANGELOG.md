@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the project is `0.x`, **minor releases may include breaking changes** — read
 the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.md).
 
+## [Unreleased]
+
+Deployment-artifact and documentation hardening for third-party Kubernetes deployers.
+**No application code changed** — manifests, packaging docs, and Kubernetes guidance only.
+
+### Changed
+
+- **Kubernetes manifests hardened.** Gateway and worker pods now run with
+  `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, all Linux capabilities
+  dropped, and a `RuntimeDefault` seccomp profile (writable `emptyDir` mounts added for
+  `/app/logs`, and `/tmp` on the worker for its liveness file). Preferred pod anti-affinity
+  spreads gateway and worker replicas across nodes so the `minAvailable: 1` PDBs are
+  meaningful and node-failure/failover can be exercised.
+- **Gateway `replicas` is now `2`**, matching the HPA's `minReplicas` (was `1`, which
+  contradicted the autoscaler).
+- **`prometheus-rules.yaml` is no longer applied by default.** It (and the new
+  `servicemonitor.yaml`) require the Prometheus Operator CRDs, so a `kubectl apply -k` on a
+  cluster without the Operator would fail. Both are now opt-in; the pods still expose
+  `/metrics` and carry `prometheus.io/scrape` annotations for annotation-based discovery.
+
+### Added
+
+- **`deploy/kubernetes/servicemonitor.yaml`** — optional Prometheus Operator scrape config
+  for the gateway and worker metrics ports, so metric discovery and the alert rules assume
+  the same Prometheus setup.
+- **Documentation for third-party deployment**: a "Build and push the image" workflow (the
+  manifests reference an unpublished image), a cluster-prerequisites table (ingress-nginx,
+  metrics-server, default StorageClass, optional Prometheus Operator), a TLS-secret example,
+  and an explicit note that the bundled single-replica Redis is not an HA component.
+
 ## [0.1.2] - 2026-06-16
 
 A second hardening patch. A follow-up third-party review confirmed every v0.1.1 fix was

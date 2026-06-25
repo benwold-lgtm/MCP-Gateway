@@ -30,14 +30,38 @@ spec:
       # registry.shutdown_drain_timeout) before tearing down pods (SRE #6); keep
       # this grace period comfortably above that drain timeout.
       terminationGracePeriodSeconds: 120
+      # Spread workers across nodes so a single node failure drops at most one
+      # worker (the PDB keeps minAvailable: 1; surviving workers reclaim the
+      # evicted worker's devices via lease lapse + XAUTOCLAIM). "preferred" so it
+      # won't block scheduling on a small/single-node test cluster.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: device-mcp-worker
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: worker
           # Pin to an immutable digest or semantic tag in production — never ship :latest
           image: device-mcp-gateway:latest
           command: ["device-mcp-worker"]
+          # Container hardening. readOnlyRootFilesystem is safe because the worker
+          # writes only to /app/logs and to its liveness file under /tmp — both
+          # mounted as emptyDir volumes below.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: metrics
               containerPort: 9100
@@ -81,6 +105,15 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
+            # Writable log dir (root filesystem is read-only). emptyDir is
+            # ephemeral — ship logs to a collector for durability.
+            - name: logs
+              mountPath: /app/logs
+            # Writable /tmp for the liveness file (registry.liveness_file default:
+            # <tempdir>/mcp-worker-alive — i.e. /tmp/mcp-worker-alive, which the
+            # liveness probe below checks). Required under readOnlyRootFilesystem.
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: "200m"
@@ -113,3 +146,7 @@ spec:
         - name: config
           configMap:
             name: gateway-config
+        - name: logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

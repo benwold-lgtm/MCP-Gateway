@@ -8,8 +8,11 @@ metadata:
 spec:
   # Gateway is stateless in distributed mode — scale freely.
   # Set registry.mode = "distributed" in configmap.yaml to enable.
-  # In embedded mode keep replicas: 1 (in-process pods, no shared state).
-  replicas: 1
+  # 2 replicas matches the HPA's minReplicas (hpa.yaml) and gives the PDB
+  # (minAvailable: 1) headroom to allow rolling updates / node drains.
+  # In EMBEDDED mode set this to 1 (in-process pods, no shared state) and
+  # remove the gateway HPA, which would otherwise scale you past a single owner.
+  replicas: 2
   selector:
     matchLabels:
       app: device-mcp-gateway
@@ -26,15 +29,38 @@ spec:
       # Give SSE streams time to drain before the pod is forcibly killed.
       # Adjust upward if clients hold very long-lived connections.
       terminationGracePeriodSeconds: 120
+      # Spread replicas across nodes so a single node failure can't take out the
+      # whole gateway tier (and so the PDB's minAvailable: 1 is actually meaningful).
+      # "preferred" — won't block scheduling on a small/single-node test cluster.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: device-mcp-gateway
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: gateway
           # Pin to an immutable digest or semantic tag in production — never ship :latest.
           # Example: ghcr.io/your-org/device-mcp-gateway:1.2.3
           image: device-mcp-gateway:latest
           imagePullPolicy: IfNotPresent
+          # Container hardening. readOnlyRootFilesystem is safe because the
+          # distributed-mode gateway writes only to /app/logs (mounted as an
+          # emptyDir below); SQLite/`/app/data` is embedded-mode only.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: http
               containerPort: 8000
@@ -75,6 +101,11 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
+            # Writable log dir — required because the root filesystem is read-only.
+            # emptyDir is ephemeral (lost on restart); ship logs to a collector
+            # (see docs/observability.md) for durability.
+            - name: logs
+              mountPath: /app/logs
           resources:
             requests:
               cpu: 100m
@@ -107,3 +138,5 @@ spec:
         - name: config
           configMap:
             name: gateway-config
+        - name: logs
+          emptyDir: {}
