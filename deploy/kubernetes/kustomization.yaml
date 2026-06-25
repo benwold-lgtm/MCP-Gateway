@@ -14,4 +14,13 @@ resources:
   - ingress.yaml
   - pdb.yaml
   - hpa.yaml
-  - prometheus-rules.yaml
+
+# Prometheus Operator resources are NOT applied by default — they require the
+# Operator's CRDs (monitoring.coreos.com/v1: PrometheusRule, ServiceMonitor),
+# and a `kubectl apply -k` would fail on a cluster without them. If you run the
+# Prometheus Operator, uncomment the lines below (or apply the files directly):
+#   - prometheus-rules.yaml   # SLO recording + burn-rate alert rules (PrometheusRule)
+#   - servicemonitor.yaml     # scrape config for gateway + worker metrics (ServiceMonitor)
+# Without the Operator, the pods still expose /metrics on :9100 and carry
+# prometheus.io/scrape annotations for annotation-based discovery; lift the
+# `groups:` from prometheus-rules.yaml into your prometheus.yml rule_files.

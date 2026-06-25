@@ -359,10 +359,22 @@ In distributed mode, the gateway immediately returns `{ pod_active: false }` —
 
 ## Deploying with the Provided Manifests
 
+**Cluster prerequisites:** an ingress controller (the manifests use ingress-nginx),
+metrics-server (the CPU HPAs need it), and a default StorageClass (Redis PVC). The
+Prometheus Operator is optional and **not** required by the default apply — `prometheus-rules.yaml`
+and `servicemonitor.yaml` are excluded from `kustomization.yaml` so a cluster without the
+CRDs still applies cleanly. See the README's "Cluster prerequisites" table.
+
 ```bash
-# 1. Customise before deploying
+# 1. Build and push the image (there is no published image), then set it in BOTH
+#    deployment.yaml and worker-deployment.yaml (they share one image).
+docker build -t <your-registry>/device-mcp-gateway:0.1.2 .
+docker push <your-registry>/device-mcp-gateway:0.1.2
+sed -i 's#image: device-mcp-gateway:latest#image: <your-registry>/device-mcp-gateway:0.1.2#' \
+  deploy/kubernetes/deployment.yaml deploy/kubernetes/worker-deployment.yaml
+#    (kind/minikube: skip the push and `kind load docker-image device-mcp-gateway:0.1.2`)
+#    Also customise:
 #    deploy/kubernetes/ingress.yaml       — replace mcp-gateway.example.com
-#    deploy/kubernetes/deployment.yaml    — replace device-mcp-gateway:latest with your image
 #    deploy/kubernetes/worker-deployment.yaml — adjust replicas and resources
 
 # 2. Create namespace and secrets
@@ -376,6 +388,8 @@ kubectl create secret generic gateway-secrets \
   --from-literal=secret-key=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())") \
   --from-literal=redis-password="$REDIS_PW" \
   --from-literal=redis-url="redis://:$REDIS_PW@redis:6379/0"   # use rediss:// when Redis terminates TLS
+#    The Ingress also needs a TLS secret (mcp-gateway-tls) — issue it via cert-manager
+#    or create one manually (`kubectl create secret tls mcp-gateway-tls ...`).
 
 # 3. Deploy everything
 kubectl apply -k deploy/kubernetes/
