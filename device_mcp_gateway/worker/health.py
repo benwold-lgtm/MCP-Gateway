@@ -184,7 +184,10 @@ class WorkerHealthLoop:
                 await self._backend.set_manifest(hostname, manifest_dict, ttl=self._spec_cache_ttl)
                 fields: dict[str, Any] = {"spec_hash": new_hash}
                 if not diff.empty:
-                    fields["tools_revision"] = (cfg.tools_revision or 0) + 1
+                    new_revision = (cfg.tools_revision or 0) + 1
+                    fields["tools_revision"] = new_revision
+                    # Persist what changed so GET /tools/diff can serve it (F-41).
+                    await self._backend.set_last_tool_change(hostname, diff.to_record(new_revision, time.time()))
                 await self._backend.update_device_fields(hostname, **fields)
                 # Signal worker to replace the pod
                 if self.on_spec_changed:

@@ -55,6 +55,18 @@ and comparing `tools_revision` to the value it last saw; on a bump it re-issues
 `tools/list`. A no-op spec edit (hash changed but the generated tool set is
 identical) does **not** bump the revision — only a real tool-set change does.
 
+### Seeing *what* changed: `GET /v1/devices/{hostname}/tools/diff`
+
+The revision tells a client *that* the tools moved; this endpoint tells it *what*
+moved. It returns the most recent classified change — `added` / `removed` /
+`changed` tool names, the `breaking` flag, the `breaking_reasons`, and the
+`tools_revision` that change produced (`ToolsDiffResponse`). `last_change` is
+`null` when no change has been observed since registration (the tool set is as
+first generated). Unlike `/tools` it does not require an active pod, so a UI can
+show "the tools changed (and how)" even for a device that is currently down. The
+record is the same diff written to the audit stream when the change was recorded;
+it is persisted per device (cleared when the device is deleted).
+
 ### Why not a real-time `notifications/tools/list_changed` push?
 
 The MCP layer advertises `tools.listChanged: false` in its `initialize`

@@ -171,7 +171,7 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /v1/
 
 > **API versioning.** The management API is served under a `/v1` prefix (e.g. `POST /v1/devices`). Operational probes (`/health`, `/readyz`) and the Prometheus scrape endpoint are intentionally **unversioned** — they are infra contracts consumed by Kubernetes and Prometheus, not application clients. A backward-incompatible change to the management API will introduce `/v2` and dual-mount `/v1` for a deprecation window.
 
-> **Tool-set change governance & webhooks.** A device's tools are generated from its upstream OpenAPI spec, so they change when the spec changes. Every change is classified (compatible vs. **breaking**), recorded to the audit stream + a `mcp_device_tools_changed_total` metric, and surfaced to clients as a monotonic `tools_revision` on `GET /v1/devices/{hostname}` — poll it to detect a change and re-list tools. OpenAPI `webhooks`/`callbacks` are **not** translated: the gateway is pull-only (request→response), with no inbound event surface. See [docs/api-change-governance.md](docs/api-change-governance.md).
+> **Tool-set change governance & webhooks.** A device's tools are generated from its upstream OpenAPI spec, so they change when the spec changes. Every change is classified (compatible vs. **breaking**), recorded to the audit stream + a `mcp_device_tools_changed_total` metric, and surfaced to clients as a monotonic `tools_revision` on `GET /v1/devices/{hostname}` — poll it to detect a change, then `GET /v1/devices/{hostname}/tools/diff` to see *what* changed (added/removed/changed tools + the breaking flag) and re-list tools. OpenAPI `webhooks`/`callbacks` are **not** translated: the gateway is pull-only (request→response), with no inbound event surface. See [docs/api-change-governance.md](docs/api-change-governance.md) and the full mapping contract in [docs/tooling.md](docs/tooling.md).
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -183,6 +183,7 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /v1/
 | `GET` | `/v1/devices` | List all registered devices |
 | `GET` | `/v1/devices/{hostname}` | Get a single device's status |
 | `GET` | `/v1/devices/{hostname}/tools` | List a device's MCP tools |
+| `GET` | `/v1/devices/{hostname}/tools/diff` | The device's most recent tool-set change — added/removed/changed tools + breaking flag (`devices:read`) |
 | `GET` | `/v1/devices/{hostname}/diagnostics` | "Why is my device down?" — status, last check + age, spec/manifest state, spawn error, circuit breaker (`devices:read`) |
 | `GET` | `/v1/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
 | `POST` | `/v1/devices/{hostname}/messages` | Send a JSON-RPC 2.0 message via SSE |
@@ -668,6 +669,7 @@ Phase-0 / governance artifacts for reviewers and operators:
 
 | Doc | What it covers |
 |-----|----------------|
+| [docs/tooling.md](docs/tooling.md) | OpenAPI→MCP translation contract — tool naming, parameter/body mapping, schema resolution, argument validation, error mapping |
 | [docs/threat-model.md](docs/threat-model.md) | STRIDE threat model — trust boundaries, adversaries, control-per-threat, accepted risks |
 | [docs/failure-modes.md](docs/failure-modes.md) | FMEA matrix — per-component failure, detection (metric/alert), mitigation, operator action |
 | [docs/adr/](docs/adr/) | Architecture Decision Records — the load-bearing decisions (dual-mode, Redis control plane, single-owner, single-tenant, at-least-once+idempotency, fail-closed defaults) |

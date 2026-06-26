@@ -66,6 +66,8 @@ from device_mcp_gateway.schemas import (
     DeviceMutationResult,
     DeviceSummary,
     OverviewResponse,
+    ToolChangeRecord,
+    ToolsDiffResponse,
 )
 from device_mcp_gateway.security.url_policy import UrlPolicyError, resolve_allow_private, validate_target_url
 from device_mcp_gateway.shared.crypto import CredentialCodec
@@ -859,6 +861,28 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             for t in manifest_dict.get("tools", [])
         ]
         return {"hostname": hostname, "tools": tools, "count": len(tools)}
+
+    @protected.get(
+        "/devices/{hostname}/tools/diff",
+        dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))],
+        response_model=ToolsDiffResponse,
+    )
+    async def get_device_tools_diff(hostname: str, request: Request):
+        """Tool-set change governance (F-41): what was added/removed/changed when
+        the device's tools last moved, and whether it was breaking. ``last_change``
+        is ``null`` when no change has been observed since registration. Unlike
+        ``/tools`` this does not require an active pod — a UI can show "the tools
+        changed (and how)" even for a device that is currently down."""
+        reg: Registry = request.app.state.registry
+        device = await reg.get_device(hostname)
+        if not device:
+            raise HTTPException(status_code=404, detail=f"Device '{hostname}' not found")
+        record = await reg.get_last_tool_change(hostname)
+        return ToolsDiffResponse(
+            hostname=hostname,
+            tools_revision=device.tools_revision,
+            last_change=ToolChangeRecord(**record) if record else None,
+        )
 
     @protected.get(
         "/devices/{hostname}/diagnostics",

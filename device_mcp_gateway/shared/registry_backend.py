@@ -137,6 +137,17 @@ class AbstractRegistryBackend(ABC):
     @abstractmethod
     async def delete_manifest(self, hostname: str) -> None: ...
 
+    # Tool-set change governance (F-41). Non-abstract with a safe default so a
+    # backend (or test double) that doesn't persist the last change still works —
+    # the diff endpoint then simply reports "no change recorded".
+    async def get_last_tool_change(self, hostname: str) -> dict | None:
+        """The most recent recorded tool-set change for a device, or None."""
+        return None
+
+    async def set_last_tool_change(self, hostname: str, change: dict) -> None:
+        """Persist the most recent tool-set change (added/removed/changed/breaking)."""
+        return None
+
     @abstractmethod
     async def publish_assignment(self, action: str, hostname: str) -> None:
         """Publish an assign/unassign event for workers to consume."""
@@ -212,6 +223,7 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
     def __init__(self) -> None:
         self._devices: dict[str, DeviceConfig] = {}
         self._manifests: dict[str, dict] = {}
+        self._tool_changes: dict[str, dict] = {}
 
     async def initialize(self) -> None:
         pass
@@ -230,6 +242,7 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
 
     async def delete_device(self, hostname: str) -> None:
         self._devices.pop(hostname, None)
+        self._tool_changes.pop(hostname, None)
 
     async def list_hostnames(self) -> list[str]:
         return list(self._devices.keys())
@@ -242,6 +255,12 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
 
     async def delete_manifest(self, hostname: str) -> None:
         self._manifests.pop(hostname, None)
+
+    async def get_last_tool_change(self, hostname: str) -> dict | None:
+        return self._tool_changes.get(hostname)
+
+    async def set_last_tool_change(self, hostname: str, change: dict) -> None:
+        self._tool_changes[hostname] = change
 
     async def publish_assignment(self, action: str, hostname: str) -> None:
         pass  # no-op; embedded Registry drives pod lifecycle directly
@@ -288,6 +307,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
       devices:all                  → Set of hostnames
       device:{hostname}:config     → Hash (DeviceConfig fields)
       device:{hostname}:manifest   → String (JSON, with TTL)
+      device:{hostname}:tools_change → String (JSON, no TTL — last tool-set diff)
       device:assignments           → Stream {action, hostname}
       device:{hostname}:calls      → Stream {request_id, session_id, gateway_id, message}
     """
@@ -336,6 +356,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         pipe = self._r.pipeline()
         pipe.delete(f"device:{hostname}:config")
         pipe.delete(f"device:{hostname}:manifest")
+        pipe.delete(f"device:{hostname}:tools_change")
         # Drop the tool-call stream and its dead-letter stream too, or they linger
         # in Redis after the device is gone and accumulate over churn (RC-4, SRE #4).
         pipe.delete(f"device:{hostname}:calls")
@@ -360,6 +381,20 @@ class RedisRegistryBackend(AbstractRegistryBackend):
 
     async def delete_manifest(self, hostname: str) -> None:
         await self._r.delete(f"device:{hostname}:manifest")
+
+    async def get_last_tool_change(self, hostname: str) -> dict | None:
+        # Governance metadata — stored without a TTL (unlike the manifest) so the
+        # "what last changed" answer outlives the spec cache; cleaned up on delete.
+        raw = await self._r.get(f"device:{hostname}:tools_change")
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+    async def set_last_tool_change(self, hostname: str, change: dict) -> None:
+        await self._r.set(f"device:{hostname}:tools_change", json.dumps(change))
 
     async def publish_assignment(self, action: str, hostname: str) -> None:
         if action == "unassign":
