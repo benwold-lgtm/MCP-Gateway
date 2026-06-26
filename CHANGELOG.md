@@ -12,10 +12,28 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 Post-0.1.2 changes: third-party Kubernetes deployment hardening (no application code),
 plus a small tool-set change-governance addition (a new read endpoint) and a translation
-doc — both from a third-party review.
+doc — both from a third-party review. Plus the first slice of federated identity
+(ADR-0007): inbound OIDC at the gateway, with static keys kept as break-glass.
 
 ### Added
 
+- **Inbound OIDC authentication (ADR-0007, first slice).** The gateway can now authenticate
+  a request bearing an IdP-issued JWT, in addition to static API keys. A new composite
+  authenticator validates the token against the issuer's JWKS — asymmetric-algorithm
+  allow-list (`HS*`/`none` refused), `iss`/`aud`/`exp`/`nbf` with bounded clock skew, `kid`
+  matched to a published key — then maps the token's group claim to gateway scopes via a
+  `gateway.oidc.group_roles` table the gateway owns. Static keys are tried for opaque tokens
+  and remain the **break-glass** path: OIDC fails *closed* (a JWT is rejected) when the
+  IdP/JWKS is unreachable, while configured keys keep working. JWKS is cached with a bounded
+  TTL and kid-miss refetches are rate-limited (no fetch-amplification DoS); the issuer/JWKS
+  URLs go through the existing egress (SSRF) policy. Disabled by default; enable under
+  `gateway.oidc`. Implements TM-I-08/09/10/12 from
+  [docs/threat-model-identity.md](docs/threat-model-identity.md). The BFF OIDC login flow and
+  per-user identity relay (I1/I2/I4) are the next slices.
+- **Three seed RBAC roles** — `operator` (manage devices + DLQ, no tool calls), `auditor`
+  (metrics only), and `caller` (machine agent: read + `tools:call`) — join `admin`/`viewer`
+  in `ROLE_SCOPES`, matching [docs/rbac-roles.md](docs/rbac-roles.md). Additive; no route
+  changes (routes authorize on scopes, never role strings).
 - **`GET /v1/devices/{hostname}/tools/diff`** — surfaces a device's most recent tool-set
   change (added / removed / changed tool names, the `breaking` flag and reasons, and the
   `tools_revision` it produced) as `ToolsDiffResponse`. The diff was already computed and

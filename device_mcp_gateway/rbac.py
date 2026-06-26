@@ -17,13 +17,16 @@ from __future__ import annotations
 import hmac
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 
 from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, audit_event
+
+if TYPE_CHECKING:
+    from device_mcp_gateway.oidc import OIDCValidator
 
 # --- Scopes ------------------------------------------------------------------
 
@@ -35,10 +38,17 @@ SCOPE_METRICS_READ = "metrics:read"
 ALL_SCOPES: frozenset[str] = frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_TOOLS_CALL, SCOPE_METRICS_READ})
 
 # Roles are just named bundles of scopes. New roles = new entries here; routes never
-# reference roles, only scopes, so adding one never touches a call site.
+# reference roles, only scopes, so adding one never touches a call site. The full matrix
+# (and the IdP group → role mapping) lives in docs/rbac-roles.md; ADR-0007 is the why.
 ROLE_SCOPES: dict[str, frozenset[str]] = {
     "admin": ALL_SCOPES,
+    # Manage the fleet (onboard/edit/remove devices, DLQ recovery) but not invoke tools.
+    "operator": frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_METRICS_READ}),
     "viewer": frozenset({SCOPE_DEVICES_READ, SCOPE_METRICS_READ}),
+    # Observability / compliance only — no device access.
+    "auditor": frozenset({SCOPE_METRICS_READ}),
+    # Machine identity: an MCP client/agent that discovers and invokes tools.
+    "caller": frozenset({SCOPE_DEVICES_READ, SCOPE_TOOLS_CALL}),
 }
 
 
@@ -90,6 +100,16 @@ class Authenticator:
             )
         return principal
 
+    async def authenticate_async(self, credentials: Optional[HTTPAuthorizationCredentials]) -> Principal:
+        """Async entry point (uniform with CompositeAuthenticator). No I/O here —
+        static-key matching is in-memory — so this just wraps the sync path."""
+        return self.authenticate(credentials)
+
+    def match(self, token: str) -> Optional[Principal]:
+        """Public, timing-safe lookup of a static key → Principal (or None). The
+        composite authenticator uses this for opaque (non-JWT) tokens."""
+        return self._match(token)
+
     def _match(self, token: str) -> Optional[Principal]:
         # Constant-time compare against every configured key; never early-exit on
         # the token contents (timing-safe), even though the key set is small.
@@ -100,8 +120,69 @@ class Authenticator:
         return matched
 
 
-def build_authenticator(cfg: dict) -> Authenticator:
-    """Build the gateway Authenticator from config + env.
+_UNAUTHORIZED = HTTPException(
+    status_code=401,
+    detail="Unauthorized",
+    headers={"WWW-Authenticate": "Bearer"},
+)
+
+
+def _looks_like_jwt(token: str) -> bool:
+    """A compact JWS has exactly three non-empty dot-separated segments. Cheap shape
+    check so we only run JWT crypto on JWT-shaped tokens; opaque keys skip it."""
+    parts = token.split(".")
+    return len(parts) == 3 and all(parts)
+
+
+class CompositeAuthenticator:
+    """Federated OIDC first, static break-glass keys second, else 401 (ADR-0007).
+
+    Order matches the ADR: a valid OIDC JWT → its mapped scopes; **else** a configured
+    static key; **else** 401. Static keys keep working when the IdP/JWKS is unreachable,
+    because an opaque key never enters the OIDC path and an OIDC failure falls through to
+    the key match (TM-I-12 — fail closed for OIDC, open to break-glass keys).
+    """
+
+    def __init__(self, *, static: Authenticator, oidc: "OIDCValidator") -> None:
+        self._static = static
+        self._oidc = oidc
+
+    @property
+    def enabled(self) -> bool:
+        # OIDC being configured is itself auth — true even with zero static keys.
+        return True
+
+    @property
+    def static(self) -> Authenticator:
+        return self._static
+
+    async def authenticate_async(self, credentials: Optional[HTTPAuthorizationCredentials]) -> Principal:
+        token = credentials.credentials if credentials else None
+        if not token:
+            raise _UNAUTHORIZED
+
+        principal: Optional[Principal] = None
+        if _looks_like_jwt(token):
+            from device_mcp_gateway.oidc import OIDCError
+
+            try:
+                principal = await self._oidc.validate(token)
+            except OIDCError as exc:
+                # Not a valid JWT for us — fall through to static keys (it may be a
+                # break-glass key that happens to be JWT-shaped, or the IdP is down).
+                logger.debug(f"OIDC validation fell through to static keys: {exc}")
+                principal = None
+
+        if principal is None:
+            principal = self._static.match(token)
+
+        if principal is None:
+            raise _UNAUTHORIZED
+        return principal
+
+
+def build_static_authenticator(cfg: dict) -> Authenticator:
+    """Build the static-API-key Authenticator from config + env.
 
     Precedence/back-compat:
       - ``MCP_GATEWAY_API_KEY`` / ``gateway.api_key`` → an **admin** key (today's
@@ -126,10 +207,38 @@ def build_authenticator(cfg: dict) -> Authenticator:
 
     enabled = len(keys) > 0
     if enabled:
-        logger.info(f"Gateway RBAC enabled: {len(keys)} API key(s) configured")
-    else:
-        logger.warning("Gateway RBAC disabled: no API keys configured — all requests permitted")
+        logger.info(f"Gateway static-key auth: {len(keys)} API key(s) configured")
     return Authenticator(keys, enabled)
+
+
+def build_authenticator(cfg: dict) -> Union[Authenticator, CompositeAuthenticator]:
+    """Build the gateway authenticator (ADR-0007 composite, or static-only).
+
+    Static API keys are always built (break-glass / bootstrap). If ``gateway.oidc`` is
+    enabled, the result is a :class:`CompositeAuthenticator` (OIDC JWT → else static key
+    → else 401); otherwise the plain :class:`Authenticator` is returned unchanged so
+    existing single-key / no-key deployments behave exactly as before.
+    """
+    static = build_static_authenticator(cfg)
+
+    from device_mcp_gateway.oidc import build_oidc_validator
+
+    oidc = build_oidc_validator(cfg)
+    if oidc is None:
+        if not static.enabled:
+            logger.warning("Gateway RBAC disabled: no API keys configured — all requests permitted")
+        return static
+
+    if not static.enabled:
+        # OIDC alone authenticates, but with no static key there is no way in when the
+        # IdP/JWKS is unreachable. ADR-0007 keeps at least one admin key as documented
+        # break-glass — warn loudly so an operator does not lock themselves out.
+        logger.warning(
+            "OIDC is enabled but no static break-glass key is configured (MCP_ADMIN_KEY / "
+            "gateway.rbac). If the IdP or its JWKS endpoint is unreachable, no one can "
+            "authenticate. Configure at least one admin key as break-glass (ADR-0007)."
+        )
+    return CompositeAuthenticator(static=static, oidc=oidc)
 
 
 # --- FastAPI dependencies ----------------------------------------------------
@@ -157,9 +266,9 @@ async def authenticate_request(
     A failed authentication (401) is audited with the request target (F-55) so
     access-denied events are answerable from the log, not just successful access.
     """
-    authenticator: Authenticator = request.app.state.authenticator
+    authenticator = request.app.state.authenticator
     try:
-        request.state.principal = authenticator.authenticate(credentials)
+        request.state.principal = await authenticator.authenticate_async(credentials)
     except HTTPException as exc:
         if exc.status_code == 401:
             audit_event(

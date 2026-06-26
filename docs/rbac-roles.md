@@ -31,8 +31,9 @@ invoking tools over SSE). One scope model serves both.
 | **auditor** | — | — | — | ✅ | Observability / compliance, no device access (human). Widens to `audit:read` when that scope exists |
 | **caller** (agent) | ✅ | — | ✅ | — | An MCP client/agent that discovers and invokes tools — **machine identity**, not a UI role |
 
-`admin` and `viewer` exist today; `operator`, `auditor`, and `caller` are the seed additions
-from ADR-0007. Add a role by adding one entry to `ROLE_SCOPES` — no route changes.
+All five roles are defined in [`ROLE_SCOPES`](../device_mcp_gateway/rbac.py) today
+(`operator`/`auditor`/`caller` were added with the OIDC work, ADR-0007). Add a role by
+adding one entry to `ROLE_SCOPES` — no route changes.
 
 ## Where roles come from
 
@@ -40,14 +41,17 @@ from ADR-0007. Add a role by adding one entry to `ROLE_SCOPES` — no route chan
 The IdP asserts **group membership** in a token claim (`groups` or `roles`); a
 **`group → role/scopes` mapping in gateway config** is the single source of truth. The UI
 reflects whatever scopes the gateway grants (via `/auth/me`), so UI and gateway permissions
-can't drift. Illustrative config (final shape TBD in implementation):
+can't drift. Config lives under `gateway.oidc` (alongside the static-key settings), wired by
+[oidc.py](../device_mcp_gateway/oidc.py):
 
 ```yaml
-auth:
+gateway:
   oidc:
+    enabled: true
     issuer: https://login.example.com/realms/corp   # ADFS / Entra / Okta / Keycloak …
-    audience: device-mcp-gateway
+    audience: device-mcp-gateway                     # must equal the JWT 'aud'
     groups_claim: groups
+    algorithms: ["RS256"]       # asymmetric allow-list; HS*/none are refused
     group_roles:                # IdP group  → gateway role (a scope bundle)
       mcp-admins:    admin
       mcp-operators: operator
@@ -55,7 +59,10 @@ auth:
       mcp-auditors:  auditor
 ```
 
-A user in multiple groups gets the **union** of the mapped scopes.
+A user in multiple groups gets the **union** of the mapped scopes. A valid token whose groups
+map to **no** role authenticates with an **empty scope set** — every route then 403s, and the
+audit shows *who* was denied. `jwks_uri` is auto-discovered from the issuer unless set
+explicitly; the full knob list is in [config.yaml](../config.yaml).
 
 ### Local static keys — bootstrap, CI/test, break-glass
 Independent of any IdP and always available (ADR-0007): `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY`,
