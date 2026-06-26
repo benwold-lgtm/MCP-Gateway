@@ -87,7 +87,8 @@ scope seam.
 - **Follow-ups (deferred):**
   - **Threat-model addendum** for the IdP → BFF → gateway path (token validation, JWKS
     rotation/poisoning, assertion forgery, the BFF→gateway boundary). *Required before
-    implementation.*
+    implementation.* → **Drafted:** [threat-model-identity.md](../threat-model-identity.md)
+    (carries the `TM-I-nn` requirements and a pre-implementation gate checklist).
   - **Finer scopes** (split `devices:write` → create/update/delete; add `deadletter:manage`,
     `audit:read`) — additive, no route churn.
   - **Tenant-scoped roles** (e.g. `operator@tenant-a`) — the natural extension if the paused

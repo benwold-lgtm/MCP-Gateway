@@ -8,7 +8,9 @@ a change: if a change crosses or moves a trust boundary, revisit the relevant ro
 
 Companion docs: [multitenancy.md](multitenancy.md) (tenancy decision D-1),
 [security-mtls.md](security-mtls.md), [audit-logging.md](audit-logging.md),
-[failure-modes.md](failure-modes.md) (availability/reliability counterpart).
+[failure-modes.md](failure-modes.md) (availability/reliability counterpart),
+[threat-model-identity.md](threat-model-identity.md) (the IdP → BFF → gateway addendum for
+federated identity, [ADR-0007](adr/0007-federated-identity-oidc-and-gateway-rbac.md)).
 
 ## 1. Scope & assets
 
@@ -129,3 +131,7 @@ channel, an inbound webhook surface — see [api-change-governance.md](api-chang
 the tenancy decision (D-1) changes, the auth model changes (JWT/OIDC), or a new asset class
 is stored. Each STRIDE row should map to a control with a finding ID or an explicit accepted
 risk — a row with neither is a gap.
+
+> The JWT/OIDC change is now in flight: the federated-identity boundaries (IdP → BFF →
+> gateway) are modeled in the addendum [threat-model-identity.md](threat-model-identity.md),
+> which is *required before* that implementation starts (ADR-0007).
