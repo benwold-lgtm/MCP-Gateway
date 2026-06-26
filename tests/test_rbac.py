@@ -173,3 +173,24 @@ def test_admin_passes_authz_on_mutations(monkeypatch):
     assert client.get("/v1/devices", headers=h).status_code == 200
     # Admin clears authz; a bad body now yields a 400 (validation), not 403 (authz).
     assert client.post("/v1/devices", headers=h, json={"hostname": "x"}).status_code == 400
+
+
+# --- whoami (/v1/auth/me) — identity + effective scopes for the UI -------------
+
+
+def test_whoami_returns_subject_and_scopes(monkeypatch):
+    h = _use(monkeypatch, "viewer")
+    resp = client.get("/v1/auth/me", headers=h)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["subject"] == "key:viewer"
+    assert body["auth_method"] == "api_key"
+    # Effective scopes are the viewer bundle, sorted.
+    assert body["scopes"] == sorted(ROLE_SCOPES["viewer"])
+
+
+def test_whoami_requires_authentication(monkeypatch):
+    # Auth enabled but no/!invalid token → 401 (authenticate_request), never anonymous.
+    _use(monkeypatch, "admin")
+    assert client.get("/v1/auth/me").status_code == 401
+    assert client.get("/v1/auth/me", headers={"Authorization": "Bearer nope"}).status_code == 401

@@ -17,6 +17,10 @@ doc — both from a third-party review. Plus the first slice of federated identi
 
 ### Added
 
+- **`GET /v1/auth/me` (whoami).** Returns the authenticated caller's own `subject`, effective
+  `scopes`, and `auth_method`. Requires authentication but no specific scope. It lets a UI/BFF
+  gate views on the **gateway's** scopes instead of maintaining a parallel role model, so the
+  two can't drift (ADR-0007) — the source of truth for the UI's scope-driven gating.
 - **Inbound OIDC authentication (ADR-0007, first slice).** The gateway can now authenticate
   a request bearing an IdP-issued JWT, in addition to static API keys. A new composite
   authenticator validates the token against the issuer's JWKS — asymmetric-algorithm
