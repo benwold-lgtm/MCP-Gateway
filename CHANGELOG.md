@@ -10,8 +10,21 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
-Deployment-artifact and documentation hardening for third-party Kubernetes deployers.
-**No application code changed** — manifests, packaging docs, and Kubernetes guidance only.
+Post-0.1.2 changes: third-party Kubernetes deployment hardening (no application code),
+plus a small tool-set change-governance addition (a new read endpoint) and a translation
+doc — both from a third-party review.
+
+### Added
+
+- **`GET /v1/devices/{hostname}/tools/diff`** — surfaces a device's most recent tool-set
+  change (added / removed / changed tool names, the `breaking` flag and reasons, and the
+  `tools_revision` it produced) as `ToolsDiffResponse`. The diff was already computed and
+  audited on every spec change (F-41) but discarded; it is now persisted per device (cleared
+  on delete) and served, so a UI can show *what* moved, not just *that* it moved. Works in
+  both modes and does not require an active pod.
+- **`docs/tooling.md`** — the OpenAPI→MCP translation contract: tool naming, parameter and
+  request-body mapping, `$ref`/`allOf`/`anyOf`/nullable schema resolution, argument
+  validation, and the two-layer error mapping (JSON-RPC codes + result-envelope slugs).
 
 ### Changed
 

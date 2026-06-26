@@ -218,6 +218,11 @@ class Registry:
     async def get_manifest(self, hostname: str) -> dict | None:
         return await self._backend.get_manifest(hostname)
 
+    async def get_last_tool_change(self, hostname: str) -> dict | None:
+        """The most recent recorded tool-set change for a device (F-41), or None
+        if no change has been observed since registration."""
+        return await self._backend.get_last_tool_change(hostname)
+
     # ------------------------------------------------------------------
     # Distributed mode helpers
     # ------------------------------------------------------------------
@@ -434,6 +439,11 @@ class Registry:
                             profile.config.tools_revision += 1
                             await self._backend.update_device_fields(
                                 profile.hostname, tools_revision=profile.config.tools_revision
+                            )
+                            # Persist what changed so GET /tools/diff can serve it (F-41).
+                            await self._backend.set_last_tool_change(
+                                profile.hostname,
+                                diff.to_record(profile.config.tools_revision, time.time()),
                             )
                 except Exception:
                     logger.exception(f"Health check error for {profile.hostname}")

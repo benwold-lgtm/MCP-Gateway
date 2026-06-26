@@ -137,3 +137,28 @@ class DeviceDiagnostics(BaseModel):
     tools_revision: int = 0
     spawn_error: str | None = None
     breaker: BreakerState
+
+
+class ToolChangeRecord(BaseModel):
+    """The most recent tool-set change for a device — what was added/removed/
+    changed when its upstream OpenAPI spec last mutated, and whether that was
+    backwards-breaking for clients calling the old shape (F-41)."""
+
+    tools_revision: int
+    at: float  # unix timestamp the change was observed
+    added: list[str] = []
+    removed: list[str] = []
+    changed: list[str] = []
+    breaking: bool = False
+    breaking_reasons: list[str] = []
+
+
+class ToolsDiffResponse(BaseModel):
+    """Tool-set change governance for a device. ``last_change`` is ``null`` when no
+    change has been observed since registration (the tool set is as first
+    generated). ``tools_revision`` is the device's current monotonic revision —
+    poll it to detect a change, then read ``last_change`` to see what moved."""
+
+    hostname: str
+    tools_revision: int
+    last_change: ToolChangeRecord | None = None

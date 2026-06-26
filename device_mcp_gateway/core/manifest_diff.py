@@ -56,6 +56,23 @@ class ToolSetDiff:
         """True when nothing changed (no add/remove/change) — a no-op spec edit."""
         return not (self.added or self.removed or self.changed)
 
+    def to_record(self, revision: int, at: float) -> dict[str, Any]:
+        """Serialise as the persisted/served "last tool-set change" record (F-41).
+
+        ``revision`` is the ``tools_revision`` this change produced; ``at`` is the
+        unix timestamp it was observed. Name lists are capped at ``_MAX_NAMES`` so
+        a wholesale spec rewrite can't bloat the stored blob or the API response.
+        """
+        return {
+            "tools_revision": revision,
+            "at": at,
+            "added": self.added[:_MAX_NAMES],
+            "removed": self.removed[:_MAX_NAMES],
+            "changed": self.changed[:_MAX_NAMES],
+            "breaking": self.breaking,
+            "breaking_reasons": self.breaking_reasons[:_MAX_NAMES],
+        }
+
 
 def _index_tools(tools: Any) -> dict[str, dict[str, Any]]:
     """Index a tool list by name → {method, schema}.
