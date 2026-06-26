@@ -672,6 +672,7 @@ Phase-0 / governance artifacts for reviewers and operators:
 | [docs/tooling.md](docs/tooling.md) | OpenAPI→MCP translation contract — tool naming, parameter/body mapping, schema resolution, argument validation, error mapping |
 | [docs/rbac-roles.md](docs/rbac-roles.md) | RBAC scopes, role bundles, and IdP/OIDC group→role mapping (see [ADR-0007](docs/adr/0007-federated-identity-oidc-and-gateway-rbac.md)) |
 | [docs/threat-model.md](docs/threat-model.md) | STRIDE threat model — trust boundaries, adversaries, control-per-threat, accepted risks |
+| [docs/threat-model-identity.md](docs/threat-model-identity.md) | Threat-model addendum for federated identity (IdP → BFF → gateway) — new boundaries, `TM-I-nn` requirements, pre-implementation gate (see [ADR-0007](docs/adr/0007-federated-identity-oidc-and-gateway-rbac.md)) |
 | [docs/failure-modes.md](docs/failure-modes.md) | FMEA matrix — per-component failure, detection (metric/alert), mitigation, operator action |
 | [docs/adr/](docs/adr/) | Architecture Decision Records — the load-bearing decisions (dual-mode, Redis control plane, single-owner, single-tenant, at-least-once+idempotency, fail-closed defaults, federated identity/RBAC) |
 | [docs/load-testing.md](docs/load-testing.md) | Load-baseline methodology + the runnable harness in [tools/loadtest/](tools/loadtest/) |
