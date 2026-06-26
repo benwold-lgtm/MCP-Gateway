@@ -670,9 +670,10 @@ Phase-0 / governance artifacts for reviewers and operators:
 | Doc | What it covers |
 |-----|----------------|
 | [docs/tooling.md](docs/tooling.md) | OpenAPI→MCP translation contract — tool naming, parameter/body mapping, schema resolution, argument validation, error mapping |
+| [docs/rbac-roles.md](docs/rbac-roles.md) | RBAC scopes, role bundles, and IdP/OIDC group→role mapping (see [ADR-0007](docs/adr/0007-federated-identity-oidc-and-gateway-rbac.md)) |
 | [docs/threat-model.md](docs/threat-model.md) | STRIDE threat model — trust boundaries, adversaries, control-per-threat, accepted risks |
 | [docs/failure-modes.md](docs/failure-modes.md) | FMEA matrix — per-component failure, detection (metric/alert), mitigation, operator action |
-| [docs/adr/](docs/adr/) | Architecture Decision Records — the load-bearing decisions (dual-mode, Redis control plane, single-owner, single-tenant, at-least-once+idempotency, fail-closed defaults) |
+| [docs/adr/](docs/adr/) | Architecture Decision Records — the load-bearing decisions (dual-mode, Redis control plane, single-owner, single-tenant, at-least-once+idempotency, fail-closed defaults, federated identity/RBAC) |
 | [docs/load-testing.md](docs/load-testing.md) | Load-baseline methodology + the runnable harness in [tools/loadtest/](tools/loadtest/) |
 | [docs/multitenancy.md](docs/multitenancy.md) | Single-tenant-per-stack deployment model (D-1) |
 | [docs/runbook.md](docs/runbook.md) | On-call runbook — per-alert playbooks, symptom troubleshooting, standard procedures |
