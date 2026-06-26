@@ -21,6 +21,29 @@ gateway:
   #   - name: admin-cli
   #     key: "change-me-admin-token"
   #     role: admin
+  # Federated identity (OIDC) — ADR-0007. When enabled, a request bearing a JWT is
+  # validated against the IdP's JWKS and mapped to scopes via group_roles below; an
+  # opaque token still falls back to the static keys above. KEEP at least one admin key
+  # as break-glass: if the IdP/JWKS is unreachable, OIDC fails closed but static keys
+  # keep working. See docs/rbac-roles.md and docs/threat-model-identity.md.
+  # oidc:
+  #   enabled: true
+  #   issuer: "https://login.example.com/realms/corp"   # ADFS / Entra / Okta / Keycloak …
+  #   audience: "device-mcp-gateway"                      # must equal the JWT 'aud'
+  #   # jwks_uri is auto-discovered from <issuer>/.well-known/openid-configuration; set
+  #   # it explicitly to skip discovery (e.g. air-gapped):
+  #   # jwks_uri: "https://login.example.com/realms/corp/protocol/openid-connect/certs"
+  #   groups_claim: "groups"        # claim carrying IdP group membership
+  #   subject_claim: "sub"          # claim used as the audit subject
+  #   algorithms: ["RS256"]         # asymmetric allow-list (HS*/none refused)
+  #   leeway: 60                    # clock-skew tolerance, seconds
+  #   jwks_cache_ttl: 600           # how long a fetched key set is trusted, seconds
+  #   jwks_min_refresh_interval: 30 # rate-limit on kid-miss refetch, seconds
+  #   group_roles:                  # IdP group → gateway role (a scope bundle)
+  #     mcp-admins: admin
+  #     mcp-operators: operator
+  #     mcp-viewers: viewer
+  #     mcp-auditors: auditor
   # Fernet key for encrypting device credentials in SQLite.
   # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   # Override with MCP_SECRET_KEY environment variable.
