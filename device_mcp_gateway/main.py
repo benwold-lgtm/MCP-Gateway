@@ -68,6 +68,7 @@ from device_mcp_gateway.schemas import (
     OverviewResponse,
     ToolChangeRecord,
     ToolsDiffResponse,
+    WhoAmIResponse,
 )
 from device_mcp_gateway.security.url_policy import UrlPolicyError, resolve_allow_private, validate_target_url
 from device_mcp_gateway.shared.crypto import CredentialCodec
@@ -1225,6 +1226,18 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             metrics["device_rate_limits"] = {d.hostname: {"rate_limit_rps": d.rate_limit_rps} for d in devices}
 
         return metrics
+
+    @protected.get("/auth/me", response_model=WhoAmIResponse)
+    async def whoami(request: Request):
+        # Any authenticated caller may read its own identity (no scope gate) — the BFF
+        # uses this to gate UI views on the gateway's scopes, so the UI and gateway can't
+        # drift (ADR-0007). authenticate_request has already resolved the Principal.
+        principal = request.state.principal
+        return WhoAmIResponse(
+            subject=principal.subject,
+            scopes=sorted(principal.scopes),
+            auth_method=principal.auth_method,
+        )
 
     @protected.get(
         "/admin/overview",

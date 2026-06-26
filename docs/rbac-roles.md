@@ -17,6 +17,10 @@ for the role/scope model; the *decision* behind it is
 
 > `/health`, `/livez`, `/readyz` and the Prometheus scrape port are unauthenticated infra
 > contracts and are not scope-gated.
+>
+> `GET /v1/auth/me` requires authentication but **no specific scope** — it returns the
+> caller's own `subject`, effective `scopes`, and `auth_method`. A UI/BFF reads it to gate
+> views on the gateway's scopes (so the two never drift); see "Where roles come from" below.
 
 ## Roles (scope bundles)
 

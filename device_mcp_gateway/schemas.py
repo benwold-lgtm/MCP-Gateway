@@ -162,3 +162,13 @@ class ToolsDiffResponse(BaseModel):
     hostname: str
     tools_revision: int
     last_change: ToolChangeRecord | None = None
+
+
+class WhoAmIResponse(BaseModel):
+    """The authenticated caller's own identity and effective authorization, so a UI/BFF
+    can gate views on the **gateway's** scopes rather than maintaining a parallel role
+    model (ADR-0007). ``scopes`` is sorted for a stable response."""
+
+    subject: str
+    scopes: list[str]
+    auth_method: str
