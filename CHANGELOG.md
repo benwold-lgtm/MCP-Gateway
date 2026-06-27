@@ -72,6 +72,13 @@ doc — both from a third-party review. Plus the first slice of federated identi
   manifests reference an unpublished image), a cluster-prerequisites table (ingress-nginx,
   metrics-server, default StorageClass, optional Prometheus Operator), a TLS-secret example,
   and an explicit note that the bundled single-replica Redis is not an HA component.
+- **Redis HA guidance** ([docs/kubernetes-architecture.md](docs/kubernetes-architecture.md),
+  "Redis availability & durability"): the enterprise options for a highly-available Redis —
+  managed Redis (drop-in single endpoint) or self-hosted Redis/Valkey + Sentinel behind a
+  primary-tracking endpoint — why the gateway needs single-primary **HA, not a sharded
+  Cluster** (multi-key `MULTI`/`EXEC` + pub/sub on one keyspace) and not active-active,
+  durability/AOF, the Redis 7 requirement, and that the single-URL client makes any
+  failover-hiding endpoint a no-code change. `redis.yaml` now points at it.
 
 ## [0.1.2] - 2026-06-16
 
