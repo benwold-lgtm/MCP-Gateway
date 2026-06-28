@@ -250,7 +250,78 @@ In distributed mode Redis is the **single source of truth and a single point of 
 
 **Durability.** The provided `redis.yaml` runs `--appendonly yes`, so the AOF persists the registry and every stream across a restart. Because tool-call results are now **Redis Streams** rather than fire-and-forget pub/sub (SRE #3), a clean restart **no longer loses in-flight results** — a reconnecting gateway re-reads the session's result stream from where it left off. Only writes within the last `appendfsync` window (default `everysec` → ≤ 1 s) can be lost on an unclean crash.
 
-**Production recommendation.** The single-node StatefulSet is fine for dev and small deployments but has no failover. For production, run **Redis Sentinel** (HA with automatic failover) or **Redis Cluster**, and point `MCP_REDIS_URL` at the Sentinel/Cluster endpoint. Size the command and pub/sub connection pools (`redis.max_connections`, `redis.pubsub_max_connections`) for your gateway/worker replica count and expected concurrent SSE streams.
+**Production recommendation.** The bundled single-node `redis.yaml` StatefulSet is fine for
+dev and small/home deployments but has **no failover** — it is explicitly *not* an HA
+component. Because the gateway is **fail-closed on Redis** (`/readyz` gates on `PING`),
+**Redis availability is gateway availability**: an enterprise SLA effectively requires an HA
+Redis. The rest of this section is how to do that.
+
+### What the gateway needs from Redis (and what it does *not*)
+
+Two facts about how the gateway uses Redis decide which HA topology fits:
+
+1. **One logical primary, not sharding.** The gateway keeps all state in a **single
+   keyspace** and uses **multi-key `MULTI`/`EXEC` transactions** (the atomic rate limiter),
+   **Streams**, and **pub/sub** across it. It is single-owner-per-device ([ADR-0003](adr/0003-single-owner-per-device.md)) and does **not** need horizontal write-scaling — so it needs **HA (failover)**, not a sharded cluster.
+2. **A single connection endpoint.** The client connects with one URL
+   (`MCP_REDIS_URL` / `redis.url`, e.g. `rediss://:<pw>@host:6379/0`) — it does **not** do
+   native Sentinel discovery today. So **any HA solution that presents one stable address
+   which survives failover is a drop-in** (no code change). Native multi-Sentinel discovery
+   would be a small client enhancement (tracked; not required).
+3. **Redis 7+ (or Valkey ≥ 7.2).** The atomic rate-limiter `MULTI`/`EXEC` requires it; pick
+   an HA option/tier that is on 7+.
+
+### HA options, best fit first
+
+**1 — Managed Redis (cloud) — least ops, drop-in.** AWS **ElastiCache** (cluster-mode
+*disabled*, Multi-AZ + automatic failover), Azure **Cache for Redis** Premium (zone
+redundant), or GCP **Memorystore** Standard. Each presents **one endpoint** that fails over
+internally → set `redis.url` to it, enable persistence, done. Preferred when a cloud is
+available.
+
+**2 — Self-hosted Redis/Valkey + Sentinel, behind a stable endpoint — on-prem default.**
+1 primary + 2 replicas + **3 Sentinels** for automatic failover. Use a maintained
+operator/chart rather than hand-rolling (e.g. the **Bitnami Redis** chart with
+`architecture: replication` and Sentinel enabled, or a Redis/Valkey operator). The one
+design rule: front it with a **Service/proxy that always tracks the current primary** so the
+gateway keeps using a single URL across failovers (the Bitnami chart provides this). Spread
+replicas/Sentinels across nodes/zones (podAntiAffinity), put the data on a real
+StorageClass, and keep **AOF on** (below).
+
+**3 — Native Sentinel discovery — optional enhancement.** If you would rather not run a
+primary-tracking front, the gateway client can be extended to use `redis.asyncio.Sentinel`
+(connect to the Sentinels, resolve the primary) — a small change to
+`device_mcp_gateway/shared/redis_client.py` plus a couple of config keys. Only worth it for
+pure-Sentinel deployments without a fronting Service.
+
+### What to avoid
+
+- **Redis Cluster (sharding).** The gateway's **multi-key `MULTI`/`EXEC` and pub/sub on one
+  keyspace** run into Cluster's same-hash-slot and sharded-pub/sub constraints, which the
+  code is not written for. It adds risk and buys scale a device gateway does not need. Skip
+  it unless you ever *prove* a single node can't hold the load.
+- **Active-active / multi-primary (CRDB).** Unnecessary and **semantically wrong** for
+  single-owner-per-device — it can break the transaction/claim guarantees. One primary is
+  correct.
+
+### Durability (separate from failover)
+
+HA ≠ durability — and Redis here holds **authoritative** state (registry, encrypted
+credentials, in-flight call/result streams), not a cache. So regardless of the option:
+
+- Keep **AOF on** (`appendonly yes`, `appendfsync everysec`) on the primary **and** replicas;
+  `redis.yaml` already does this for the bundled instance.
+- Take periodic **RDB/snapshot backups** for point-in-time recovery.
+- **Alert on failover events and replication lag** — failover is your availability event.
+
+### Pools and persona
+
+Size the command and pub/sub connection pools (`redis.max_connections`,
+`redis.pubsub_max_connections`) for your gateway/worker replica count and expected concurrent
+SSE streams. For packaging, make Redis a single switch: **home/Docker** uses the bundled
+single instance (documented not-HA); **enterprise** defaults to **bring-your-own** endpoint
+(`redis.url` → managed or Sentinel-fronted), with an optional bundled HA subchart for those
+who want it in-cluster.
 
 ---
 

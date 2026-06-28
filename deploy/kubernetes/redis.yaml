@@ -7,8 +7,12 @@
 # is unavailable the gateway returns 503 on /readyz (pulled from the LB) and
 # workers retry until it returns.
 #
-# Production: run Redis Sentinel (HA failover) or Redis Cluster instead of this
-# single node, and point MCP_REDIS_URL at the Sentinel/Cluster endpoint.
+# Production: this single node has NO failover. Use an HA Redis instead — managed
+# Redis (ElastiCache Multi-AZ / Azure Premium / Memorystore Standard) or self-hosted
+# Redis/Valkey + Sentinel behind a primary-tracking endpoint — and point MCP_REDIS_URL
+# at it. The gateway needs HA (single-primary failover), NOT a sharded cluster. See the
+# "Redis availability & durability" section in docs/kubernetes-architecture.md for the
+# full guidance (why not Cluster/active-active, durability/AOF, Redis 7 requirement).
 #
 # Durability: --appendonly yes (below) persists the AOF, so the registry and all
 # streams — including per-session result streams (SRE #3) — survive a restart.
