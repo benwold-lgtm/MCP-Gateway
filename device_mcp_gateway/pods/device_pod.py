@@ -250,16 +250,19 @@ class DevicePod:
         def _count_retry(_attempt: int, reason: str) -> None:
             metrics.upstream_retries_total.labels(hostname=_hostname, reason=reason).inc()
 
-        for tool in self.manifest.tools:
-            # Build a callable closure per tool. All closure variables are bound
-            # via default-argument so each iteration captures its own snapshot.
-            async def call_api(
-                tool: McpTool = tool,
-                auth=self.auth,
-                base_url: str = self.base_url,
-                rate_limiter=self._rate_limiter,
-                **kwargs: Any,
-            ) -> Any:
+        # Build each tool's dispatch closure via a factory so the per-tool bindings
+        # (tool / auth / base_url / rate_limiter) live in the enclosing scope rather than
+        # the call signature. The closure takes only **kwargs, so invoking it as
+        # call_api(**arguments) can never collide with an OpenAPI parameter literally named
+        # tool/auth/base_url/rate_limiter (which previously raised "got multiple values for
+        # argument") — F-04.
+        def _make_call_api(
+            tool: McpTool,
+            auth: AbstractAuth | None,
+            base_url: str,
+            rate_limiter: TokenBucket | None,
+        ) -> Any:
+            async def call_api(**kwargs: Any) -> Any:
                 if rate_limiter:
                     await rate_limiter.acquire()
 
@@ -361,11 +364,15 @@ class DevicePod:
                 except Exception as e:
                     return _adapter.error_envelope(ERR_INTERNAL, str(e))
 
-            # Store in local dispatch dict; FastMCP's **kwargs handling would
-            # require a 'kwargs' key in arguments, so we bypass call_tool() and
-            # invoke closures directly via _tool_dispatch.
-            self._tool_dispatch[tool.name] = call_api
-            self._mcp.tool(name=tool.name, description=tool.description)(call_api)
+            return call_api
+
+        for tool in self.manifest.tools:
+            # Bind this tool's snapshot into its own dispatch closure. FastMCP's **kwargs
+            # handling would require a 'kwargs' key in arguments, so we bypass call_tool()
+            # and invoke the closure directly via _tool_dispatch.
+            handler = _make_call_api(tool, self.auth, self.base_url, self._rate_limiter)
+            self._tool_dispatch[tool.name] = handler
+            self._mcp.tool(name=tool.name, description=tool.description)(handler)
         logger.info(f"Registered {len(self.manifest.tools)} tools for pod {self.hostname}")
 
     def _ensure_sse_transport(self) -> SseTransport:

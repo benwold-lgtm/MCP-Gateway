@@ -39,6 +39,9 @@ from device_mcp_gateway.security.url_policy import UrlPolicyError, validate_targ
         "http://10.0.0.5/",  # private
         "http://192.168.1.1/",  # private
         "http://[::1]/",  # IPv6 loopback
+        "http://[::ffff:169.254.169.254]/latest/meta-data/",  # IPv4-mapped IPv6 → metadata (M-2)
+        "http://[::ffff:127.0.0.1]/",  # IPv4-mapped IPv6 → loopback (M-2)
+        "http://[::ffff:10.0.0.5]/",  # IPv4-mapped IPv6 → private (M-2)
         "file:///etc/passwd",  # bad scheme
         "ftp://example.com/",  # bad scheme
         "not-a-url",  # no host
@@ -148,6 +151,51 @@ async def test_header_param_cannot_override_auth():
     assert h["Authorization"] == "real-token"  # auth wins, not "attacker"
     assert "host" not in {k.lower() for k in h}  # reserved dropped
     assert h.get("x_custom") == "ok"  # benign header preserved
+
+
+@pytest.mark.asyncio
+async def test_tool_param_named_like_closure_var_does_not_collide():
+    """F-04: a tool whose OpenAPI parameter is literally named tool/auth/base_url/
+    rate_limiter must dispatch normally, not raise 'got multiple values for argument'."""
+    reserved = ["tool", "auth", "base_url", "rate_limiter"]
+    manifest = McpManifest(
+        server_name="m",
+        server_version="1",
+        hostname="dev",
+        tools=[
+            McpTool(
+                name="t",
+                description="d",
+                schema={"type": "object", "properties": {k: {"type": "string"} for k in reserved}},
+                method="GET",
+                path="/x",
+                param_locations={k: "query" for k in reserved},
+            )
+        ],
+    )
+    captured = {}
+
+    async def fake_request(self, method, url, **kwargs):
+        captured["params"] = kwargs.get("params")
+
+        class _R:
+            status_code = 200
+            content = b"{}"
+            headers = {"content-type": "application/json"}
+
+            def json(self):
+                return {}
+
+        return _R()
+
+    with patch("httpx.AsyncClient.request", fake_request):
+        pod = DevicePod(hostname="dev", manifest=manifest, transport="sse", base_url="http://dev.local")
+        # Before the factory fix this raised "got multiple values for argument 'tool'"
+        # before any request was made; now it dispatches normally.
+        await pod._tool_dispatch["t"](**{k: f"v_{k}" for k in reserved})
+
+    # The request reached the wire with every reserved-named arg forwarded as a query param.
+    assert captured["params"] == {k: f"v_{k}" for k in reserved}
 
 
 # --- F-28 argument validation ------------------------------------------------

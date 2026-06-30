@@ -55,6 +55,28 @@ def test_redact_url_empty_and_none():
     assert redact_url(None) == ""
 
 
+def test_redact_url_strips_credential_query_params():
+    # L-4: secrets in the query string must be redacted, not just user:pass@ userinfo.
+    assert redact_url("https://dev.example.com/api?api_key=s3cret&page=2") == (
+        "https://dev.example.com/api?api_key=%2A%2A%2A&page=2"
+    )
+    out = redact_url("https://dev.example.com/api?token=abc&access_token=def&q=ok")
+    assert "abc" not in out and "def" not in out
+    assert "q=ok" in out
+
+
+def test_redact_url_strips_both_userinfo_and_query_secret():
+    out = redact_url("https://user:pw@dev.example.com/api?signature=deadbeef")
+    assert out.startswith("https://***@dev.example.com/api?")
+    assert "deadbeef" not in out
+
+
+def test_redact_url_leaves_non_credential_query_untouched():
+    assert redact_url("https://dev.example.com/api?page=2&sort=name") == (
+        "https://dev.example.com/api?page=2&sort=name"
+    )
+
+
 # --- audit helpers -----------------------------------------------------------
 
 

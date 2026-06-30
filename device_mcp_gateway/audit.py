@@ -30,7 +30,7 @@ import os
 import threading
 import uuid
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from loguru import logger
 
@@ -150,8 +150,46 @@ def _read_last_audit_extra(audit_file: str, *, instance_id: str | None = None) -
         return None
 
 
+# Query-string parameter names that carry credentials. Several auth handlers place
+# keys in the query (e.g. api_key.py), so a full URL reaching a log/audit path could
+# otherwise leak the secret even though userinfo is stripped (L-4). Matched case-insensitively.
+_REDACT_QUERY_KEYS: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "key",
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "secret",
+        "client_secret",
+        "password",
+        "passwd",
+        "pwd",
+        "sig",
+        "signature",
+        "auth",
+    }
+)
+
+
+def _redact_query(query: str) -> str:
+    """Replace the value of any known credential query param with ``***``.
+
+    Returns the original string unchanged when nothing matches (so a clean URL round-trips
+    byte-for-byte and is returned as-is by ``redact_url``)."""
+    if not query:
+        return query
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if not any(k.lower() in _REDACT_QUERY_KEYS for k, _ in pairs):
+        return query
+    return urlencode([(k, "***" if k.lower() in _REDACT_QUERY_KEYS else v) for k, v in pairs])
+
+
 def redact_url(url: str | None) -> str:
-    """Return ``url`` with any ``user:pass@`` userinfo replaced by ``***@`` (F-59).
+    """Return ``url`` with credentials removed: ``user:pass@`` userinfo collapsed to
+    ``***@`` and any credential-bearing query param value replaced by ``***`` (F-59/L-4).
 
     Credentials embedded in a device URL must never be logged. Clean URLs are returned
     unchanged; an unparseable value collapses to a safe placeholder.
@@ -162,12 +200,16 @@ def redact_url(url: str | None) -> str:
         parts = urlsplit(url)
     except ValueError:
         return "<unparseable-url>"
-    if not (parts.username or parts.password):
-        return url
-    host = parts.hostname or ""
-    if parts.port:
-        host = f"{host}:{parts.port}"
-    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
+    netloc = parts.netloc
+    if parts.username or parts.password:
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        netloc = f"***@{host}"
+    query = _redact_query(parts.query)
+    if netloc == parts.netloc and query == parts.query:
+        return url  # nothing sensitive to redact
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
 
 def audit_event(

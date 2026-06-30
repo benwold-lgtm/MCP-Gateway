@@ -31,7 +31,17 @@ class UrlPolicyError(ValueError):
 
 
 def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Block addresses that should never be reachable from a device target URL."""
+    """Block addresses that should never be reachable from a device target URL.
+
+    IPv4-mapped IPv6 literals (``::ffff:169.254.169.254``, ``::ffff:127.0.0.1``) are
+    normalised to the embedded IPv4 first, so the private/loopback/link-local checks apply
+    to the real destination rather than the IPv6 wrapper (M-2). Modern CPython already
+    reports the whole ``::ffff:0:0/96`` range as reserved, but normalising makes the intent
+    explicit and keeps the guard correct independent of interpreter version.
+    """
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
     return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
 
 
