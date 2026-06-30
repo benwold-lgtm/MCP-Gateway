@@ -33,12 +33,20 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-import httpx
 import jwt
 from loguru import logger
 
 from device_mcp_gateway.rbac import Principal, scopes_for_role
-from device_mcp_gateway.security.url_policy import UrlPolicyError, validate_target_url
+from device_mcp_gateway.security.url_policy import (
+    UrlPolicyError,
+    build_guarded_client,
+    validate_target_url,
+)
+
+# Bound the installed JWKS key set (TM-I-09). A spoofed/oversized JWKS response must
+# not be able to install an unbounded number of keys (memory / lookup cost). Real IdPs
+# publish a handful of signing keys; 50 is comfortably above any legitimate rotation set.
+_MAX_JWKS_KEYS = 50
 
 # Asymmetric signature algorithms we will accept. Symmetric (HS*) and ``none`` are
 # deliberately excluded — a shared-secret or unsigned token has no place validating a
@@ -121,7 +129,14 @@ class JWKSCache:
         self._install(jwks)
 
     def _install(self, jwks: dict[str, Any]) -> None:
-        self._keys = {k["kid"]: k for k in jwks.get("keys", []) if k.get("kid")}
+        keys = [k for k in jwks.get("keys", []) if isinstance(k, dict) and k.get("kid")]
+        if len(keys) > _MAX_JWKS_KEYS:
+            # Refuse an oversized key set rather than installing it (TM-I-09/H-2). On the
+            # refresh path this is caught and the previous cache is served; at seed time it
+            # fails fast. The signature allow-list still gates forgery, but a key-count cap
+            # closes the unbounded-install vector if the IdP channel is ever compromised.
+            raise OIDCError(f"JWKS has {len(keys)} keys, exceeds cap {_MAX_JWKS_KEYS}")
+        self._keys = {k["kid"]: k for k in keys}
         self._fetched_at = time.monotonic()
 
     @property
@@ -152,9 +167,17 @@ class JWKSCache:
 
     async def _refresh(self) -> None:
         uri = await self._resolve_jwks_uri()
-        # The JWKS URI may have been discovered at runtime; validate it before fetching.
+        # Fetch through the shared egress guard so the JWKS path uses the same SSRF policy
+        # as every other server-side fetch (H-1). follow_redirects=False keeps the prior
+        # behaviour (an IdP redirect is not chased to another origin), and the guard
+        # re-validates the host on the request hop. validate_target_url stays as the
+        # explicit pre-flight check on the resolved/discovered URI.
         validate_target_url(uri, allow_private=self._cfg.allow_private_targets)
-        async with httpx.AsyncClient(timeout=self._cfg.http_timeout) as client:
+        async with build_guarded_client(
+            allow_private=self._cfg.allow_private_targets,
+            follow_redirects=False,
+            timeout=self._cfg.http_timeout,
+        ) as client:
             resp = await client.get(uri)
             resp.raise_for_status()
             self._install(resp.json())
@@ -166,7 +189,11 @@ class JWKSCache:
         # OIDC discovery: <issuer>/.well-known/openid-configuration → jwks_uri.
         disco = self._cfg.issuer.rstrip("/") + "/.well-known/openid-configuration"
         validate_target_url(disco, allow_private=self._cfg.allow_private_targets)
-        async with httpx.AsyncClient(timeout=self._cfg.http_timeout) as client:
+        async with build_guarded_client(
+            allow_private=self._cfg.allow_private_targets,
+            follow_redirects=False,
+            timeout=self._cfg.http_timeout,
+        ) as client:
             resp = await client.get(disco)
             resp.raise_for_status()
             uri = resp.json().get("jwks_uri")

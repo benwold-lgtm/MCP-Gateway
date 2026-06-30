@@ -201,6 +201,19 @@ async def test_unknown_kid_rejected_without_network():
         await v.validate(_token(priv, kid="rotated-away"))
 
 
+def test_jwks_install_rejects_oversized_key_set():
+    # H-2: a spoofed/oversized JWKS must not install an unbounded key set.
+    from device_mcp_gateway.oidc import _MAX_JWKS_KEYS, JWKSCache
+
+    priv = _keypair()
+    cache = JWKSCache(_config())
+    oversized = {"keys": [_jwk(priv, kid=f"k{i}") for i in range(_MAX_JWKS_KEYS + 1)]}
+    with pytest.raises(OIDCError):
+        cache.seed(oversized)
+    # At the cap it still installs.
+    cache.seed({"keys": [_jwk(priv, kid=f"k{i}") for i in range(_MAX_JWKS_KEYS)]})
+
+
 @pytest.mark.asyncio
 async def test_missing_subject_rejected():
     priv = _keypair()
