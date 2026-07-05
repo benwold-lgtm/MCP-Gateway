@@ -24,32 +24,36 @@ the production gateway, just run in its simplest posture:
   limits there for your box.
 - A 64-bit OS. 32-bit (armv7) is not supported — several dependencies ship no 32-bit wheels.
 
-## Quickstart (build from source)
+## Quickstart (published images — no source needed)
 
-The gateway and UI live in two repos. Clone them **side by side** — the lite compose builds
-the UI from `../device-mcp-gateway-ui`:
+The lite compose pulls prebuilt multi-arch images from GHCR (`:lite` tag), so you only need
+the compose file itself. Docker pulls the image matching your CPU automatically:
 
 ```bash
-git clone https://github.com/benwold-lgtm/MCP-Gateway.git device-mcp-gateway
-git clone https://github.com/benwold-lgtm/MCP-Gateway-UI.git device-mcp-gateway-ui
-cd device-mcp-gateway
-
-docker compose -f docker-compose.lite.yml up --build
+curl -O https://raw.githubusercontent.com/benwold-lgtm/MCP-Gateway/main/docker-compose.lite.yml
+docker compose -f docker-compose.lite.yml up -d
 ```
 
 Then open **http://localhost:8080** and grab the generated admin login from the logs (below).
 
-### Or: use the published images (no source needed)
-
-Prebuilt multi-arch images are published to GHCR on each release, tagged `:lite`:
+The images:
 
 - `ghcr.io/benwold-lgtm/device-mcp-gateway:lite`
 - `ghcr.io/benwold-lgtm/device-mcp-ui-bff:lite`
 - `ghcr.io/benwold-lgtm/device-mcp-ui-web:lite`
 
-In [`docker-compose.lite.yml`](../docker-compose.lite.yml), uncomment the `image:` line and
-comment out the `build:` line on each of the three services, then `docker compose -f
-docker-compose.lite.yml up -d` — Docker pulls the image matching your CPU automatically.
+### Or: build from source instead
+
+Prefer to build locally? Clone both repos **side by side** (the UI build contexts point at
+`../device-mcp-gateway-ui`), uncomment the `build:` lines in
+[`docker-compose.lite.yml`](../docker-compose.lite.yml) (and comment the `image:` lines), then:
+
+```bash
+git clone https://github.com/benwold-lgtm/MCP-Gateway.git device-mcp-gateway
+git clone https://github.com/benwold-lgtm/MCP-Gateway-UI.git device-mcp-gateway-ui
+cd device-mcp-gateway
+docker compose -f docker-compose.lite.yml up --build
+```
 
 ## First-run credentials
 
