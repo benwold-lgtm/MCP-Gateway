@@ -31,6 +31,7 @@ from loguru import logger
 from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway import API_V1_PREFIX, __version__
+from device_mcp_gateway.bootstrap import apply_gateway_bootstrap
 from device_mcp_gateway.cfg import load_config, resolve_bind_host, resolve_mode, warn_unsafe_settings
 from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_log, audit_request
 from device_mcp_gateway.core.backoff import jittered
@@ -332,6 +333,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         audit_enabled=_log_cfg.get("audit_enabled", True),
     )
 
+    # LITE first-run bootstrap: when MCP_API_KEY_FILE is set, self-provision an admin key
+    # (reading or generating + persisting it) before auth is built, so a home box requires a
+    # token without hand-config. No-op otherwise, so enterprise key resolution is unchanged.
+    apply_gateway_bootstrap(cfg)
     _gateway_cfg = cfg.get("gateway", {})
     _authenticator = build_authenticator(cfg)
 
