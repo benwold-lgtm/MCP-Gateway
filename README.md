@@ -103,6 +103,22 @@ curl -X POST http://localhost:8000/v1/devices \
 
 ---
 
+## Lite / home deployment (Raspberry Pi, mini-PC)
+
+Want the whole stack — gateway **and** the management UI — on a low-power box for tinkering
+with home automation? [`docker-compose.lite.yml`](docker-compose.lite.yml) runs it in
+embedded mode (no Redis/worker), with local-only login and secrets generated on first boot,
+on amd64 or arm64:
+
+```bash
+docker compose -f docker-compose.lite.yml up --build   # then open http://localhost:8080
+```
+
+See **[docs/lite-deploy.md](docs/lite-deploy.md)** for the full walkthrough (published
+images, first-run credentials, connecting an MCP client, and securing it beyond localhost).
+
+---
+
 ## MCP Client Integration
 
 ### Claude Desktop

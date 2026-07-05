@@ -1,0 +1,145 @@
+# ============================================================================
+# Device MCP Gateway — LITE stack (home / edge / low-power)
+# ============================================================================
+# One command brings up the whole thing: the gateway in EMBEDDED mode
+# (in-process pods + SQLite, no Redis, no separate worker) plus the management
+# UI (BFF + web). Sized for a Raspberry Pi, mini-PC, or an old workstation.
+# Runs on amd64 or arm64 — Docker builds/pulls for whatever CPU you're on, so
+# there is nothing architecture-specific here.
+#
+#   Quickstart (from the gateway repo root):
+#     docker compose -f docker-compose.lite.yml up --build
+#   then open http://localhost:8080. The admin login (username: admin) is generated
+#   on first boot and printed once — grab it from the logs:
+#     docker compose -f docker-compose.lite.yml logs device-mcp-ui-bff | grep -A6 first-run
+#
+#   LLM clients (Claude Desktop, Cursor, …) connect to the gateway directly at
+#     http://<this-host>:8000/v1/devices/<hostname>/sse  (Bearer <generated gateway key>)
+#
+# ── Before exposing this beyond localhost, change the three secrets below ────
+#   Easiest: drop a .env next to this file (docker compose reads it) with:
+#     MCP_API_KEY=$(openssl rand -hex 24)
+#     SESSION_SECRET=$(openssl rand -hex 32)
+#     UI_ADMIN_PASSWORD=<your-password>
+#
+# ── Assumes the UI repo sits next to the gateway repo ───────────────────────
+#   ../device-mcp-gateway-ui   (bff/ and web/ are built from there)
+#   If you cloned it elsewhere, edit the two build: paths, or switch the
+#   commented image: lines on once the lite images are published.
+# ============================================================================
+
+name: mcp-gateway-lite
+
+services:
+  # --------------------------------------------------------------------------
+  # Gateway — embedded mode. SSE + management API. LLM clients connect here.
+  # --------------------------------------------------------------------------
+  gateway:
+    build: .
+    # image: ghcr.io/benwold-lgtm/device-mcp-gateway:lite   # published (multi-arch) alternative
+    image: device-mcp-gateway:lite
+    ports:
+      - "8000:8000"          # MCP SSE + /v1 management API (LLM clients + the BFF)
+    environment:
+      MCP_REGISTRY_MODE: embedded
+      # First-run bootstrap: with MCP_API_KEY empty, the gateway generates a single admin
+      # key on first boot, writes it to the shared secrets volume, and PRINTS it (so you can
+      # point an MCP/LLM client at it). The BFF reads the same file, so the two agree without
+      # copying a secret. Set MCP_API_KEY in your .env to pin your own instead. Grab it with:
+      #   docker compose -f docker-compose.lite.yml logs gateway | grep -A8 'API key'
+      MCP_GATEWAY_API_KEY: ${MCP_API_KEY:-}
+      MCP_API_KEY_FILE: /secrets/gateway-api-key
+      # Fernet key encrypting stored device credentials at rest. Optional for a
+      # home box (empty = plaintext in SQLite). To encrypt, generate one:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      MCP_SECRET_KEY: ${MCP_SECRET_KEY:-}
+      # Home automation devices live on the LAN (192.168.x / 10.x / *.local), so
+      # the SSRF guard must allow private targets or you can't register them.
+      # This is safe on a trusted home network; leave it OFF on anything public.
+      MCP_ALLOW_PRIVATE_TARGETS: ${MCP_ALLOW_PRIVATE_TARGETS:-true}
+    volumes:
+      - gateway-data:/app/data      # SQLite device registry (+ encrypted creds)
+      - gateway-logs:/app/logs
+      - lite-secrets:/secrets       # gateway writes the generated admin key here
+    restart: unless-stopped
+    networks: [mcp-net]
+    # (The image already defines a /health HEALTHCHECK; compose honors it for the
+    #  BFF's depends_on condition below.)
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 256M
+
+  # --------------------------------------------------------------------------
+  # BFF — holds the gateway key server-side, runs the local password login.
+  # Not published to the host; only the web container talks to it (by name).
+  # --------------------------------------------------------------------------
+  device-mcp-ui-bff:                # name is fixed: web/nginx.conf proxies to this host
+    build: ../device-mcp-gateway-ui/bff
+    # image: ghcr.io/benwold-lgtm/device-mcp-ui-bff:lite
+    image: device-mcp-ui-bff:lite
+    environment:
+      GATEWAY_URL: http://gateway:8000
+      GATEWAY_API_PREFIX: /v1
+      # Read the gateway key the gateway generated (or MCP_API_KEY if you pinned one).
+      GATEWAY_API_TOKEN: ${MCP_API_KEY:-}
+      GATEWAY_TOKEN_FILE: /secrets/gateway-api-key
+      # First-run bootstrap: with BFF_STATE_DIR set and these left empty, the BFF
+      # generates a strong SESSION_SECRET and a random admin password on first boot,
+      # persists them to the state volume, and PRINTS the login once. Grab it with:
+      #   docker compose -f docker-compose.lite.yml logs device-mcp-ui-bff | grep -A6 first-run
+      # Set either variable to pin your own instead. OIDC/SSO is left off for lite.
+      BFF_STATE_DIR: /data
+      UI_ADMIN_PASSWORD: ${UI_ADMIN_PASSWORD:-}
+      UI_VIEWER_PASSWORD: ${UI_VIEWER_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      # Plain HTTP over the LAN. Put a TLS reverse proxy in front and flip this to
+      # true if you ever expose the UI beyond a trusted network.
+      COOKIE_SECURE: "false"
+      # No central monitoring on a home box — the Monitoring view degrades to the
+      # gateway's own metrics summary. Set these if you happen to run Prom/Loki.
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-}
+      LOKI_URL: ${LOKI_URL:-}
+    volumes:
+      - bff-state:/data            # persists the generated session secret + admin password
+      - lite-secrets:/secrets:ro   # reads the gateway key (gateway is the only writer)
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [mcp-net]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 192M
+
+  # --------------------------------------------------------------------------
+  # Web — the SPA (nginx). The front door: open http://<host>:8080.
+  # --------------------------------------------------------------------------
+  web:
+    build: ../device-mcp-gateway-ui/web
+    # image: ghcr.io/benwold-lgtm/device-mcp-ui-web:lite
+    image: device-mcp-ui-web:lite
+    ports:
+      - "8080:8080"
+    depends_on:
+      - device-mcp-ui-bff
+    restart: unless-stopped
+    networks: [mcp-net]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+
+networks:
+  mcp-net:
+    driver: bridge
+
+volumes:
+  gateway-data:
+  gateway-logs:
+  bff-state:
+  lite-secrets:      # shared: gateway writes the admin key, BFF reads it

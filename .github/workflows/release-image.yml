@@ -1,0 +1,65 @@
+name: Release image
+
+# Publishes the multi-arch gateway image so a low-power host (Raspberry Pi, mini-PC,
+# old workstation — arm64 or amd64) can `docker pull` it instead of building locally.
+# Runs on a version tag (v*), or on demand. Per-PR Dockerfile breakage is already
+# caught by the amd64 `docker build` step in ci.yml.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU lets the amd64 runner build the arm64 image via emulation.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/device-mcp-gateway
+          # `lite` is the friendly moving tag the home compose pins; semver + latest
+          # serve versioned/enterprise pulls. latest=auto tags a non-prerelease release.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=lite
+            type=sha,format=short
+          flavor: |
+            latest=auto
+
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
