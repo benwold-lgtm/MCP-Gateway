@@ -7,8 +7,8 @@
 # Runs on amd64 or arm64 — Docker builds/pulls for whatever CPU you're on, so
 # there is nothing architecture-specific here.
 #
-#   Quickstart (from the gateway repo root):
-#     docker compose -f docker-compose.lite.yml up --build
+#   Quickstart (needs only this file — pulls prebuilt multi-arch images from GHCR):
+#     docker compose -f docker-compose.lite.yml up -d
 #   then open http://localhost:8080. The admin login (username: admin) is generated
 #   on first boot and printed once — grab it from the logs:
 #     docker compose -f docker-compose.lite.yml logs device-mcp-ui-bff | grep -A6 first-run
@@ -22,10 +22,11 @@
 #     SESSION_SECRET=$(openssl rand -hex 32)
 #     UI_ADMIN_PASSWORD=<your-password>
 #
-# ── Assumes the UI repo sits next to the gateway repo ───────────────────────
-#   ../device-mcp-gateway-ui   (bff/ and web/ are built from there)
-#   If you cloned it elsewhere, edit the two build: paths, or switch the
-#   commented image: lines on once the lite images are published.
+# ── Building from source instead of pulling? ────────────────────────────────
+#   Each service has a commented `build:` line. Uncomment them (and comment the
+#   `image:` line) to build locally with `up --build`. The UI build contexts assume
+#   the UI repo sits next to the gateway repo at ../device-mcp-gateway-ui — edit the
+#   two build paths if you cloned it elsewhere.
 # ============================================================================
 
 name: mcp-gateway-lite
@@ -35,9 +36,8 @@ services:
   # Gateway — embedded mode. SSE + management API. LLM clients connect here.
   # --------------------------------------------------------------------------
   gateway:
-    build: .
-    # image: ghcr.io/benwold-lgtm/device-mcp-gateway:lite   # published (multi-arch) alternative
-    image: device-mcp-gateway:lite
+    image: ghcr.io/benwold-lgtm/device-mcp-gateway:lite   # prebuilt multi-arch (amd64/arm64)
+    # build: .                                             # …or build from source instead
     ports:
       - "8000:8000"          # MCP SSE + /v1 management API (LLM clients + the BFF)
     environment:
@@ -76,9 +76,8 @@ services:
   # Not published to the host; only the web container talks to it (by name).
   # --------------------------------------------------------------------------
   device-mcp-ui-bff:                # name is fixed: web/nginx.conf proxies to this host
-    build: ../device-mcp-gateway-ui/bff
-    # image: ghcr.io/benwold-lgtm/device-mcp-ui-bff:lite
-    image: device-mcp-ui-bff:lite
+    image: ghcr.io/benwold-lgtm/device-mcp-ui-bff:lite   # prebuilt multi-arch (amd64/arm64)
+    # build: ../device-mcp-gateway-ui/bff                 # …or build from source instead
     environment:
       GATEWAY_URL: http://gateway:8000
       GATEWAY_API_PREFIX: /v1
@@ -119,9 +118,8 @@ services:
   # Web — the SPA (nginx). The front door: open http://<host>:8080.
   # --------------------------------------------------------------------------
   web:
-    build: ../device-mcp-gateway-ui/web
-    # image: ghcr.io/benwold-lgtm/device-mcp-ui-web:lite
-    image: device-mcp-ui-web:lite
+    image: ghcr.io/benwold-lgtm/device-mcp-ui-web:lite   # prebuilt multi-arch (amd64/arm64)
+    # build: ../device-mcp-gateway-ui/web                 # …or build from source instead
     ports:
       - "8080:8080"
     depends_on:
