@@ -10,13 +10,24 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-05
+
 Post-0.1.2 changes: third-party Kubernetes deployment hardening (no application code),
 plus a small tool-set change-governance addition (a new read endpoint) and a translation
-doc — both from a third-party review. Plus the first slice of federated identity
-(ADR-0007): inbound OIDC at the gateway, with static keys kept as break-glass.
+doc — both from a third-party review. The first slice of federated identity (ADR-0007):
+inbound OIDC at the gateway, with static keys kept as break-glass. Plus a lite / home
+deployment profile for low-power boxes.
 
 ### Added
 
+- **Lite / home deployment profile.** A one-command stack for low-power hosts (Raspberry Pi,
+  mini-PC, old workstation; amd64 or arm64) via `docker-compose.lite.yml` — the gateway in
+  embedded mode (no Redis/worker) plus the management UI, local password login only. First
+  boot self-provisions the admin API key: with `MCP_API_KEY_FILE` set (opt-in) the gateway
+  generates + persists a key to a shared volume and prints it for MCP-client config, and the
+  BFF reads the same file via `GATEWAY_TOKEN_FILE`. No-op unless the env var is set, so
+  existing key resolution is unchanged. Multi-arch (amd64+arm64) images publish to GHCR on
+  release tags. See [docs/lite-deploy.md](docs/lite-deploy.md).
 - **`GET /v1/auth/me` (whoami).** Returns the authenticated caller's own `subject`, effective
   `scopes`, and `auth_method`. Requires authentication but no specific scope. It lets a UI/BFF
   gate views on the **gateway's** scopes instead of maintaining a parallel role model, so the
