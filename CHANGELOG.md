@@ -10,6 +10,25 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-06
+
+### Fixed
+
+- **Lite deployment: `MCP_API_KEY_FILE` silently never wrote a key.** The Dockerfile never
+  created a `/secrets` path, so when the lite compose mounted a brand-new named volume
+  there, Docker seeded it as an empty **root-owned** directory (Docker copies whatever the
+  image has at a fresh volume's mount point, ownership included — a path that doesn't exist
+  in the image at all gets a bare root-owned directory instead). The non-root `appuser` the
+  gateway runs as couldn't write to it, so first-run bootstrap failed permission-denied and
+  quietly fell back to "no key configured" — auth stayed **disabled** on a supposedly
+  secured-by-default lite deployment. Fixed by pre-creating and chowning `/secrets` in the
+  image, matching the existing pattern already used for `/app/data` and `/app/logs`.
+- **`/health` and the FastAPI app reported a stale version.** `__version__` was a second,
+  independently-maintained literal in `device_mcp_gateway/__init__.py` that drifted out of
+  sync with `pyproject.toml`'s version at the 0.1.3 release. Now derived at import time from
+  installed package metadata (`importlib.metadata.version`), so there is a single source of
+  truth and this class of drift can't recur.
+
 ## [0.1.3] - 2026-07-05
 
 Post-0.1.2 changes: third-party Kubernetes deployment hardening (no application code),
