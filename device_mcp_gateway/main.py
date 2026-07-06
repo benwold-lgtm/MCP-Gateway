@@ -35,7 +35,7 @@ from device_mcp_gateway.bootstrap import apply_gateway_bootstrap
 from device_mcp_gateway.cfg import load_config, resolve_bind_host, resolve_mode, warn_unsafe_settings
 from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_log, audit_request
 from device_mcp_gateway.core.backoff import jittered
-from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
+from device_mcp_gateway.core.errors import RPC_METHOD_NOT_FOUND, RPC_NO_WORKER, rpc_error
 from device_mcp_gateway import fleet_service
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
@@ -1207,7 +1207,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             )
             return response
 
-    # --- Fleet endpoint (mode-aware; distributed support lands in a later phase) ---
+    # --- Fleet endpoint (mode-aware) ---
     # One MCP session spanning several devices, so a client (e.g. Claude Desktop via
     # the mcp-remote bridge) doesn't need one connection per device. Tool names are
     # namespaced by hostname (fleet_service.build_fleet_manifest); reuses the same
@@ -1218,8 +1218,6 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     async def fleet_sse_stream(request: Request, devices: str = Query(...)):
         reg: Registry = request.app.state.registry
         mode = request.app.state.mode
-        if mode == "distributed":
-            raise HTTPException(status_code=501, detail="Fleet sessions are not yet supported in distributed mode")
 
         hostnames = [h.strip() for h in devices.split(",") if h.strip()]
         if not hostnames:
@@ -1236,10 +1234,44 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
         _principal = getattr(request.state, "principal", None)
         _owner_subject = _principal.subject if _principal else "unknown"
-
         effective_id = str(uuid.uuid4())
         endpoint_url = f"{API_V1_PREFIX}/fleet/messages?session_id={effective_id}"
 
+        if mode == "distributed":
+            session_router = request.app.state.session_router
+            await session_router.register(effective_id, "", _GATEWAY_ID, owner=_owner_subject)
+            await session_router.set_fleet_tools(
+                effective_id,
+                {
+                    e.display_name: {
+                        "hostname": e.hostname,
+                        "real_name": e.real_name,
+                        "description": e.description,
+                        "schema": e.schema,
+                    }
+                    for e in manifest.entries
+                },
+            )
+
+            async def event_generator():
+                metrics.active_sse_connections.inc()
+                try:
+                    yield {"event": "endpoint", "data": endpoint_url}
+                    try:
+                        async for result in session_router.subscribe(effective_id):
+                            yield {"event": "message", "data": json.dumps(result)}
+                    except asyncio.CancelledError:
+                        pass
+                    finally:
+                        await session_router.delete(effective_id)
+                finally:
+                    metrics.active_sse_connections.dec()
+
+            return EventSourceResponse(event_generator())
+
+        # Embedded: no single pod owns a fleet session, so it gets its own
+        # transport (rather than attaching to any one device's SseTransport)
+        # whose handler fans a call out to whichever device it resolves to.
         from device_mcp_gateway.pods.sse_server import SseTransport
 
         async def _handle(message: dict) -> dict | None:
@@ -1272,17 +1304,130 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     )
     async def fleet_sse_message(request: Request, session_id: str = Query(...)):
         mode = request.app.state.mode
-        if mode == "distributed":
-            raise HTTPException(status_code=501, detail="Fleet sessions are not yet supported in distributed mode")
-
-        transport = request.app.state.fleet_transports.get(session_id)
-        if transport is None:
-            raise HTTPException(status_code=404, detail="Fleet session not found or expired")
-
         payload = await request.json()
         _principal = getattr(request.state, "principal", None)
         _subject = _principal.subject if _principal else "unknown"
         _rid = getattr(request.state, "request_id", "-")
+
+        if mode == "distributed":
+            reg: Registry = request.app.state.registry
+            session_router = request.app.state.session_router
+            _sess = await session_router.get(session_id)
+            if _sess is None:
+                raise HTTPException(status_code=404, detail="Fleet session not found or expired")
+            _owner = _sess.get("owner")
+            if _owner is not None and _owner != _subject:
+                raise HTTPException(status_code=403, detail="session_id is bound to a different principal")
+
+            tools = await session_router.get_fleet_tools(session_id)
+            method = payload.get("method", "") if isinstance(payload, dict) else ""
+            msg_id = payload.get("id") if isinstance(payload, dict) else None
+
+            if method == "initialize":
+                from device_mcp_gateway.pods.device_pod import negotiate_protocol_version
+
+                params = payload.get("params") or {}
+                return {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "protocolVersion": negotiate_protocol_version(params.get("protocolVersion")),
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": "mcp-fleet", "version": __version__},
+                    },
+                }
+            if method.startswith("notifications/"):
+                return None
+            if method == "ping":
+                return {"jsonrpc": "2.0", "id": msg_id, "result": {}}
+            if method == "tools/list":
+                tools_list = [
+                    {"name": name, "description": e.get("description", ""), "inputSchema": e.get("schema", {})}
+                    for name, e in (tools or {}).items()
+                ]
+                return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools_list}}
+            if method == "tools/call":
+                params = payload.get("params") or {}
+                display_name = params.get("name") or ""
+                entry = (tools or {}).get(display_name)
+                if entry is None:
+                    return rpc_error(RPC_METHOD_NOT_FOUND, msg_id, message=f"Tool not found: {display_name}")
+                hostname = entry["hostname"]
+                rewritten = dict(payload)
+                rewritten["params"] = dict(params)
+                rewritten["params"]["name"] = entry["real_name"]
+
+                # Same admission-control + dispatch + timeout-watcher sequence the
+                # per-device distributed path runs (F-06 / F6), just resolved to
+                # whichever hostname this fleet call landed on.
+                _backend = reg._backend
+                _backlog_limit = cfg.get("registry", {}).get("call_backlog_limit", 1000)
+                if _backlog_limit > 0 and await _backend.call_backlog(hostname) >= _backlog_limit:
+                    metrics.calls_rejected_overload_total.labels(hostname=hostname).inc()
+                    audit_log(
+                        "fleet tool dispatch shed: call backlog over watermark",
+                        level="WARNING",
+                        hostname=hostname,
+                        subject=_subject,
+                        status="rejected_overload",
+                        rid=_rid,
+                    )
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Device '{hostname}' is overloaded; retry shortly",
+                        headers={"Retry-After": "1"},
+                    )
+
+                request_id = str(uuid.uuid4())
+                with tracing.start_span(
+                    "mcp.tool_dispatch",
+                    attributes={"mcp.hostname": hostname, "mcp.method": "tools/call", "mcp.rid": _rid},
+                ):
+                    _carrier = tracing.inject_carrier()
+                    await _backend.publish_tool_call(
+                        hostname=hostname,
+                        request_id=request_id,
+                        session_id=session_id,
+                        gateway_id=_GATEWAY_ID,
+                        message=rewritten,
+                        rid=_rid,
+                        traceparent=_carrier.get("traceparent", ""),
+                        subject=_subject,
+                    )
+                if msg_id is not None:
+                    _timeout = cfg.get("registry", {}).get("tool_call_timeout", 30)
+                    _watcher = asyncio.create_task(
+                        _watch_tool_call_timeout(
+                            request.app.state.redis,
+                            session_router,
+                            session_id,
+                            request_id,
+                            msg_id,
+                            _timeout,
+                            hostname,
+                            _rid,
+                        )
+                    )
+                    request.app.state.bg_tasks.add(_watcher)
+                    _watcher.add_done_callback(request.app.state.bg_tasks.discard)
+                audit_log(
+                    "fleet tool dispatch",
+                    hostname=hostname,
+                    subject=_subject,
+                    method="tools/call",
+                    status="dispatched",
+                    rid=_rid,
+                )
+                return {"status": "accepted"}
+
+            if msg_id is not None:
+                return rpc_error(RPC_METHOD_NOT_FOUND, msg_id, message=f"Method not found: {method}")
+            return None
+
+        # Embedded
+        transport = request.app.state.fleet_transports.get(session_id)
+        if transport is None:
+            raise HTTPException(status_code=404, detail="Fleet session not found or expired")
 
         # Principal <-> session binding (F-37), same as the per-device path.
         _owner = request.app.state.session_owners.get(session_id)

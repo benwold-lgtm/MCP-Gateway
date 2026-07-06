@@ -141,6 +141,89 @@ def test_refresh_throttle_fires_once_per_window():
     assert t.ready(1100.0) is False  # within the next window
 
 
+# --- Fleet sessions: display-name -> {hostname, real_name, ...} lookup table --
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_fleet_tools_roundtrip():
+    router = _router()
+    tools = {
+        "a_get_status": {"hostname": "a", "real_name": "get_status", "description": "d", "schema": {}},
+        "b_get_status": {"hostname": "b", "real_name": "get_status", "description": "d", "schema": {}},
+    }
+    await router.set_fleet_tools("sess-fleet", tools)
+    assert await router.get_fleet_tools("sess-fleet") == tools
+
+
+@pytest.mark.asyncio
+async def test_get_fleet_tools_unknown_session_returns_none():
+    router = _router()
+    assert await router.get_fleet_tools("missing") is None
+
+
+@pytest.mark.asyncio
+async def test_set_fleet_tools_empty_is_noop():
+    router = _router()
+    await router.set_fleet_tools("sess-empty", {})
+    assert await router.get_fleet_tools("sess-empty") is None
+
+
+@pytest.mark.asyncio
+async def test_set_fleet_tools_carries_ttl():
+    router = _router()
+    await router.set_fleet_tools("sess-ttl", {"n": {"hostname": "h", "real_name": "t"}}, ttl=3600)
+    ttl = await router._r.ttl("fleet:sess-ttl:tools")
+    assert 0 < ttl <= 3600
+
+
+@pytest.mark.asyncio
+async def test_fleet_tools_visible_across_router_instances_on_same_redis():
+    """A POST may land on a different gateway replica than the GET that opened
+    the session -- the lookup table must be readable from a second SessionRouter
+    instance sharing the same Redis, not just the one that wrote it."""
+    shared_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    router_a = SessionRouter(shared_redis)
+    router_b = SessionRouter(shared_redis)
+
+    tools = {"a_get_status": {"hostname": "a", "real_name": "get_status", "description": "", "schema": {}}}
+    await router_a.set_fleet_tools("cross-replica", tools)
+    assert await router_b.get_fleet_tools("cross-replica") == tools
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_fleet_tools():
+    router = _router()
+    await router.set_fleet_tools("sess-del", {"n": {"hostname": "h", "real_name": "t"}})
+    await router.delete("sess-del")
+    assert await router.get_fleet_tools("sess-del") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_is_safe_when_no_fleet_tools_exist():
+    """Per-device (non-fleet) sessions never call set_fleet_tools -- delete()
+    must not error on a fleet-tools key that was never created."""
+    router = _router()
+    await router.register("sess-plain", "dev1", "gw-a")
+    await router.delete("sess-plain")  # should not raise
+    assert await router.get("sess-plain") is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_extends_fleet_tools_ttl():
+    router = _router()
+    await router.set_fleet_tools("sess-refresh", {"n": {"hostname": "h", "real_name": "t"}}, ttl=100)
+    await router.refresh("sess-refresh", ttl=5000)
+    ttl = await router._r.ttl("fleet:sess-refresh:tools")
+    assert ttl > 100
+
+
+@pytest.mark.asyncio
+async def test_refresh_is_safe_when_no_fleet_tools_exist():
+    router = _router()
+    await router.register("sess-plain2", "dev1", "gw-a")
+    await router.refresh("sess-plain2")  # should not raise even with no fleet key
+
+
 @pytest.mark.asyncio
 async def test_subscribe_throttles_refresh_across_rapid_messages(monkeypatch):
     router = _router()

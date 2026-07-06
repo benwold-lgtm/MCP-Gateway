@@ -47,6 +47,10 @@ def _results_key(session_id: str) -> str:
     return f"session:{session_id}:results"
 
 
+def _fleet_tools_key(session_id: str) -> str:
+    return f"fleet:{session_id}:tools"
+
+
 def _field(fields: dict, name: str) -> str | None:
     """Read a stream-entry field tolerant of str or bytes keys/values.
 
@@ -60,6 +64,10 @@ def _field(fields: dict, name: str) -> str | None:
     if isinstance(val, bytes):
         val = val.decode()
     return val
+
+
+def _decode(val: Any) -> str:
+    return val.decode() if isinstance(val, bytes) else val
 
 
 class _RefreshThrottle:
@@ -119,22 +127,57 @@ class SessionRouter:
 
     async def get(self, session_id: str) -> dict | None:
         h = await self._r.hgetall(f"session:{session_id}")
-        return h or None
+        if not h:
+            return None
+        # Decode defensively: real Redis with decode_responses=True already returns
+        # str, so this is a no-op there. Some test doubles (fakeredis) don't honour
+        # decode_responses for hash fields, returning bytes -- silently breaking any
+        # str comparison against the result, including the F-37 owner-mismatch
+        # check callers run on the "owner" field.
+        return {_decode(k): _decode(v) for k, v in h.items()}
 
     async def refresh(self, session_id: str, ttl: int = _SESSION_TTL) -> None:
-        # Keep the session hash and its results stream on the same TTL so neither
-        # outlives the other.
+        # Keep the session hash, its results stream, and (for a fleet session) its
+        # tools lookup table on the same TTL so none outlives the others. EXPIRE
+        # on a key that doesn't exist (e.g. fleet_tools for a per-device session)
+        # is a harmless no-op.
         pipe = self._r.pipeline()
         pipe.expire(f"session:{session_id}", ttl)
         pipe.expire(_results_key(session_id), ttl)
+        pipe.expire(_fleet_tools_key(session_id), ttl)
         await pipe.execute()
 
     async def delete(self, session_id: str) -> None:
         pipe = self._r.pipeline()
         pipe.delete(f"session:{session_id}")
         pipe.delete(_results_key(session_id))
+        pipe.delete(_fleet_tools_key(session_id))
         await pipe.execute()
         logger.debug(f"Session deleted: session_id={session_id}")
+
+    async def set_fleet_tools(self, session_id: str, tools: dict[str, dict], ttl: int = _SESSION_TTL) -> None:
+        """Persist a fleet session's display-name -> tool-entry lookup table.
+
+        Each entry carries ``hostname``/``real_name`` (for ``tools/call`` dispatch)
+        plus ``description``/``schema`` (so ``tools/list`` can be re-served by
+        whichever gateway replica receives it, without re-querying every device).
+        A POST may land on a different replica than the GET that opened the
+        session, so this must be in Redis rather than in-process memory.
+        """
+        if not tools:
+            return
+        key = _fleet_tools_key(session_id)
+        mapping = {name: json.dumps(entry) for name, entry in tools.items()}
+        pipe = self._r.pipeline()
+        pipe.hset(key, mapping=mapping)
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
+    async def get_fleet_tools(self, session_id: str) -> dict[str, dict] | None:
+        h = await self._r.hgetall(_fleet_tools_key(session_id))
+        if not h:
+            return None
+        return {_decode(k): json.loads(_decode(v)) for k, v in h.items()}
 
     async def subscribe(self, session_id: str) -> AsyncGenerator[dict, None]:
         """Yield JSON-RPC response dicts from this session's durable results stream.
