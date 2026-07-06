@@ -36,6 +36,7 @@ from device_mcp_gateway.cfg import load_config, resolve_bind_host, resolve_mode,
 from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_log, audit_request
 from device_mcp_gateway.core.backoff import jittered
 from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
+from device_mcp_gateway import fleet_service
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
@@ -486,6 +487,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # distributed mode the owner lives on the Redis session hash instead, so the
     # binding survives across gateway replicas.
     _app.state.session_owners = {}
+    # Embedded-mode fleet sessions: session_id -> SseTransport (Phase 1, fleet
+    # aggregation). Distributed mode will persist session state in Redis instead
+    # (Phase 2) rather than this in-process dict.
+    _app.state.fleet_transports = {}
     # Short-TTL cache for the UI read aggregate (SRE O4) so a polling dashboard
     # doesn't trigger a fresh list_devices() on every request. Per-replica; ETag is
     # a content hash so it's stable across replicas.
@@ -1201,6 +1206,101 @@ def create_app(override_config: dict | None = None) -> FastAPI:
                 rid=_rid,
             )
             return response
+
+    # --- Fleet endpoint (mode-aware; distributed support lands in a later phase) ---
+    # One MCP session spanning several devices, so a client (e.g. Claude Desktop via
+    # the mcp-remote bridge) doesn't need one connection per device. Tool names are
+    # namespaced by hostname (fleet_service.build_fleet_manifest); reuses the same
+    # SCOPE_TOOLS_CALL as the per-device routes above — there is no per-device ACL
+    # layer today, so this doesn't expand what a caller can already reach.
+
+    @protected.get("/fleet/sse", dependencies=[Depends(require_scope(SCOPE_TOOLS_CALL))])
+    async def fleet_sse_stream(request: Request, devices: str = Query(...)):
+        reg: Registry = request.app.state.registry
+        mode = request.app.state.mode
+        if mode == "distributed":
+            raise HTTPException(status_code=501, detail="Fleet sessions are not yet supported in distributed mode")
+
+        hostnames = [h.strip() for h in devices.split(",") if h.strip()]
+        if not hostnames:
+            raise HTTPException(status_code=400, detail="'devices' must list at least one hostname")
+        _max_devices = cfg.get("registry", {}).get("fleet_max_devices", 25)
+        if len(hostnames) > _max_devices:
+            raise HTTPException(status_code=400, detail=f"Too many devices requested (max {_max_devices})")
+
+        manifest, skipped = await fleet_service.build_fleet_manifest(reg, hostnames)
+        if not manifest.hostnames:
+            raise HTTPException(status_code=404, detail=f"No reachable devices among: {hostnames}")
+        if skipped:
+            logger.warning(f"Fleet session skipped unavailable devices: {skipped}")
+
+        _principal = getattr(request.state, "principal", None)
+        _owner_subject = _principal.subject if _principal else "unknown"
+
+        effective_id = str(uuid.uuid4())
+        endpoint_url = f"{API_V1_PREFIX}/fleet/messages?session_id={effective_id}"
+
+        from device_mcp_gateway.pods.sse_server import SseTransport
+
+        async def _handle(message: dict) -> dict | None:
+            return await fleet_service.handle_fleet_message(reg, manifest, message)
+
+        transport = SseTransport(f"fleet:{effective_id}", _handle)
+        transport.register_client(effective_id, endpoint_url)
+        request.app.state.fleet_transports[effective_id] = transport
+        request.app.state.session_owners[effective_id] = _owner_subject  # F-37
+
+        async def _counted_stream():
+            metrics.active_sse_connections.inc()
+            try:
+                async for ev in transport.event_stream(effective_id):
+                    yield ev
+            finally:
+                metrics.active_sse_connections.dec()
+                request.app.state.session_owners.pop(effective_id, None)
+                request.app.state.fleet_transports.pop(effective_id, None)
+
+        return EventSourceResponse(_counted_stream())
+
+    @protected.post(
+        "/fleet/messages",
+        dependencies=[
+            Depends(require_scope(SCOPE_TOOLS_CALL)),
+            Depends(rate_limit("600/minute", "fleet-messages")),
+            Depends(rate_limit_principal("1200/minute", "fleet-messages")),
+        ],
+    )
+    async def fleet_sse_message(request: Request, session_id: str = Query(...)):
+        mode = request.app.state.mode
+        if mode == "distributed":
+            raise HTTPException(status_code=501, detail="Fleet sessions are not yet supported in distributed mode")
+
+        transport = request.app.state.fleet_transports.get(session_id)
+        if transport is None:
+            raise HTTPException(status_code=404, detail="Fleet session not found or expired")
+
+        payload = await request.json()
+        _principal = getattr(request.state, "principal", None)
+        _subject = _principal.subject if _principal else "unknown"
+        _rid = getattr(request.state, "request_id", "-")
+
+        # Principal <-> session binding (F-37), same as the per-device path.
+        _owner = request.app.state.session_owners.get(session_id)
+        if _owner is not None and _owner != _subject:
+            raise HTTPException(status_code=403, detail="session_id is bound to a different principal")
+
+        # Same contract as the per-device embedded path: the actual JSON-RPC
+        # response (if any) is pushed onto the SSE stream by handle_message
+        # itself; what it returns here is just the POST's ack/error envelope.
+        response = await transport.handle_message(session_id, payload)
+        audit_log(
+            "fleet tool dispatch",
+            subject=_subject,
+            method=payload.get("method", "?") if isinstance(payload, dict) else "?",
+            status="error" if isinstance(response, dict) and "error" in response else "accepted",
+            rid=_rid,
+        )
+        return response
 
     @protected.delete("/devices/{hostname}", dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))])
     async def unregister_device(hostname: str, request: Request):

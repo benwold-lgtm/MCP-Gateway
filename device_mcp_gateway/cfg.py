@@ -47,6 +47,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "rebalance_enabled": bool,
         "idempotency_guard": bool,
         "call_backlog_limit": int,
+        "fleet_max_devices": int,
         "spec_max_bytes": int,
         "spec_translate_timeout": _NUM,
         "shutdown_drain_timeout": _NUM,
