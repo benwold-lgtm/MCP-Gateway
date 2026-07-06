@@ -151,6 +151,21 @@ def _sanitize_name(raw: str) -> str:
     return name.lower().strip("_")
 
 
+def dedupe_name(base: str, used_names: set[str]) -> str:
+    """Return ``base``, or ``base_2``/``base_3``/... if it's already in ``used_names``.
+
+    Shared by per-device translation (collisions within one spec) and fleet
+    aggregation (collisions across devices' sanitized hostname-prefixed names) —
+    one place decides what a "renamed" tool name looks like.
+    """
+    if base not in used_names:
+        return base
+    n = 2
+    while f"{base}_{n}" in used_names:
+        n += 1
+    return f"{base}_{n}"
+
+
 class SpecTranslator:
     """Translates OpenAPI specs into MCP manifests."""
 
@@ -191,11 +206,7 @@ class SpecTranslator:
                 tool = self._build_tool(method, path, op, hostname)
                 if tool:
                     if tool.name in _used_names:
-                        base = tool.name
-                        n = 2
-                        while f"{base}_{n}" in _used_names:
-                            n += 1
-                        new_name = f"{base}_{n}"
+                        new_name = dedupe_name(tool.name, _used_names)
                         logger.warning(
                             f"Tool name collision: '{tool.name}' "
                             f"(operation: {op.get('operationId') or f'{method} {path}'})"
