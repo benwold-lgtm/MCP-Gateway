@@ -81,8 +81,11 @@ URL:            http://<this-host>:8000/v1/devices/<device-name>/sse
 Authorization:  Bearer <gateway-api-key>
 ```
 
-See the main [README](../README.md#mcp-client-integration) for a Claude Desktop config
-example.
+Registered more than one or two devices? Point the client at
+`/v1/fleet/sse?devices=<name1>,<name2>,...` instead — one session covering all of them,
+rather than a separate config entry (and bridge process, for clients that need one) per
+device. See the main [README](../README.md#mcp-client-integration) for both a Claude
+Desktop config example and the fleet endpoint's tool-namespacing details.
 
 ## Registering a home device
 

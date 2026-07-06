@@ -142,6 +142,31 @@ Add the device's SSE endpoint to your Claude Desktop config file:
 
 Restart Claude Desktop after saving. The device's tools will appear in the tool picker.
 
+### Multiple devices in one session (fleet)
+
+Registering more than a couple of devices? `GET /v1/devices/{hostname}/sse` is one session
+per device — fine for one or two, but an AI client needs a separate config entry (and,
+where header-based auth is required, a separate bridge process) per device. The **fleet**
+endpoint aggregates several devices' tools into a single MCP session instead, with tool
+names namespaced by hostname (`my-sensor_get_readings`, `my-fan_get_readings`, ...) so
+there's no collision even when two devices expose the same operation:
+
+```json
+{
+  "mcpServers": {
+    "my-fleet": {
+      "type": "sse",
+      "url": "http://localhost:8000/v1/fleet/sse?devices=my-sensor,my-fan,my-thermostat"
+    }
+  }
+}
+```
+
+Same auth model as the per-device endpoint (`tools:call` scope, session bound to the
+principal that opened it) — this doesn't grant access to anything a caller couldn't
+already reach one device at a time. Capped at 25 devices per session by default
+(`registry.fleet_max_devices`).
+
 ### Manual invocation (SSE transport)
 
 The SSE transport uses a two-step protocol. The server assigns a session ID — do not supply your own.
