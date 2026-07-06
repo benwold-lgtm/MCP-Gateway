@@ -5,7 +5,15 @@
 Device MCP Gateway - Universal API-to-MCP Translation Layer
 """
 
-__version__ = "0.1.2"
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
+try:
+    # Single source of truth: pyproject.toml's [project].version. A hardcoded duplicate
+    # here previously drifted out of sync with a release's actual version.
+    __version__ = _pkg_version("device-mcp-gateway")
+except PackageNotFoundError:
+    __version__ = "0.0.0-dev"
 
 # External REST API version. All device-management endpoints are served under
 # this prefix (e.g. /v1/devices). Operational probes (/health, /readyz) and the
