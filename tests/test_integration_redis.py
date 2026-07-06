@@ -146,6 +146,24 @@ async def test_register_sets_ttl(real_redis):
     assert 0 < ttl <= 120
 
 
+async def test_fleet_tools_roundtrip_and_cross_client_visibility(real_redis):
+    """A fleet session's display-name -> {hostname, real_name, ...} lookup table
+    (Phase 2) round-trips through real Redis, and is visible from a second
+    SessionRouter instance sharing the same Redis -- the scenario that matters
+    in production, where the POST may land on a different gateway replica than
+    the GET that opened the session."""
+    writer = SessionRouter(real_redis)
+    reader = SessionRouter(real_redis)
+    tools = {
+        "a_get_status": {"hostname": "a", "real_name": "get_status", "description": "d", "schema": {}},
+        "b_get_status": {"hostname": "b", "real_name": "get_status", "description": "d", "schema": {}},
+    }
+    await writer.set_fleet_tools("fleet-sess1", tools, ttl=120)
+    assert await reader.get_fleet_tools("fleet-sess1") == tools
+    ttl = await real_redis.ttl("fleet:fleet-sess1:tools")
+    assert 0 < ttl <= 120
+
+
 async def test_cross_client_pubsub_delivers_result(real_redis):
     # Separate command vs pub/sub clients (as F3 wires them): a result published
     # on one connection must reach a subscriber on the other.
