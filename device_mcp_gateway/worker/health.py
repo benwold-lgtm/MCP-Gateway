@@ -12,11 +12,9 @@ skip devices they can't lock and let the lock-holder update Redis.
 from __future__ import annotations
 
 import asyncio
-import atexit
 import hashlib
 import ssl
 import time
-from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import Any
 
@@ -36,21 +34,20 @@ from device_mcp_gateway.core.translator import manifest_to_dict
 from device_mcp_gateway.security.url_policy import build_guarded_client
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 
-_spec_executor = ProcessPoolExecutor(max_workers=2)
+# One pool + atexit reap for the whole worker process, shared with the spawn
+# path (worker.runner) — see worker/spec_pool.py. Names re-exported so callers
+# that imported them from here keep working.
+from device_mcp_gateway.worker.spec_pool import _spec_executor, _translate_spec_sync  # noqa: F401  (re-exported)
 
 
 def _shutdown_spec_executor() -> None:
-    """Reap the spec-translation worker processes at interpreter exit (RC-5)."""
+    """Reap the spec-translation worker processes at interpreter exit (RC-5).
+
+    Reads this module's ``_spec_executor`` global at call time (not spec_pool's)
+    so the non-blocking-shutdown contract test can monkeypatch it here; shutting
+    an executor down twice is harmless.
+    """
     _spec_executor.shutdown(wait=False)
-
-
-atexit.register(_shutdown_spec_executor)
-
-
-def _translate_spec_sync(spec: dict, hostname: str) -> Any:
-    from device_mcp_gateway.core.translator import SpecTranslator
-
-    return SpecTranslator().translate(spec, hostname)
 
 
 class WorkerHealthLoop:
