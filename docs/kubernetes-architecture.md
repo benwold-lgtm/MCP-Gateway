@@ -437,13 +437,13 @@ and `servicemonitor.yaml` are excluded from `kustomization.yaml` so a cluster wi
 CRDs still applies cleanly. See the README's "Cluster prerequisites" table.
 
 ```bash
-# 1. Build and push the image (there is no published image), then set it in BOTH
-#    deployment.yaml and worker-deployment.yaml (they share one image).
-docker build -t <your-registry>/device-mcp-gateway:0.1.2 .
-docker push <your-registry>/device-mcp-gateway:0.1.2
-sed -i 's#image: device-mcp-gateway:latest#image: <your-registry>/device-mcp-gateway:0.1.2#' \
+# 1. Point BOTH deployment.yaml and worker-deployment.yaml (they share one image) at a
+#    published multi-arch image from GHCR — pin a version tag or digest, never :latest.
+sed -i 's#image: device-mcp-gateway:latest#image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.1.2#' \
   deploy/kubernetes/deployment.yaml deploy/kubernetes/worker-deployment.yaml
-#    (kind/minikube: skip the push and `kind load docker-image device-mcp-gateway:0.1.2`)
+#    (Building from source instead: `docker build -t <your-registry>/device-mcp-gateway:0.1.2 .`,
+#    push it to a registry the cluster can pull from, and use that reference;
+#    kind/minikube: skip the push and `kind load docker-image device-mcp-gateway:0.1.2`)
 #    Also customise:
 #    deploy/kubernetes/ingress.yaml       — replace mcp-gateway.example.com
 #    deploy/kubernetes/worker-deployment.yaml — adjust replicas and resources

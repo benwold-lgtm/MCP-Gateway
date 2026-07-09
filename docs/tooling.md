@@ -34,6 +34,26 @@ rejected with `ValueError`. A spec with an absurd operation count is refused up 
 
 Because `operationId` drives the name, **a stable, unique `operationId` per operation gives stable, readable tool names**; relying on the path fallback makes names sensitive to path edits.
 
+## Fleet sessions: naming and dispatch
+
+A fleet session (`GET /v1/fleet/sse?devices=a,b,…`) aggregates several devices' tools
+into one MCP session. The contract:
+
+- **Display name** = sanitize(`{hostname}_{tool_name}`) using the same sanitizer as
+  above — `my-sensor.local`'s `get_readings` appears as `my_sensor_local_get_readings`.
+- **Determinism**: hostnames are processed in sorted order, so the same device set always
+  yields the same names. A cross-device collision (possible after sanitization) gets the
+  numeric-suffix treatment (`name`, `name_2`, …) with a warning logged.
+- **Dispatch**: each display name maps back to `(hostname, real tool name)`; a
+  `tools/call` is rewritten to the device's real tool name and routed to that device —
+  same admission control, timeout watcher, and audit as a per-device call.
+- **Availability**: a hostname that is unregistered or whose pod is down at session open
+  is *skipped* (logged) rather than failing the whole session. In embedded mode the
+  manifest is rebuilt against the originally requested hostnames on every `tools/list`,
+  so a skipped device joins the session once it comes up, and tool-set changes on pod
+  replace are picked up mid-session.
+- **Cap**: `registry.fleet_max_devices` (default 25) bounds one session's device count.
+
 ## Parameter mapping
 
 All `path`, `query`, and `header` parameters are flattened into a **single JSON-Schema
