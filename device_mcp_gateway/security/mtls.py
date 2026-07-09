@@ -26,6 +26,12 @@ The client-key password is read from ``MCP_TLS_CLIENT_KEY_PASSWORD`` in
 preference to config, so the secret need not live in the config file (mirrors the
 metrics-token resolution in F-36).
 
+``verify`` can also be set via ``MCP_MTLS_VERIFY`` (env wins over config), so a
+compose/lite deployment talking to self-signed devices (UniFi consoles, Home
+Assistant, ...) doesn't need a mounted config-file override just for this one
+flag — mirrors ``MCP_ALLOW_PRIVATE_TARGETS``. Same caveat applies: disable
+verification only on a trusted closed network.
+
 Design notes:
   * We return an ``ssl.SSLContext`` (not the deprecated ``cert=`` / string
     ``verify=`` httpx kwargs) so the call sites stay forward-compatible with
@@ -50,6 +56,7 @@ from typing import Union
 import certifi
 
 ENV_KEY_PASSWORD = "MCP_TLS_CLIENT_KEY_PASSWORD"  # nosec B105 — env-var name, not a secret
+ENV_VERIFY = "MCP_MTLS_VERIFY"
 
 VerifyValue = Union[ssl.SSLContext, bool]
 
@@ -71,6 +78,12 @@ def _resolve(mtls_cfg: dict | None) -> dict:
     env_pw = os.environ.get(ENV_KEY_PASSWORD)
     if env_pw:
         resolved["client_key_password"] = env_pw
+    # MCP_MTLS_VERIFY overrides security.mtls.verify (mirrors MCP_ALLOW_PRIVATE_TARGETS):
+    # a lite/compose deployment shouldn't need a config-file mount just to talk to a
+    # self-signed device on a trusted closed network.
+    env_verify = os.environ.get(ENV_VERIFY, "").strip()
+    if env_verify:
+        resolved["verify"] = env_verify.lower() not in ("0", "false", "no")
     return resolved
 
 

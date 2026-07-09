@@ -112,6 +112,88 @@ def test_fleet_sse_tools_list_and_call(client, mock_target_url):
         client.delete(f"/v1/devices/{host_b}")
 
 
+def test_fleet_manifest_refreshes_on_tools_list(client, mock_target_url):
+    """A device that was skipped at session open (unregistered/down) joins the
+    fleet once it comes up: the embedded fleet manifest is rebuilt against the
+    originally requested hostnames on each tools/list, not frozen at open."""
+    host_a, host_b = "fleet-fresh-a.local", "fleet-fresh-b.local"
+    _register(client, host_a, mock_target_url)
+    _wait_pod_active(client, host_a)
+    # host_b deliberately NOT registered yet — it gets skipped at session open.
+
+    try:
+        with client.stream("GET", f"/v1/fleet/sse?devices={host_a},{host_b}") as event_resp:
+            assert event_resp.status_code == 200  # opens with host_b skipped, not 404
+
+            session_id = None
+            event_name = None
+            data_payload = ""
+            posted_first = False
+            posted_second = False
+            first_list = None
+            second_list = None
+            deadline = time.time() + 20
+
+            for line in event_resp.iter_lines():
+                if time.time() > deadline:
+                    break
+                if line is None:
+                    continue
+                line = line.strip()
+                if line == "":
+                    if event_name == "endpoint" and data_payload and "session_id=" in data_payload:
+                        session_id = data_payload.split("session_id=")[-1]
+                        resp = client.post(
+                            f"/v1/fleet/messages?session_id={session_id}",
+                            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                        )
+                        assert resp.status_code == 200
+                        posted_first = True
+                    elif event_name == "message" and data_payload and posted_first and first_list is None:
+                        first_list = json.loads(data_payload)
+                        assert first_list["id"] == 1
+                        names = {t["name"] for t in first_list["result"]["tools"]}
+                        assert names == {
+                            "fleet_fresh_a_local_get_device_status",
+                            "fleet_fresh_a_local_control_fan",
+                        }
+                        # Device B comes up mid-session; the next tools/list must see it.
+                        _register(client, host_b, mock_target_url)
+                        _wait_pod_active(client, host_b)
+                        resp = client.post(
+                            f"/v1/fleet/messages?session_id={session_id}",
+                            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                        )
+                        assert resp.status_code == 200
+                        posted_second = True
+                    elif event_name == "message" and data_payload and posted_second:
+                        second_list = json.loads(data_payload)
+                        break
+                    event_name = None
+                    data_payload = ""
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[len("event:") :].strip()
+                    continue
+                if line.startswith("data:"):
+                    data_payload += line[len("data:") :].strip()
+                    continue
+
+            assert first_list is not None, "No first tools/list SSE message received"
+            assert second_list is not None, "No second tools/list SSE message received"
+            assert second_list["id"] == 2
+            names = {t["name"] for t in second_list["result"]["tools"]}
+            assert names == {
+                "fleet_fresh_a_local_get_device_status",
+                "fleet_fresh_a_local_control_fan",
+                "fleet_fresh_b_local_get_device_status",
+                "fleet_fresh_b_local_control_fan",
+            }
+    finally:
+        client.delete(f"/v1/devices/{host_a}")
+        client.delete(f"/v1/devices/{host_b}")
+
+
 def test_fleet_sse_unknown_tool_name_returns_rpc_error(client, mock_target_url):
     host = "fleet-dev-c.local"
     _register(client, host, mock_target_url)

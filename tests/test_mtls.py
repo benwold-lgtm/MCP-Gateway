@@ -81,6 +81,26 @@ def test_key_password_env_overrides_config(monkeypatch):
     assert mtls._resolve({"client_key_password": "from-config"})["client_key_password"] == "from-config"
 
 
+def test_verify_env_overrides_config(monkeypatch):
+    # MCP_MTLS_VERIFY=false → unverified context, even with no config block at all
+    monkeypatch.setenv(mtls.ENV_VERIFY, "false")
+    ctx = mtls.build_verify(None)
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx.check_hostname is False
+    assert mtls.is_configured(None) is True
+
+    # env wins in the other direction too: "true" beats config verify: false
+    monkeypatch.setenv(mtls.ENV_VERIFY, "true")
+    assert mtls.build_verify({"verify": False}) is True
+
+    # unset (or blank) → config value wins, as before
+    monkeypatch.delenv(mtls.ENV_VERIFY, raising=False)
+    ctx = mtls.build_verify({"verify": False})
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_NONE
+
+
 # ---------------------------------------------------------------------------
 # Certificate fixtures + a real mutual-TLS handshake
 # ---------------------------------------------------------------------------
