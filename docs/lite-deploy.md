@@ -73,19 +73,46 @@ created them.
 
 ## Connect an MCP / LLM client
 
-Point the client at the gateway's SSE endpoint and send the gateway API key as a bearer
-token (see the gateway banner above):
+Every client must present the gateway API key (from the banner above) as a bearer token —
+there is no unauthenticated endpoint, even on lite.
+
+**Clients that can send headers** (Cursor, custom agents): point them straight at the SSE
+endpoint:
 
 ```
 URL:            http://<this-host>:8000/v1/devices/<device-name>/sse
 Authorization:  Bearer <gateway-api-key>
 ```
 
+**Claude Desktop** cannot attach that header natively — a raw-URL entry will 401. Bridge
+through `mcp-remote` (needs Node 18+ on the machine running Claude Desktop):
+
+```json
+{
+  "mcpServers": {
+    "thermostat": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote@latest",
+        "http://<this-host>:8000/v1/devices/thermostat/sse",
+        "--allow-http",
+        "--header", "Authorization:${GATEWAY_TOKEN}"
+      ],
+      "env": { "GATEWAY_TOKEN": "Bearer <gateway-api-key>" }
+    }
+  }
+}
+```
+
+`--allow-http` is needed because the lite stack speaks plain HTTP on the LAN; drop it if
+you put the gateway behind TLS. Keep no space after `Authorization:` — mcp-remote splits
+its args on spaces.
+
 Registered more than one or two devices? Point the client at
 `/v1/fleet/sse?devices=<name1>,<name2>,...` instead — one session covering all of them,
 rather than a separate config entry (and bridge process, for clients that need one) per
-device. See the main [README](../README.md#mcp-client-integration) for both a Claude
-Desktop config example and the fleet endpoint's tool-namespacing details.
+device. See the main [README](../README.md#mcp-client-integration) for the full client
+examples and the fleet endpoint's tool-namespacing details.
 
 ## Registering a home device
 
@@ -103,6 +130,44 @@ curl -X POST http://localhost:8000/v1/devices \
 ```
 
 …or use the **Register** form in the UI.
+
+Device publishes no OpenAPI spec (UniFi consoles, printers, many IoT hubs)? Write a
+minimal one by hand and register with `spec_url` — walkthrough and a working UniFi example
+in [examples/specs/](../examples/specs/).
+
+## Self-signed device certificates
+
+Home devices that speak HTTPS (UniFi consoles, Home Assistant, NAS boxes) almost always
+serve a **self-signed certificate**, which the gateway's outbound TLS verification rejects
+— registration succeeds but spec fetch and tool calls fail. Two ways out:
+
+- **Preferred: trust the device's CA.** If the device (or your LAN) has a CA you can
+  export, point the gateway at it and verification keeps working:
+
+  ```yaml
+  # config.yaml
+  security:
+    mtls:
+      ca_bundle: /path/to/lan-ca.pem
+  ```
+
+- **Pragmatic: disable outbound verification** with one env var on the gateway container
+  (no config-file mount needed):
+
+  ```yaml
+  # docker-compose override, or add to the gateway service's environment
+  environment:
+    MCP_MTLS_VERIFY: "false"
+  ```
+
+  The env var overrides `security.mtls.verify` in either direction; unset, the config
+  value (default `true`) wins.
+
+Scope and risk of `verify: false`: it applies to **all** of the gateway's outbound device
+connections (spec fetch, health probes, tool calls) — not just one device — and means the
+gateway can't detect a machine-in-the-middle between it and your devices. That's usually
+acceptable on a trusted, closed home LAN; it is not acceptable anywhere untrusted traffic
+can route. It does not affect the browser↔UI or client↔gateway connections.
 
 ## Before you expose it beyond localhost
 

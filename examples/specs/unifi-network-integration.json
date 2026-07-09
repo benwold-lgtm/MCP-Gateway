@@ -1,0 +1,335 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "UniFi Network Integration API (hand-written subset)",
+    "description": "Unofficial, hand-written OpenAPI description of a read-only subset of the UniFi Network Integration API (UniFi Network 9.0+ on a self-hosted console/Cloud Key). UniFi consoles do not publish an OpenAPI spec, so this file exists to register one with the Device MCP Gateway — see the README in this directory for the how-and-why. Endpoints and fields verified against a live console; response schemas are intentionally loose (additional fields are allowed) so console firmware updates don't break translation. Create the API key in the UniFi console under Settings -> Control Plane -> Integrations, and register the device with auth_type api_key on the X-API-KEY header.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://unifi.example.lan"
+    }
+  ],
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "paths": {
+    "/proxy/network/integration/v1/sites": {
+      "get": {
+        "operationId": "list_sites",
+        "summary": "List sites",
+        "description": "All sites this console manages. Most self-hosted consoles have exactly one; its id is the siteId every other operation needs.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/offset"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of sites.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SitesPage"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/proxy/network/integration/v1/sites/{siteId}/devices": {
+      "get": {
+        "operationId": "list_network_devices",
+        "summary": "List UniFi devices (APs, switches, gateways)",
+        "description": "The UniFi hardware adopted by this site, with model, state, and IP address.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/siteId"
+          },
+          {
+            "$ref": "#/components/parameters/offset"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of adopted UniFi devices.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevicesPage"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/proxy/network/integration/v1/sites/{siteId}/devices/{deviceId}": {
+      "get": {
+        "operationId": "get_network_device",
+        "summary": "Get one UniFi device's details",
+        "description": "Detailed state for a single adopted device, including firmware version and uplink.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/siteId"
+          },
+          {
+            "name": "deviceId",
+            "in": "path",
+            "required": true,
+            "description": "The device's id, as returned by list_network_devices.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The device.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Device"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/proxy/network/integration/v1/sites/{siteId}/clients": {
+      "get": {
+        "operationId": "list_clients",
+        "summary": "List connected clients",
+        "description": "The client devices (laptops, phones, IoT, ...) currently known to this site, wired and wireless.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/siteId"
+          },
+          {
+            "$ref": "#/components/parameters/offset"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of clients.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientsPage"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-KEY"
+      }
+    },
+    "parameters": {
+      "siteId": {
+        "name": "siteId",
+        "in": "path",
+        "required": true,
+        "description": "The site's id, as returned by list_sites.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "offset": {
+        "name": "offset",
+        "in": "query",
+        "required": false,
+        "description": "Zero-based index of the first item to return.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Maximum number of items to return.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 25
+        }
+      }
+    },
+    "schemas": {
+      "Page": {
+        "type": "object",
+        "description": "Common pagination envelope.",
+        "properties": {
+          "offset": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "count": {
+            "type": "integer",
+            "description": "Items in this page."
+          },
+          "totalCount": {
+            "type": "integer",
+            "description": "Items across all pages."
+          }
+        }
+      },
+      "SitesPage": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Page"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Site"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Site": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Use as siteId in the other operations."
+          },
+          "internalReference": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "DevicesPage": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Page"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Device"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Device": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "macAddress": {
+            "type": "string"
+          },
+          "ipAddress": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "e.g. ONLINE, OFFLINE, ADOPTING"
+          },
+          "firmwareVersion": {
+            "type": "string"
+          },
+          "firmwareUpdatable": {
+            "type": "boolean"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ClientsPage": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Page"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Client"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Client": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "WIRED or WIRELESS"
+          },
+          "macAddress": {
+            "type": "string"
+          },
+          "ipAddress": {
+            "type": "string"
+          },
+          "connectedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}
