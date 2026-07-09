@@ -270,6 +270,8 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /v1/
 | `GET` | `/v1/devices/{hostname}/diagnostics` | "Why is my device down?" — status, last check + age, spec/manifest state, spawn error, circuit breaker (`devices:read`) |
 | `GET` | `/v1/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
 | `POST` | `/v1/devices/{hostname}/messages` | Send a JSON-RPC 2.0 message via SSE |
+| `GET` | `/v1/fleet/sse?devices=a,b,…` | Open one MCP session spanning several devices — tool names namespaced by hostname (`tools:call`) |
+| `POST` | `/v1/fleet/messages` | Send a JSON-RPC 2.0 message on a fleet session (`tools:call`) |
 | `GET` | `/v1/devices/{hostname}/deadletter` | Inspect dead-lettered tool calls (distributed mode; `devices:read`) |
 | `POST` | `/v1/devices/{hostname}/deadletter/replay` | Re-publish dead-lettered calls onto the call stream; optional `{"ids":[...]}` (`devices:write`) |
 | `DELETE` | `/v1/devices/{hostname}/deadletter` | Drain the dead-letter queue; optional `{"ids":[...]}` (`devices:write`) |
@@ -353,7 +355,7 @@ In distributed mode the breaker runs on the worker, so `breaker` is `{"available
 
 **`GET /health`:**
 ```json
-{"status": "healthy", "mode": "distributed", "active_pods": 4, "registered_devices": 5, "version": "0.1.0"}
+{"status": "healthy", "mode": "distributed", "active_pods": 4, "registered_devices": 5, "version": "<gateway version>"}
 ```
 
 **`GET /readyz`:** Returns `200 {"status": "ready", "mode": "..."}` when the backend is reachable, `503 {"status": "not ready", "reason": "..."}` when not.
@@ -444,7 +446,7 @@ The gateway is **single-tenant per stack**: it has no in-application tenant isol
 
 ### Rate limiting
 
-The gateway enforces per-IP rate limits using `slowapi`. Limits are applied per gateway instance (not distributed across replicas — a Redis-backed store is recommended for multi-replica deployments). Requests that exceed the limit receive `HTTP 429`.
+The gateway enforces fixed-window rate limits per source IP and, on dispatch endpoints, per authenticated principal (`ratelimit.py` — fully async). In **embedded mode** the counters are in-process; in **distributed mode** they live in Redis, so limits are shared across all gateway replicas automatically. Requests over the limit receive `HTTP 429` with a `Retry-After` header. Behind a reverse proxy, set `gateway.trust_proxy_headers: true` so the limit keys on the real client IP.
 
 ### CORS
 
@@ -487,6 +489,7 @@ All settings live in `config.yaml`. Override the file location with `MCP_CONFIG`
 | `registry.spec_poll_interval` | `300` | Seconds between spec refresh checks |
 | `registry.spec_cache_ttl` | `3600` | Spec cache lifetime in seconds |
 | `registry.max_concurrent_pods` | `50` | Max simultaneous device pods (embedded mode only) |
+| `registry.fleet_max_devices` | `25` | Max devices one fleet session (`/v1/fleet/sse`) may span |
 | `redis.url` | `"redis://localhost:6379/0"` | Redis connection URL. Override with `MCP_REDIS_URL` |
 | `redis.socket_timeout` | `5` | Redis socket timeout in seconds |
 | `redis.max_connections` | `20` | Redis connection pool size per gateway instance |
@@ -499,7 +502,7 @@ All settings live in `config.yaml`. Override the file location with `MCP_CONFIG`
 | `logging.level` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `logging.file` | `logs/gateway.log` | Log file path |
 
-`discovery.spec_paths` is a list of URL paths probed for auto-discovery. See `config.yaml` for the full default list.
+`discovery.spec_paths` is a list of URL paths probed for auto-discovery (fetched specs are parsed as JSON). See `config.yaml` for the full default list.
 
 ---
 
@@ -555,22 +558,24 @@ The bundled manifests assume the following are already installed in the target c
 > `preferred` (won't block scheduling) and the PDBs allow rolling updates at `replicas: 2`.
 > On `kind`, skip the registry push and load the image directly (see below).
 
-### Build and push the image
+### Point the manifests at an image
 
-The manifests reference `image: device-mcp-gateway:latest` as a placeholder. **There is no
-published image** — build one and push it to a registry your cluster can pull from, then set
-that reference in **both** `deployment.yaml` and `worker-deployment.yaml` (they share one image).
+The manifests reference `image: device-mcp-gateway:latest` as a placeholder. Prebuilt
+multi-arch (amd64/arm64) images are published to GHCR on every release — pin a version
+tag (or better, a digest; never `:latest`) in **both** `deployment.yaml` and
+`worker-deployment.yaml` (they share one image):
 
 ```bash
-# Build (the repo root holds the Dockerfile)
-docker build -t <your-registry>/device-mcp-gateway:0.1.2 .
-
-# Push to a registry the cluster can reach (Docker Hub, GHCR, ECR, GCR, ACR, …)
-docker push <your-registry>/device-mcp-gateway:0.1.2
-
-# Point both deployments at it (never ship :latest in production — pin a tag or digest)
-sed -i 's#image: device-mcp-gateway:latest#image: <your-registry>/device-mcp-gateway:0.1.2#' \
+sed -i 's#image: device-mcp-gateway:latest#image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.1.2#' \
   deploy/kubernetes/deployment.yaml deploy/kubernetes/worker-deployment.yaml
+```
+
+Prefer to build from source? The repo root holds the Dockerfile — build, push to a
+registry your cluster can pull from, and point both deployments at that instead:
+
+```bash
+docker build -t <your-registry>/device-mcp-gateway:0.1.2 .
+docker push <your-registry>/device-mcp-gateway:0.1.2
 ```
 
 > **kind / minikube shortcut.** To skip a registry entirely, build locally and load the image
@@ -736,13 +741,13 @@ Ensure you are POSTing to `?session_id=<uuid>` where the UUID was taken from the
 - **Distributed mode:** The gateway cannot reach Redis. Check `MCP_REDIS_URL` and network connectivity.
 - **Embedded mode:** The SQLite database is not accessible. Check `storage.db_path` and filesystem permissions.
 
-### Credential encryption
+### Credential encryption & key rotation
 
-If `gateway.secret_key` was not set when a device was registered, its `auth_config` is stored as plaintext. After setting `MCP_SECRET_KEY`, **previously registered devices must be re-registered** so their credentials are encrypted with the new key. Devices that fail to decrypt their credentials (due to key rotation) will log an error and load without credentials, causing tool calls to return 401 from the downstream API.
+If `gateway.secret_key` was not set when a device was registered, its `auth_config` is stored as plaintext until its next credential write. Key **rotation does not require re-registering devices**: the codec accepts multiple keys (`MCP_SECRET_KEY="<new>,<old>"` — new key encrypts, all keys decrypt), and the `device-mcp-rotate-secrets` CLI re-encrypts stored credentials under the new key so the old one can be retired. Full zero-downtime procedure in [docs/secret-rotation.md](docs/secret-rotation.md). A device that fails to decrypt its credentials (e.g. the old key was dropped before re-encrypting) logs an error and loads without credentials — tool calls then 401 against the downstream API until the key is restored or the device re-registered.
 
 ### Rate limiting (429 responses)
 
-The per-IP rate limits are per gateway instance. In a multi-replica setup, a client that hits different replicas may see higher effective limits. For shared limits across replicas, configure a Redis-backed rate limiter (replace the in-memory `Limiter` in `main.py` with a `slowapi.Limiter` using a Redis storage backend).
+In distributed mode the limits are Redis-backed and shared across replicas — a client sees the same budget no matter which replica it hits. In embedded mode (single process) the counters are in-process, which is equivalent. The window is fixed (INCR + EXPIRE), so a short burst at a window boundary can briefly exceed the nominal rate; respect the `Retry-After` header on 429s. If all clients appear as one IP, you're behind a proxy without `gateway.trust_proxy_headers: true`.
 
 ---
 

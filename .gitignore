@@ -30,9 +30,13 @@ pip-delete-this-directory.txt
 # IDE and local tooling
 .claude/
 
-# Hermes Agent automation (preserved at automation-scripts/hermeshome-hermes-agent)
+# Local agent automation (kept out of the repo)
 /autonomy/
 /AGENTS.md
+
+# Local-only deployment overrides — machine-specific, never committed
+docker-compose.lite.local.yml
+unifi-lite-local-config.yaml
 
 # Runtime data — generated files, not source
 /devices.db

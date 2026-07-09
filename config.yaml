@@ -94,6 +94,8 @@ registry:
   spec_poll_interval: 300
   # Spec cache TTL in seconds
   spec_cache_ttl: 3600
+  # Max devices one fleet session (/v1/fleet/sse?devices=...) may span
+  fleet_max_devices: 25
   # Max OpenAPI spec body size in bytes (F-09). A fetched spec larger than this is
   # rejected before it is parsed, cached, or translated, so a hostile/huge document
   # can't exhaust memory or starve the shared spec-translation process pool.
