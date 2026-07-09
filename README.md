@@ -124,7 +124,13 @@ source, first-run credentials, connecting an MCP client, and securing it beyond 
 
 ### Claude Desktop
 
-Add the device's SSE endpoint to your Claude Desktop config file:
+Claude Desktop's native server config **cannot attach an `Authorization` header**, and
+every gateway deployment (including lite) requires the bearer key — so pointing it
+straight at the SSE URL will 401. Bridge through
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote) instead: it runs locally
+(Node 18+), speaks stdio to Claude Desktop, and forwards the header upstream.
+
+Config file locations:
 
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
@@ -133,14 +139,45 @@ Add the device's SSE endpoint to your Claude Desktop config file:
 {
   "mcpServers": {
     "my-sensor": {
-      "type": "sse",
-      "url": "http://localhost:8000/v1/devices/my-sensor/sse"
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote@latest",
+        "http://localhost:8000/v1/devices/my-sensor/sse",
+        "--allow-http",
+        "--header", "Authorization:${GATEWAY_TOKEN}"
+      ],
+      "env": {
+        "GATEWAY_TOKEN": "Bearer <gateway-api-key>"
+      }
     }
   }
 }
 ```
 
+Two details that matter:
+
+- The token rides in `env` and is referenced as `${GATEWAY_TOKEN}` — keep **no space**
+  after `Authorization:` (mcp-remote splits `args` on spaces).
+- `--allow-http` is required for a plain-HTTP gateway (a LAN/lite deploy). Drop it once
+  the gateway is behind TLS.
+
 Restart Claude Desktop after saving. The device's tools will appear in the tool picker.
+
+### Clients that send headers natively (Cursor, custom agents)
+
+Clients that can attach request headers connect directly — no bridge process:
+
+```json
+{
+  "mcpServers": {
+    "my-sensor": {
+      "type": "sse",
+      "url": "http://localhost:8000/v1/devices/my-sensor/sse",
+      "headers": { "Authorization": "Bearer <gateway-api-key>" }
+    }
+  }
+}
+```
 
 ### Multiple devices in one session (fleet)
 
@@ -156,11 +193,15 @@ there's no collision even when two devices expose the same operation:
   "mcpServers": {
     "my-fleet": {
       "type": "sse",
-      "url": "http://localhost:8000/v1/fleet/sse?devices=my-sensor,my-fan,my-thermostat"
+      "url": "http://localhost:8000/v1/fleet/sse?devices=my-sensor,my-fan,my-thermostat",
+      "headers": { "Authorization": "Bearer <gateway-api-key>" }
     }
   }
 }
 ```
+
+(For Claude Desktop, use the same `mcp-remote` config as above with this fleet URL in
+place of the per-device one.)
 
 Same auth model as the per-device endpoint (`tools:call` scope, session bound to the
 principal that opened it) — this doesn't grant access to anything a caller couldn't
@@ -258,7 +299,7 @@ Prometheus metrics are exposed separately on a **dedicated metrics port** (`metr
 |-------|----------|-------------|
 | `hostname` | Yes (POST) | Unique identifier — letters, digits, hyphens, dots; 1–253 chars |
 | `base_url` | Yes (POST) | Root URL of the device API |
-| `spec_url` | No | Full URL to the OpenAPI spec; auto-discovered if omitted |
+| `spec_url` | No | Full URL to the OpenAPI spec (JSON); auto-discovered if omitted. No spec published? See [examples/specs/](examples/specs/) |
 | `transport` | No | Must be `"sse"` (default) |
 | `auth_type` | No | `"api_key"`, `"oauth2"`, or `"none"` |
 | `auth` | Conditional | Required when `auth_type` is `api_key` or `oauth2` |
@@ -677,7 +718,7 @@ curl http://localhost:8000/v1/devices/my-sensor
 
 Common causes:
 - **Unreachable device:** `base_url` is wrong, or the device is not accessible from the gateway network.
-- **Spec not found:** No OpenAPI spec at any of the `discovery.spec_paths`. Provide `spec_url` explicitly.
+- **Spec not found:** No OpenAPI spec at any of the `discovery.spec_paths`. Provide `spec_url` explicitly. If the device publishes no spec at all (UniFi consoles, printers, many IoT hubs), hand-write a minimal one — walkthrough and a working UniFi example in [examples/specs/](examples/specs/).
 - **Distributed mode, no worker:** Ensure `device-mcp-worker` is running and connected to the same Redis.
 
 ### Tool calls return errors
