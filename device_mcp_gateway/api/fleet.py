@@ -93,8 +93,18 @@ async def fleet_sse_stream(request: Request, devices: str = Query(...)):
     # whose handler fans a call out to whichever device it resolves to.
     from device_mcp_gateway.pods.sse_server import SseTransport
 
+    # Per-device embedded sessions see tool-set changes when a pod is replaced
+    # mid-session; a fleet manifest frozen at session-open would not. Rebuild it
+    # on each tools/list — against the ORIGINALLY requested hostnames, so a
+    # device that was down/skipped at open joins once it comes up — and keep the
+    # refreshed lookup for subsequent tools/call dispatch.
+    _manifest_ref = {"manifest": manifest}
+
     async def _handle(message: dict) -> dict | None:
-        return await fleet_service.handle_fleet_message(reg, manifest, message)
+        if isinstance(message, dict) and message.get("method") == "tools/list":
+            fresh, _skipped = await fleet_service.build_fleet_manifest(reg, hostnames)
+            _manifest_ref["manifest"] = fresh
+        return await fleet_service.handle_fleet_message(reg, _manifest_ref["manifest"], message)
 
     transport = SseTransport(f"fleet:{effective_id}", _handle)
     transport.register_client(effective_id, endpoint_url)
