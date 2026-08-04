@@ -182,7 +182,13 @@ wider network:
   ```
   Any value you set takes precedence over the generated one.
 - **Terminate TLS** with a reverse proxy in front of `:8080`, and set `COOKIE_SECURE=true`
-  on the BFF so the session cookie is only sent over HTTPS.
+  on the BFF so the session cookie is only sent over HTTPS. If you add that proxy, also set
+  `gateway.trust_proxy_headers: true` **and** `security.trusted_proxy_cidrs` to the network
+  it connects from (the Compose bridge, usually within `172.16.0.0/12` — confirm with
+  `docker network inspect`). Otherwise every caller arrives as the proxy's address and
+  shares one rate-limit bucket. The gateway refuses to start if you set the first without
+  the second, because trusting `X-Forwarded-For` without knowing which hops are yours lets
+  any client forge the header and pick its own bucket.
 - **Keep `MCP_ALLOW_PRIVATE_TARGETS` off** unless the box only ever talks to a trusted LAN.
 
 For anything beyond a home setup, use the production paths instead: distributed mode

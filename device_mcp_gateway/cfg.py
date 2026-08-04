@@ -80,6 +80,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
     "cors": {"allowed_origins": list},
     "security": {
         "allow_private_targets": bool,
+        "trusted_proxy_cidrs": list,
         "mtls": {
             "client_cert": str,
             "client_key": str,

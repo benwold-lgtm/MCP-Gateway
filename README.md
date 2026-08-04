@@ -446,7 +446,19 @@ The gateway is **single-tenant per stack**: it has no in-application tenant isol
 
 ### Rate limiting
 
-The gateway enforces fixed-window rate limits per source IP and, on dispatch endpoints, per authenticated principal (`ratelimit.py` — fully async). In **embedded mode** the counters are in-process; in **distributed mode** they live in Redis, so limits are shared across all gateway replicas automatically. Requests over the limit receive `HTTP 429` with a `Retry-After` header. Behind a reverse proxy, set `gateway.trust_proxy_headers: true` so the limit keys on the real client IP.
+The gateway enforces fixed-window rate limits per source IP and, on dispatch endpoints, per authenticated principal (`ratelimit.py` — fully async). In **embedded mode** the counters are in-process; in **distributed mode** they live in Redis, so limits are shared across all gateway replicas automatically. Requests over the limit receive `HTTP 429` with a `Retry-After` header.
+
+**Behind a reverse proxy** set `gateway.trust_proxy_headers: true` **and** `security.trusted_proxy_cidrs` — the ranges your proxies connect from. Both are required together; the gateway **refuses to start** with trust enabled and no trusted ranges. The reason is that nginx, traefik and the k8s ingresses *append* to `X-Forwarded-For` rather than replace it, so the left-most entry is whatever the client typed. Keying on it would let any caller pick their own bucket — and reset it by rotating the header. Instead the client is resolved by walking `X-Forwarded-For` **right-to-left** from the TCP peer, popping hops while each one falls inside a trusted range; the first hop outside them is the client. A caller who skips the proxy is stopped at the first step, since their own peer address isn't trusted, and their header is never read.
+
+```yaml
+gateway:
+  trust_proxy_headers: true
+security:
+  trusted_proxy_cidrs: ["10.244.0.0/16", "10.96.0.0/12"]   # k8s pod CIDR + LB range
+  # docker-compose / lite: ["172.16.0.0/12"] · host-local nginx: ["127.0.0.1/32", "::1/128"]
+```
+
+Keep the list to infrastructure you control — every range you add is one more hop an attacker doesn't have to get past, and something as broad as `0.0.0.0/0` re-opens the spoofing hole completely. If the gateway isn't behind a proxy, leave `trust_proxy_headers: false` and the socket peer is used.
 
 ### CORS
 
@@ -747,7 +759,7 @@ If `gateway.secret_key` was not set when a device was registered, its `auth_conf
 
 ### Rate limiting (429 responses)
 
-In distributed mode the limits are Redis-backed and shared across replicas — a client sees the same budget no matter which replica it hits. In embedded mode (single process) the counters are in-process, which is equivalent. The window is fixed (INCR + EXPIRE), so a short burst at a window boundary can briefly exceed the nominal rate; respect the `Retry-After` header on 429s. If all clients appear as one IP, you're behind a proxy without `gateway.trust_proxy_headers: true`.
+In distributed mode the limits are Redis-backed and shared across replicas — a client sees the same budget no matter which replica it hits. In embedded mode (single process) the counters are in-process, which is equivalent. The window is fixed (INCR + EXPIRE), so a short burst at a window boundary can briefly exceed the nominal rate; respect the `Retry-After` header on 429s. If all clients appear as one IP, you're behind a proxy without `gateway.trust_proxy_headers: true` + `security.trusted_proxy_cidrs` (see [Rate limiting](#rate-limiting)) — and if they still do *after* setting both, your `trusted_proxy_cidrs` most likely doesn't cover the address your proxy actually connects from, so the walk stops at the peer. Confirm it with `docker network inspect` / the ingress pod IP rather than widening the range to make the symptom go away.
 
 ---
 

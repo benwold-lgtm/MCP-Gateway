@@ -194,6 +194,16 @@ Two different 429s — distinguish by the `Retry-After` and the metric:
 - **Per-IP / per-principal rate limit** (F-16) — that *caller* exceeded its limit. Raise
   the limit if it's a false positive, else it's working as intended.
 
+If the per-IP limit is tripping for *everyone at once* behind a proxy, the callers are
+probably collapsing onto one bucket because the gateway is keying on the proxy's address
+instead of theirs. That means either `gateway.trust_proxy_headers` is off, or
+`security.trusted_proxy_cidrs` doesn't cover the address your proxy actually connects from
+— the right-to-left `X-Forwarded-For` walk stops at the first untrusted hop, so an
+unlisted proxy IP *is* the resolved client. Read the real address off the platform
+(`kubectl get pod -n ingress-nginx -o wide`, `docker network inspect <net>`) and add that
+range. Do not widen it to `0.0.0.0/0` to make the symptom go away — that hands every
+client control of its own bucket again.
+
 ### "The gateway or worker won't start" (R2)
 
 Distributed mode **fails closed** by design. Read the first error line:
@@ -202,6 +212,8 @@ Distributed mode **fails closed** by design. Read the first error line:
 |---------|-------|-----|
 | "refusing to start … no API keys" (F-23) | distributed mode with no auth configured | set an API key, or `gateway.allow_anonymous: true` only if you truly mean open access |
 | "refusing … unauthenticated Redis" (F-24) | Redis URL has no password | [fix the Redis secret](#fix-the-redis-secret), or `redis.allow_insecure: true` for a trusted-network lab |
+| "Refusing to start with gateway.trust_proxy_headers: true and no security.trusted_proxy_cidrs" | proxy trust enabled without saying which hops are yours — every client could then forge `X-Forwarded-For` and pick its own rate-limit bucket | list the ranges your proxy connects from (pod CIDR / LB range / `172.16.0.0/12` for Compose), or set `trust_proxy_headers: false` if there's no proxy in front. **Never** use `0.0.0.0/0` — that restores the bypass |
+| "Invalid security.trusted_proxy_cidrs" | a malformed entry in the list | fix the CIDR the message names; entries are rejected rather than skipped, because a silently-dropped range re-opens the spoofing hole |
 | config-validation **warnings** (F-50) | unknown/misplaced config keys | warnings don't block startup; fix the dotted path the warning names |
 
 Do **not** reach for the bypass flags (`allow_anonymous`, `allow_insecure`) to clear a

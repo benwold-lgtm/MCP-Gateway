@@ -72,6 +72,10 @@ gateway:
   # clients can spoof it. When false, the limiter keys on the socket peer IP.
   # In distributed mode rate limits are shared across replicas via Redis
   # automatically; in embedded mode they are per-process.
+  # REQUIRES security.trusted_proxy_cidrs when true — the gateway refuses to start
+  # with this enabled and no trusted ranges, because proxies APPEND to
+  # X-Forwarded-For, so without knowing which hops are yours the client controls
+  # the header and can choose its own rate-limit bucket.
   trust_proxy_headers: false
 
 server:
@@ -259,6 +263,29 @@ security:
   # internal device fleet where devices legitimately live on private addresses.
   # Env override: MCP_ALLOW_PRIVATE_TARGETS=true.
   allow_private_targets: false
+
+  # Address ranges your reverse proxies / load balancers connect FROM — the required
+  # companion to gateway.trust_proxy_headers (enabling that with this empty is refused
+  # at startup). Both IPv4 and IPv6 ranges are accepted; a bare address means that one
+  # host (10.0.0.5 == 10.0.0.5/32).
+  #
+  # X-Forwarded-For is resolved by walking the header RIGHT-to-left, starting from the
+  # TCP peer and popping entries while each hop falls inside these ranges; the first hop
+  # outside them is the client. That is why the list must contain only infrastructure you
+  # control: every range added here is a hop an attacker no longer has to get past. Listing
+  # something too broad (0.0.0.0/0, or a shared cloud range) re-opens the spoofing hole,
+  # because the walk will consume the attacker's own forged entries as if they were yours.
+  #
+  # Examples:
+  #   ingress-nginx / k8s — the pod CIDR the ingress controller runs in, plus the LB range:
+  #     trusted_proxy_cidrs: ["10.244.0.0/16", "10.96.0.0/12"]
+  #   lite / docker-compose — the compose bridge network the proxy container sits on
+  #   (default bridge pool is 172.16.0.0/12; check `docker network inspect <net>` if you
+  #   overrode it in daemon.json or with an explicit `ipam` block):
+  #     trusted_proxy_cidrs: ["172.16.0.0/12"]
+  #   single host-local reverse proxy (nginx/caddy on the same box):
+  #     trusted_proxy_cidrs: ["127.0.0.1/32", "::1/128"]
+  trusted_proxy_cidrs: []
 
   # Outbound mutual-TLS to devices (F-31). When set, every outbound HTTPS call to a
   # device — tool calls, reachability probes, spec fetches, health checks — presents
