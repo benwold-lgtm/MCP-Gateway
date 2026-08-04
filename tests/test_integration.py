@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from device_mcp_gateway import metrics as metrics_mod
+
 
 def test_register_and_metrics(client, mock_target_url):
     """
@@ -98,6 +100,12 @@ def test_sse_transport_client_flow(client, mock_target_url):
     else:
         raise AssertionError("SSE device pod did not become active")
 
+    # The gateway runs in-process (see the gateway_url fixture), so these are the
+    # same counter objects the request handler increments.
+    _ok = metrics_mod.tool_calls_total.labels(hostname=hostname, method="tools/call", status="ok")
+    _err = metrics_mod.tool_calls_total.labels(hostname=hostname, method="tools/call", status="error")
+    _ok_before, _err_before = _ok._value.get(), _err._value.get()
+
     with client.stream("GET", f"/v1/devices/{hostname}/sse") as event_resp:
         assert event_resp.status_code == 200
 
@@ -154,6 +162,14 @@ def test_sse_transport_client_flow(client, mock_target_url):
         assert len(content) > 0, "Expected non-empty content in tools/call result"
         tool_result = json.loads(content[0]["text"])
         assert tool_result["body"]["status"] == "online"
+
+    # A call that returned real data must be counted (and audited) as a success.
+    # In embedded mode handle_message returns {"status": "accepted"} and the
+    # JSON-RPC result travels over SSE, so classifying on a "result" key scored
+    # every successful call as an error -- inverting both signals for the only
+    # mode this deployment runs in.
+    assert _ok._value.get() == _ok_before + 1, "successful embedded tools/call was not counted as ok"
+    assert _err._value.get() == _err_before, "successful embedded tools/call was miscounted as an error"
 
     del_resp = client.delete(f"/v1/devices/{hostname}")
     assert del_resp.status_code == 200
