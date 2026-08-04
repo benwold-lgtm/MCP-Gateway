@@ -214,7 +214,13 @@ async def device_sse_message(
         _t = time.perf_counter()
         response = await sse_transport.handle_message(effective_id, payload)
         _dur = (time.perf_counter() - _t) * 1000
-        _status = "ok" if response and "result" in response else "error"
+        # Classify on the error key, not "result": in embedded mode
+        # handle_message returns {"status": "accepted"} on success (the JSON-RPC
+        # result goes out over the SSE stream, not in this response) and
+        # {"error": ...} on failure, so it never carries a "result" key. Keying
+        # on "result" marked every successful call an error, inverting both the
+        # audit trail and tool_calls_total for the mode actually in use.
+        _status = "error" if not response or "error" in response else "ok"
         _method = payload.get("method", "?") if isinstance(payload, dict) else "?"
         metrics.tool_calls_total.labels(hostname=hostname, method=_method, status=_status).inc()
         metrics.tool_call_duration_seconds.labels(hostname=hostname).observe(_dur / 1000.0)
