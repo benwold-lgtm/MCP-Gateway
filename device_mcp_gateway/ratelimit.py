@@ -18,12 +18,16 @@ which matters far more than boundary precision for coarse API limits.
 
 from __future__ import annotations
 
+import ipaddress
 import time
-from typing import Protocol
+from typing import Protocol, Sequence
 
 from fastapi import HTTPException, Request
+from loguru import logger
 
 _PERIODS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
+
+_IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
 def parse_limit(spec: str) -> tuple[int, int]:
@@ -35,20 +39,102 @@ def parse_limit(spec: str) -> tuple[int, int]:
     return int(count_str), seconds
 
 
-def client_ip_key_func(trust_proxy: bool):
+def parse_trusted_proxy_cidrs(values: Sequence[str]) -> list[_IPNetwork]:
+    """Parse ``security.trusted_proxy_cidrs`` into networks, raising on anything invalid.
+
+    A bare address is accepted as a single-host range (``10.0.0.5`` → ``10.0.0.5/32``) so
+    an operator naming one ingress IP doesn't have to write the mask. Invalid entries raise
+    rather than being skipped: a typo'd CIDR silently dropped from the trust set is exactly
+    the kind of quiet mis-config that re-opens the header-spoofing hole it exists to close.
+    """
+    nets: list[_IPNetwork] = []
+    for raw in values:
+        text = str(raw).strip()
+        try:
+            # strict=False so "10.0.0.5/24" is read as its containing network rather than
+            # rejected for having host bits set.
+            nets.append(ipaddress.ip_network(text, strict=False))
+        except ValueError as exc:
+            raise ValueError(f"invalid trusted proxy CIDR {raw!r}: {exc}") from exc
+    return nets
+
+
+def _parse_ip(text: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse an address from a header entry or peer, or None if it isn't one.
+
+    Mirrors the normalisation the outbound SSRF guard applies (``security/url_policy.py``):
+    strip an IPv6 scope id, then unwrap an IPv4-mapped IPv6 address to the IPv4 it really
+    is, so ``::ffff:10.0.0.5`` matches a ``10.0.0.0/8`` trust entry. Deliberately a separate
+    implementation from that module — inbound peer trust and outbound egress policy are
+    independent concerns that must be free to diverge, even though the mechanics rhyme.
+    """
+    try:
+        ip = ipaddress.ip_address(text.split("%", 1)[0])
+    except ValueError:
+        return None
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return mapped if mapped is not None else ip
+
+
+def _is_trusted(text: str, nets: Sequence[_IPNetwork]) -> bool:
+    ip = _parse_ip(text)
+    if ip is None:
+        return False
+    return any(ip.version == net.version and ip in net for net in nets)
+
+
+def client_ip_key_func(trust_proxy: bool, trusted_proxy_cidrs: Sequence[str] | None = None):
     """Return a function mapping a request to its rate-limit client identity.
 
-    Behind a trusted proxy/ingress, request.client.host is the proxy IP — so use
-    the left-most X-Forwarded-For entry (the original client). When untrusted,
-    key on the socket peer so a spoofed header can't change the bucket.
+    Behind a proxy/ingress ``request.client.host`` is the proxy, so the real client has to
+    come from ``X-Forwarded-For``. The left-most entry — the obvious choice, and what this
+    used to do — is **attacker-controlled**: nginx, traefik and the k8s ingresses *append*
+    to XFF rather than replace it, so a caller who sends their own header owns the left-most
+    value and therefore owns their rate-limit bucket. Rotating the header reset the counter
+    and poisoned IP-based audit attribution (third-party review, item 4).
+
+    So resolution walks the chain from the end you can actually vouch for. Starting at the
+    TCP peer, entries are popped off the *right* of XFF for as long as each hop is inside
+    ``trusted_proxy_cidrs``; the first hop that isn't is the client. An attacker who skips
+    the proxy fails at the very first step — their peer is untrusted, so the walk never
+    starts and their header is never read. An attacker behind the proxy only gets the one
+    entry the proxy itself appended (their real address); whatever they prepended sits to
+    the left of it and is never reached.
+
+    Falls back to the socket peer when there is no header, when every hop is trusted (no
+    client to identify), or when the resolved hop isn't a valid address. With trust enabled
+    but no configured ranges it degrades to peer-only and warns — never to blind trust. That
+    is the second line: ``create_app`` refuses to start in that configuration outright.
     """
+    nets = parse_trusted_proxy_cidrs(trusted_proxy_cidrs or [])
+    if trust_proxy and not nets:
+        logger.warning(
+            "trust_proxy_headers is enabled but no security.trusted_proxy_cidrs are configured — "
+            "X-Forwarded-For will be IGNORED and rate limits keyed on the socket peer, because "
+            "trusting the header without knowing which hops are yours lets any client choose its "
+            "own rate-limit bucket."
+        )
 
     def _key(request: Request) -> str:
-        if trust_proxy:
-            xff = request.headers.get("x-forwarded-for")
-            if xff:
-                return xff.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
+        peer = request.client.host if request.client else "unknown"
+        if not trust_proxy or not nets:
+            return peer
+        xff = request.headers.get("x-forwarded-for")
+        if not xff:
+            return peer
+
+        entries = [e.strip() for e in xff.split(",") if e.strip()]
+        hop = peer
+        # Pop from the right while the hop we just came from is infrastructure we own.
+        while entries and _is_trusted(hop, nets):
+            hop = entries.pop()
+        # Fall back to the peer when the walk never started (untrusted peer — an attacker
+        # who skipped the proxy), when every hop was ours so no client was identified, or
+        # when the resolved hop isn't a valid address (a junk entry must never become an
+        # arbitrary — and arbitrarily long — attacker-chosen bucket key).
+        if _is_trusted(hop, nets) or _parse_ip(hop) is None:
+            return peer
+        return hop
 
     return _key
 

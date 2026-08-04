@@ -14,6 +14,12 @@ data:
     gateway:
       api_key: ""      # set via MCP_GATEWAY_API_KEY env var
       secret_key: ""   # set via MCP_SECRET_KEY env var
+      # This bundle includes an Ingress, so requests reach the gateway via the ingress
+      # controller and request.client.host is the controller pod — not the real client.
+      # To key rate limits on the client, enable BOTH of these together (the gateway
+      # refuses to start with trust on and no trusted_proxy_cidrs, because ingress-nginx
+      # APPENDS to X-Forwarded-For and the left-most entry is whatever the client sent):
+      # trust_proxy_headers: true
 
     server:
       host: "0.0.0.0"
@@ -70,6 +76,18 @@ data:
     cors:
       # Set specific origins for production browser clients; empty disables CORS.
       allowed_origins: []
+
+    # security:
+    #   # Companion to gateway.trust_proxy_headers above. List the ranges the ingress
+    #   # controller actually connects from — your cluster pod CIDR, plus the service/LB
+    #   # range if traffic traverses one. These are cluster-specific; read them off your
+    #   # cluster rather than copying (kubectl get pod -n ingress-nginx -o wide, or the
+    #   # --cluster-cidr / --service-cluster-ip-range flags on the control plane).
+    #   # Only list infrastructure you control: each range is a hop an attacker no longer
+    #   # has to get past, and 0.0.0.0/0 would restore the spoofing bypass outright.
+    #   trusted_proxy_cidrs:
+    #     - "10.244.0.0/16"   # pod CIDR (kubeadm/flannel default — verify yours)
+    #     - "10.96.0.0/12"    # service CIDR (kubeadm default — verify yours)
 
     logging:
       level: "INFO"

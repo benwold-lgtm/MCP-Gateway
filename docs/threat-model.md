@@ -73,6 +73,7 @@ excluded by D-1 — tenants get separate stacks).
 | **R**epudiation | "I never made that call / change" | Privileged actions + 401/403 audited with `subject` (F-55); per-request access log bound to principal (F-56); tamper-evident hash-chained audit stream (F-57) |
 | **I**nformation disclosure | Session hijack — post to a known `session_id` | Sessions bound to the opening principal; foreign `subject` → 403 (F-37). Metrics endpoint optionally bearer-gated (F-36) |
 | **D**enial of service | Flood the gateway or a hot device | Per-IP + per-principal rate limits (F-16); admission control sheds with 429 past the call-backlog watermark (F-06); spec ingestion size/op/time bounds (F-09) |
+| **S**poofing | Forge `X-Forwarded-For` to escape the per-IP rate limit | Client IP resolved by walking XFF **right-to-left** from the TCP peer through `security.trusted_proxy_cidrs`, so only hops the operator vouches for are consumed and a caller bypassing the proxy is keyed on their real peer. Enabling `trust_proxy_headers` without trusted ranges is refused at startup. Proxies *append* to XFF, so the previous left-most-entry rule let any client choose its own bucket |
 | **E**levation of privilege | `viewer` performs a mutation or tool call | Scope checks at the RBAC dependency seam; missing scope → 403, audited (F-32/F-55) |
 
 ### B2 — Gateway/Worker → Redis

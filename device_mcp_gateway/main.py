@@ -240,9 +240,28 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.overview_cache = {"ts": 0.0, "etag": "", "body": None}
 
     # --- Rate limiting (async; per-client-IP) ---
-    # Key function honours X-Forwarded-For only behind a trusted proxy.
+    # X-Forwarded-For is honoured only behind a proxy whose address we can actually
+    # verify. Trusting the header without knowing which hops are ours means trusting
+    # whatever the client typed — proxies append to XFF, so the caller controls the
+    # left-most entry and can pick their own rate-limit bucket at will. Refuse to start
+    # in that configuration rather than silently running with per-IP limits that any
+    # client can bypass by rotating a header (third-party review, item 4).
     _trust_proxy = bool(_gateway_cfg.get("trust_proxy_headers", False))
-    _app.state.rate_limit_key = client_ip_key_func(_trust_proxy)
+    _trusted_proxy_cidrs = cfg.get("security", {}).get("trusted_proxy_cidrs") or []
+    if _trust_proxy and not _trusted_proxy_cidrs:
+        raise RuntimeError(
+            "Refusing to start with gateway.trust_proxy_headers: true and no "
+            "security.trusted_proxy_cidrs: every client could then set its own "
+            "X-Forwarded-For and choose its own rate-limit bucket, bypassing per-IP limits "
+            "entirely. List the ranges your proxies actually connect from — e.g. the cluster "
+            "pod CIDR plus your ingress/LB range (ingress-nginx), or the Docker bridge network "
+            "(172.16.0.0/12) for the Compose/lite profile. Set trust_proxy_headers: false if "
+            "the gateway is not behind a proxy."
+        )
+    try:
+        _app.state.rate_limit_key = client_ip_key_func(_trust_proxy, _trusted_proxy_cidrs)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid security.trusted_proxy_cidrs: {exc}") from exc
     # Default to in-memory; distributed mode swaps in the Redis-backed limiter
     # (shared across replicas) once Redis connects in the lifespan.
     _app.state.rate_limiter = InMemoryRateLimiter()
