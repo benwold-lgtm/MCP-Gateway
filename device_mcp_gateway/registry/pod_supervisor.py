@@ -16,12 +16,14 @@ orchestration stays in the Registry.
 from __future__ import annotations
 
 import atexit
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import Any
 
 from loguru import logger
 
+from device_mcp_gateway.auth.base import CredentialsChangedHook
 from device_mcp_gateway.core.spec_limits import DEFAULT_TRANSLATE_TIMEOUT, SpecTooLargeError, run_translation
 from device_mcp_gateway.core.translator import SpecTranslator, manifest_to_dict
 from device_mcp_gateway.pods.device_pod import DevicePod
@@ -60,12 +62,17 @@ class PodSupervisor:
         retry_policy: Any,
         spec_service: SpecService,
         profiles: dict[str, DeviceProfile],
+        credential_writeback: Callable[[str], CredentialsChangedHook] | None = None,
     ) -> None:
         self._backend = backend
         self._config = config
         self._tls_verify = tls_verify
         self._retry_policy = retry_policy
         self._spec_service = spec_service
+        # Builds the per-device hook that re-persists credentials an auth handler rotated
+        # at runtime. Optional so a supervisor constructed without one (tests) still runs;
+        # the Registry always supplies it.
+        self._credential_writeback = credential_writeback
         # Shared with the Registry: read-only here, to enforce the pod cap.
         self._profiles = profiles
         self._max_pods = config.get("max_concurrent_pods", 50)
@@ -96,6 +103,8 @@ class PodSupervisor:
             profile.config.spawn_error = msg
             return
         keep_alive = self._config.get("transport", {}).get("sse", {}).get("keep_alive_interval", 30)
+        if profile.auth is not None and self._credential_writeback is not None:
+            profile.auth.on_credentials_changed(self._credential_writeback(profile.hostname))
         pod = DevicePod(
             hostname=profile.hostname,
             manifest=mcp_manifest,
