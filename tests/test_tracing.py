@@ -16,7 +16,31 @@ import pytest
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.shared.registry_backend import RedisRegistryBackend
 
-_OTEL_INSTALLED = importlib.util.find_spec("opentelemetry") is not None
+
+def _otel_extra_installed() -> bool:
+    """True only when everything ``init_tracing`` imports is actually importable.
+
+    Probing the ``opentelemetry`` namespace package alone is not enough: the bare
+    ``opentelemetry-api`` distribution creates it, and other dependencies pull that in
+    transitively (mcp 2.0.0 does), while ``init_tracing`` needs the *sdk* and the OTLP
+    exporter from the ``[otel]`` extra. With the namespace-only probe, an incidental
+    api-only install flipped both skip guards the wrong way and failed the suite on a
+    test that exercises nothing the gateway owns.
+    """
+    for module in (
+        "opentelemetry.sdk.trace",
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter",
+        "opentelemetry.trace.propagation.tracecontext",
+    ):
+        try:
+            if importlib.util.find_spec(module) is None:
+                return False
+        except (ImportError, ValueError):
+            return False
+    return True
+
+
+_OTEL_INSTALLED = _otel_extra_installed()
 
 
 @pytest.fixture(autouse=True)
