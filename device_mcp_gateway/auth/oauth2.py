@@ -27,7 +27,7 @@ from loguru import logger
 
 from device_mcp_gateway.security.url_policy import build_guarded_client, resolve_allow_private
 
-from .base import AbstractAuth
+from .base import AbstractAuth, CredentialsChangedHook
 
 _BODY_GRANTS = ("client_credentials", "password", "refresh_token")
 
@@ -64,9 +64,15 @@ class OAuth2Auth(AbstractAuth):
         # Default to the env override; the owning pod overrides with the resolved config
         # value via configure_egress() at wire-up.
         self._allow_private = resolve_allow_private({})
+        # Set by the owning pod via on_credentials_changed() so a rotated refresh token
+        # reaches durable storage. None means nobody is persisting us (tests, ad-hoc use).
+        self._credentials_changed: CredentialsChangedHook | None = None
 
     def configure_egress(self, *, allow_private: bool) -> None:
         self._allow_private = allow_private
+
+    def on_credentials_changed(self, hook: CredentialsChangedHook) -> None:
+        self._credentials_changed = hook
 
     async def ensure_token(self) -> None:
         async with self._lock:
@@ -101,22 +107,53 @@ class OAuth2Auth(AbstractAuth):
             post_kwargs["auth"] = basic
         # SSRF-guarded: validate_target_url runs on the token POST and every redirect
         # hop, so client_secret can't be steered to a private/loopback/metadata address.
+        rotated = False
         async with build_guarded_client(allow_private=self._allow_private, timeout=10) as client:
             try:
                 resp = await client.post(self.token_endpoint, **post_kwargs)
                 resp.raise_for_status()
                 tokens = resp.json()
                 self._access_token = tokens.get("access_token")
-                # A rotated refresh token (if the provider returns one) is kept so a
-                # refresh_token grant keeps working across renewals.
-                if tokens.get("refresh_token"):
-                    self.refresh_token = tokens["refresh_token"]
+                # A rotated refresh token (if the provider returns one) replaces ours, and
+                # must be written back to storage — see _persist_rotation below.
+                new_refresh = tokens.get("refresh_token")
+                if new_refresh and new_refresh != self.refresh_token:
+                    self.refresh_token = new_refresh
+                    rotated = True
                 expires_in = int(tokens.get("expires_in", 3600))
                 self._token_expiry = time.time() + expires_in
                 logger.info("OAuth2 token retrieved successfully")
             except Exception as e:
                 logger.error(f"OAuth2 token fetch failed: {e}")
                 raise
+        if rotated:
+            await self._persist_rotation()
+
+    async def _persist_rotation(self) -> None:
+        """Push a rotated refresh token back to durable storage.
+
+        Providers with refresh-token rotation (Google, Okta, Auth0 with rotation on,
+        anything following OAuth 2.1) invalidate the old token the first time it is
+        redeemed. Keeping the replacement only in memory means the stored credential is
+        already dead: the pod runs fine until it restarts or is rebalanced onto another
+        worker, then reloads the invalidated token and can never authenticate again —
+        and at providers that treat a replayed refresh token as theft, redeeming the
+        stale one can revoke the whole grant family.
+
+        Best-effort by design: a storage failure is logged, never raised. The token fetch
+        itself succeeded and the in-memory handler is usable, so failing the caller's tool
+        call here would turn a durability problem into an outage.
+        """
+        hook = self._credentials_changed
+        if hook is None:
+            return
+        try:
+            await hook(self)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                f"OAuth2 refresh token rotated but could not be persisted ({exc}); the stored "
+                "credential is now stale and this device may fail to authenticate after a restart"
+            )
 
     async def get_headers(self) -> dict[str, str]:
         await self.ensure_token()

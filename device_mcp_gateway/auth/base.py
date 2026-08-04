@@ -6,8 +6,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+# Called when a handler mutates its own persisted credential material, with the handler
+# itself as the argument. The owner (embedded registry / distributed worker) re-serialises
+# and re-encrypts it. Async because every implementation writes to Redis or SQLite.
+CredentialsChangedHook = Callable[["AbstractAuth"], Awaitable[None]]
 
 
 @dataclass
@@ -47,6 +53,18 @@ class AbstractAuth(ABC):
         makes itself (e.g. an OAuth2 token fetch). No-op for handlers that don't make
         their own network calls. The owning pod calls this at wire-up so the handler's
         egress posture matches the configured ``allow_private`` setting (F-02)."""
+        return None
+
+    def on_credentials_changed(self, hook: CredentialsChangedHook) -> None:
+        """Register a callback for when this handler rotates its own stored credentials.
+
+        No-op for handlers whose persisted material never changes at runtime (an API key
+        is whatever the operator registered). ``OAuth2Auth`` overrides it: providers that
+        rotate refresh tokens hand back a new one on every refresh, and without a
+        write-back the stored token is dead the moment it is first used — the pod keeps
+        working until it restarts, then can never authenticate again.
+
+        The owning pod wires this at the same point it calls ``configure_egress``."""
         return None
 
     @abstractmethod

@@ -181,3 +181,102 @@ async def test_pod_sends_cookie_api_key_on_request():
         await pod._tool_dispatch["t"]()
 
     assert captured["cookies"] == {"sid": "secret"}
+
+
+# --- Refresh-token rotation write-back ---------------------------------------
+#
+# Providers with refresh-token rotation (Google, Okta, Auth0 with rotation enabled,
+# anything under OAuth 2.1) invalidate the old refresh token the first time it is
+# redeemed and return a replacement. That replacement used to live only in memory, so
+# the stored credential was already dead: the pod kept working until it restarted or
+# was rebalanced, then reloaded the invalidated token and could never authenticate
+# again. These cover the write-back seam that fixes it.
+
+
+def _token_response(**extra):
+    """A token endpoint returning access_token plus whatever else the test wants."""
+
+    async def fake_post(self, url, **kwargs):
+        body = {"access_token": "tok", "expires_in": 3600}
+        body.update(extra)
+        return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    return fake_post
+
+
+@pytest.mark.asyncio
+async def test_rotated_refresh_token_is_handed_to_the_persistence_hook():
+    auth = _oauth(grant_type="refresh_token", refresh_token="old-rt")
+    persisted = []
+
+    async def _record(a):
+        persisted.append(a.to_dict())
+
+    auth.on_credentials_changed(_record)
+
+    with patch("httpx.AsyncClient.post", _token_response(refresh_token="new-rt")):
+        await auth.ensure_token()
+
+    assert auth.refresh_token == "new-rt"
+    assert len(persisted) == 1, "rotation must notify the owner exactly once"
+    assert persisted[0]["refresh_token"] == "new-rt", "the hook must see the NEW token, not the old one"
+
+
+@pytest.mark.asyncio
+async def test_unchanged_refresh_token_does_not_trigger_a_write():
+    """Providers that return the same refresh token every time (or none at all) must not
+    cause a storage write on every single token refresh."""
+    auth = _oauth(grant_type="refresh_token", refresh_token="same-rt")
+    calls = []
+
+    async def _record(a):
+        calls.append(a)
+
+    auth.on_credentials_changed(_record)
+
+    with patch("httpx.AsyncClient.post", _token_response(refresh_token="same-rt")):
+        await auth.ensure_token()
+    auth._token_expiry = 0  # force a second fetch
+    with patch("httpx.AsyncClient.post", _token_response()):  # no refresh_token in body
+        await auth.ensure_token()
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_does_not_fail_the_token_fetch():
+    """A storage outage must not turn a working token into a failed tool call — the
+    handler is usable in memory, so the write-back is best-effort and logged."""
+    auth = _oauth(grant_type="refresh_token", refresh_token="old-rt")
+
+    async def _boom(_auth):
+        raise RuntimeError("redis down")
+
+    auth.on_credentials_changed(_boom)
+
+    with patch("httpx.AsyncClient.post", _token_response(refresh_token="new-rt")):
+        await auth.ensure_token()
+
+    assert await auth.get_headers() == {"Authorization": "Bearer tok"}
+    assert auth.refresh_token == "new-rt"
+
+
+@pytest.mark.asyncio
+async def test_handler_without_a_hook_still_rotates_in_memory():
+    """No owner wired (tests, ad-hoc use) must not raise."""
+    auth = _oauth(grant_type="refresh_token", refresh_token="old-rt")
+    with patch("httpx.AsyncClient.post", _token_response(refresh_token="new-rt")):
+        await auth.ensure_token()
+    assert auth.refresh_token == "new-rt"
+
+
+@pytest.mark.asyncio
+async def test_api_key_auth_ignores_the_hook():
+    """Handlers whose persisted material never changes keep the base-class no-op."""
+    auth = ApiKeyAuth(api_key="k", header_name="X-API-Key")
+    auth.on_credentials_changed(_boom_hook)  # accepted, never invoked
+    assert await auth.get_headers() == {"X-API-Key": "k"}
+
+
+async def _boom_hook(_auth):
+    raise AssertionError("must never be called")

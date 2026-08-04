@@ -103,6 +103,86 @@ async def test_worker_decrypt_failure_returns_none_not_ciphertext():
     assert worker._decrypt_auth("dev1", token) is None  # loud failure, no auth
 
 
+# --- Rotated-credential write-back ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_worker_writeback_re_encrypts_rotated_credentials_into_redis():
+    """The distributed owner must persist a rotated refresh token under the codec, so a
+    restart or rebalance reloads the CURRENT token rather than the invalidated original."""
+    from device_mcp_gateway.auth.oauth2 import OAuth2Auth
+
+    codec = CredentialCodec(Fernet(Fernet.generate_key()))
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    backend = RedisRegistryBackend(r)
+    registry = Registry(config={"mode": "distributed"}, backend=backend, codec=codec)
+
+    await registry.register_device(
+        hostname="dev1",
+        base_url="http://dev1",
+        auth=OAuth2Auth(
+            token_endpoint="https://auth/t",
+            client_id="cid",
+            client_secret="sec",
+            grant_type="refresh_token",
+            refresh_token="original-rt",
+        ),
+    )
+
+    worker = DeviceWorker(worker_id="w1", config={}, redis_client=r, codec=codec)
+    worker._backend = backend
+
+    rotated = OAuth2Auth(
+        token_endpoint="https://auth/t",
+        client_id="cid",
+        client_secret="sec",
+        grant_type="refresh_token",
+        refresh_token="rotated-rt",
+    )
+    await worker._credential_writeback("dev1")(rotated)
+
+    def _dec(v):
+        return v.decode() if isinstance(v, bytes) else v
+
+    stored = _dec(await r.hget("device:dev1:config", "auth_config"))
+    assert "rotated-rt" not in stored, "the blob must be encrypted at rest, not written in the clear"
+    reloaded = _auth_from_config("oauth2", worker._decrypt_auth("dev1", stored))
+    assert reloaded.refresh_token == "rotated-rt"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_store_update_credentials_replaces_only_the_credential_blob(tmp_path):
+    from device_mcp_gateway.storage.sqlite_store import SqliteDeviceStore
+
+    codec = CredentialCodec(Fernet(Fernet.generate_key()))
+    store = SqliteDeviceStore(db_path=str(tmp_path / "d.db"), codec=codec)
+    await store.initialize()
+    await store.save(
+        "dev1",
+        {
+            "base_url": "http://dev1",
+            "spec_url": "http://dev1/spec",
+            "transport": "sse",
+            "auth_type": "oauth2",
+            "auth_config": {"type": "oauth2", "refresh_token": "original-rt"},
+            "rate_limit_rps": 5.0,
+        },
+    )
+
+    await store.update_credentials("dev1", {"type": "oauth2", "refresh_token": "rotated-rt"})
+
+    (record,) = await store.load_all()
+    assert record["auth_config"]["refresh_token"] == "rotated-rt"
+    # Everything else on the row survives the targeted credential update.
+    assert record["base_url"] == "http://dev1"
+    assert record["spec_url"] == "http://dev1/spec"
+    assert record["rate_limit_rps"] == 5.0
+
+    # And it is ciphertext on disk, like every other credential write.
+    ((_hostname, raw),) = await store.iter_raw_credentials()
+    assert "rotated-rt" not in raw
+
+
 # --- Refuse-to-start guard --------------------------------------------------
 
 

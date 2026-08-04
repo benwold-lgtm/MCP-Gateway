@@ -26,7 +26,7 @@ from typing import Any
 from loguru import logger
 
 from device_mcp_gateway.audit import redact_url
-from device_mcp_gateway.auth.base import AbstractAuth
+from device_mcp_gateway.auth.base import AbstractAuth, CredentialsChangedHook
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
 from device_mcp_gateway.core.manifest_diff import record_tool_change
 from device_mcp_gateway.registry.models import DeviceProfile
@@ -104,6 +104,7 @@ class Registry:
             retry_policy=self._retry_policy,
             spec_service=self._spec_service,
             profiles=self._profiles,
+            credential_writeback=self._credential_writeback,
         )
 
     # ------------------------------------------------------------------
@@ -114,6 +115,27 @@ class Registry:
         if hostname not in self._device_locks:
             self._device_locks[hostname] = asyncio.Lock()
         return self._device_locks[hostname]
+
+    def _credential_writeback(self, hostname: str) -> CredentialsChangedHook:
+        """Persist credentials an auth handler rotated at runtime (embedded mode).
+
+        Mirrors what ``_setup_device_nolock`` writes on registration: the serialised blob
+        goes to the in-process backend as-is, and the durable SQLite record gets it
+        encrypted (the store owns that codec). Without this, an OAuth2 provider that
+        rotates refresh tokens leaves the stored credential pointing at a token it has
+        already invalidated, and the device stops authenticating after the next restart.
+        """
+
+        async def _write_back(auth: AbstractAuth) -> None:
+            _auth_type, auth_config_str = _auth_to_record(auth)
+            if auth_config_str is None:
+                return
+            await self._backend.update_device_fields(hostname, auth_config=auth_config_str)
+            if self._store:
+                await self._store.update_credentials(hostname, auth.to_dict())
+            logger.info(f"Persisted rotated credentials for {hostname}")
+
+        return _write_back
 
     # ------------------------------------------------------------------
     # Device management (shared between modes)

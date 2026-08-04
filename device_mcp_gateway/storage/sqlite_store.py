@@ -119,6 +119,12 @@ class SqliteDeviceStore(AbstractDeviceStore):
                 rows = await cursor.fetchall()
         return [(row["hostname"], row["auth_config"]) for row in rows]
 
+    async def update_credentials(self, hostname: str, auth_config: dict[str, Any]) -> None:
+        """Re-encrypt and persist just a device's credential blob, leaving the rest of the
+        record untouched. Used when an auth handler rotates its own material at runtime
+        (OAuth2 refresh-token rotation) — a full ``save()`` would need the whole record."""
+        await self.set_raw_credential(hostname, self._encrypt(json.dumps(auth_config)))
+
     async def set_raw_credential(self, hostname: str, raw_auth_config: str) -> None:
         """Overwrite a device's stored ciphertext in place (key-rotation pass, F-34)."""
         async with aiosqlite.connect(self._db_path) as db:

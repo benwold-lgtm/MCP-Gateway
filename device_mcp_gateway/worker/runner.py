@@ -43,7 +43,7 @@ from typing import Any
 from loguru import logger
 
 from device_mcp_gateway import metrics
-from device_mcp_gateway.auth.base import AbstractAuth
+from device_mcp_gateway.auth.base import AbstractAuth, CredentialsChangedHook
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered
 from device_mcp_gateway.core.spec_limits import (
     DEFAULT_MAX_SPEC_BYTES,
@@ -564,6 +564,27 @@ class DeviceWorker:
             )
             return None
 
+    def _credential_writeback(self, hostname: str) -> CredentialsChangedHook:
+        """Persist credentials an auth handler rotated at runtime back into Redis.
+
+        Re-encrypts under the codec exactly as the registration path does, then writes
+        only the ``auth_config`` field so a concurrent update to other fields is not
+        clobbered. Safe against split-brain because a device has exactly one owning
+        worker (the claim lease), so only that worker ever refreshes its credentials.
+        """
+
+        async def _write_back(auth: AbstractAuth) -> None:
+            blob = json.dumps(auth.to_dict())
+            if self._codec.enabled:
+                blob = self._codec.encrypt(blob)
+            if self._backend is None:
+                logger.warning(f"Credentials rotated for {hostname} but no registry backend to persist them")
+                return
+            await self._backend.update_device_fields(hostname, auth_config=blob)
+            logger.info(f"Persisted rotated credentials for {hostname}")
+
+        return _write_back
+
     async def _spawn_pod(self, hostname: str) -> None:
         if hostname in self._assigned:
             logger.debug(f"Already assigned: {hostname}")
@@ -610,6 +631,8 @@ class DeviceWorker:
             manifest_obj = _dict_to_manifest(manifest_dict)
 
         auth = _auth_from_config(cfg.auth_type, self._decrypt_auth(hostname, cfg.auth_config))
+        if auth is not None:
+            auth.on_credentials_changed(self._credential_writeback(hostname))
         pod = DevicePod(
             hostname=hostname,
             manifest=manifest_obj,
