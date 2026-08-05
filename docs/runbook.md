@@ -185,6 +185,22 @@ under `registry.spec_max_bytes` (F-09); credentials decrypt (no `MCP_SECRET_KEY`
 mismatch — see [secret-rotation.md](secret-rotation.md)); `spawn_error` in the device
 record names the failure.
 
+### "Registering a device returns 400 Rejected base_url / spec_url"
+
+The egress policy refused the target. The message says which rule:
+
+- **"resolves to a blocked address"** — private/loopback/link-local. For a trusted LAN
+  fleet set `security.allow_private_targets: true` (or `MCP_ALLOW_PRIVATE_TARGETS=true`).
+- **"carries a non-HTTP service"** — the port is on the default denylist (22, 25, 3306,
+  6379, 2375, …). The gateway only speaks HTTP to a device, so this is almost always a
+  typo'd port. If the endpoint really is HTTP on that port, add it to
+  `security.allowed_target_ports` — but note that setting the key at all switches to a
+  **strict allowlist**, so list every port your fleet uses, including 80/443.
+- **"is not in security.allowed_target_ports"** — you already set that allowlist and this
+  port isn't in it.
+
+Non-standard HTTP ports (8000, 8080, 8443) are allowed by default and need no config.
+
 ### "Clients are getting 429s"
 
 Two different 429s — distinguish by the `Retry-After` and the metric:

@@ -55,7 +55,11 @@ from device_mcp_gateway.core.spec_limits import (
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.security.mtls import build_verify
-from device_mcp_gateway.security.url_policy import build_guarded_client, resolve_allow_private
+from device_mcp_gateway.security.url_policy import (
+    build_guarded_client,
+    resolve_allow_private,
+    resolve_allowed_ports,
+)
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.shared.session_router import SessionRouter
@@ -241,6 +245,7 @@ class DeviceWorker:
             spec_translate_timeout=self._spec_translate_timeout,
             tls_verify=self._tls_verify,
             allow_private=resolve_allow_private(self._config),
+            allowed_ports=resolve_allowed_ports(self._config),
         )
         self._health.on_spec_changed = self._replace_pod
         await backend.initialize()
@@ -644,6 +649,7 @@ class DeviceWorker:
             retry_policy=self._retry_policy,
             tls_verify=self._tls_verify,
             allow_private=resolve_allow_private(self._config),
+            allowed_ports=resolve_allowed_ports(self._config),
         )
         await pod.start(with_sse=False)  # distributed mode: no in-process SSE transport
         self._pods[hostname] = pod
@@ -711,7 +717,9 @@ class DeviceWorker:
         # SSRF-guarded client: the worker validates every fetched URL (incl. redirects)
         # against the policy, closing the gap where workers never consulted it (F-02).
         async with build_guarded_client(
-            verify=self._tls_verify, allow_private=resolve_allow_private(self._config)
+            verify=self._tls_verify,
+            allow_private=resolve_allow_private(self._config),
+            allowed_ports=resolve_allowed_ports(self._config),
         ) as client:
             if cfg.spec_url:
                 try:

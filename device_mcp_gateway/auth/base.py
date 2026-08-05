@@ -48,11 +48,12 @@ class AbstractAuth(ABC):
         """
         return AuthMaterial(headers=await self.get_headers())
 
-    def configure_egress(self, *, allow_private: bool) -> None:
+    def configure_egress(self, *, allow_private: bool, allowed_ports: set[int] | None = None) -> None:
         """Adopt the gateway's SSRF egress policy for any outbound call this handler
         makes itself (e.g. an OAuth2 token fetch). No-op for handlers that don't make
         their own network calls. The owning pod calls this at wire-up so the handler's
-        egress posture matches the configured ``allow_private`` setting (F-02)."""
+        egress posture matches the configured ``allow_private`` / ``allowed_target_ports``
+        settings (F-02, review item 9)."""
         return None
 
     def on_credentials_changed(self, hook: CredentialsChangedHook) -> None:

@@ -25,7 +25,11 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from device_mcp_gateway.security.url_policy import build_guarded_client, resolve_allow_private
+from device_mcp_gateway.security.url_policy import (
+    build_guarded_client,
+    resolve_allow_private,
+    resolve_allowed_ports,
+)
 
 from .base import AbstractAuth, CredentialsChangedHook
 
@@ -64,12 +68,14 @@ class OAuth2Auth(AbstractAuth):
         # Default to the env override; the owning pod overrides with the resolved config
         # value via configure_egress() at wire-up.
         self._allow_private = resolve_allow_private({})
+        self._allowed_ports = resolve_allowed_ports({})
         # Set by the owning pod via on_credentials_changed() so a rotated refresh token
         # reaches durable storage. None means nobody is persisting us (tests, ad-hoc use).
         self._credentials_changed: CredentialsChangedHook | None = None
 
-    def configure_egress(self, *, allow_private: bool) -> None:
+    def configure_egress(self, *, allow_private: bool, allowed_ports: set[int] | None = None) -> None:
         self._allow_private = allow_private
+        self._allowed_ports = allowed_ports
 
     def on_credentials_changed(self, hook: CredentialsChangedHook) -> None:
         self._credentials_changed = hook
@@ -108,7 +114,9 @@ class OAuth2Auth(AbstractAuth):
         # SSRF-guarded: validate_target_url runs on the token POST and every redirect
         # hop, so client_secret can't be steered to a private/loopback/metadata address.
         rotated = False
-        async with build_guarded_client(allow_private=self._allow_private, timeout=10) as client:
+        async with build_guarded_client(
+            allow_private=self._allow_private, allowed_ports=self._allowed_ports, timeout=10
+        ) as client:
             try:
                 resp = await client.post(self.token_endpoint, **post_kwargs)
                 resp.raise_for_status()

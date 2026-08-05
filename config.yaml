@@ -264,6 +264,23 @@ security:
   # Env override: MCP_ALLOW_PRIVATE_TARGETS=true.
   allow_private_targets: false
 
+  # Which ports a device target URL may use. EMPTY (the default) does NOT mean "any port":
+  # it means the built-in denylist applies, refusing ports that carry a non-HTTP protocol —
+  # 22 SSH, 23, 25/465/587 SMTP, 53, 110/143/993/995 mail, 135/139/445 SMB, 389/636 LDAP,
+  # 1433, 2049, 3306, 3389, 5432, 5900, 6379 Redis, 11211, 27017 — plus 2375/2376, which
+  # are HTTP but expose the Docker daemon (a direct RCE pivot). The gateway only ever
+  # speaks HTTP to a device, so aiming it at those can only be a port scan or an attempt
+  # to smuggle a payload into another protocol.
+  #
+  # Ordinary HTTP ports stay open by default, including non-standard ones (8000, 8080,
+  # 8443) — a device fleet legitimately lives there.
+  #
+  # Setting a non-empty list switches to a STRICT ALLOWLIST that replaces the denylist:
+  # only these ports are permitted, and you can deliberately re-open a denylisted one.
+  #   allowed_target_ports: [80, 443]            # tightest posture
+  #   allowed_target_ports: [80, 443, 8080]      # ...plus one known fleet port
+  allowed_target_ports: []
+
   # Address ranges your reverse proxies / load balancers connect FROM — the required
   # companion to gateway.trust_proxy_headers (enabling that with this empty is refused
   # at startup). Both IPv4 and IPv6 ranges are accepted; a bare address means that one
