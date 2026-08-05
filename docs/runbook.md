@@ -185,6 +185,35 @@ under `registry.spec_max_bytes` (F-09); credentials decrypt (no `MCP_SECRET_KEY`
 mismatch — see [secret-rotation.md](secret-rotation.md)); `spawn_error` in the device
 record names the failure.
 
+### "OIDC logins stopped working / everyone is on break-glass keys"
+
+`mcp_oidc_validation_failures_total` is the signal, and the `reason` label says which
+problem you have:
+
+- **`jwks_unavailable` climbing** — the IdP or its JWKS endpoint is unreachable. The gateway
+  is **still serving**, but only static break-glass keys authenticate; every federated user
+  is locked out. This is the silent degradation the counter exists to expose. Check IdP
+  reachability and egress policy from the gateway pods (the JWKS fetch goes through the SSRF
+  guard, so an on-prem IdP on a private address needs `security.allow_private_targets`).
+- **`invalid_token` / `bad_algorithm` climbing with no IdP problem** — usually someone
+  probing with forged tokens. Cross-check the audit log for the source.
+- **`expired` climbing** — clock skew between the IdP and the gateway more often than real
+  expiry; `gateway.oidc.leeway` tolerates a little, but fix NTP rather than widen it.
+
+The paired log line is a WARNING, rate-limited to one per minute with a suppressed count, so
+a forged-JWT flood doesn't become a log flood. Absence of warnings is not absence of
+failures — trust the counter.
+
+### "The gateway won't start: weak API key"
+
+Distributed mode refuses a static key that is short (<16 chars) or a common guessable value
+(`admin`, `changeme`, …). These are full bearer credentials, and with OIDC enabled the same
+key is the break-glass path that still works when the IdP is down.
+
+Generate a real one — `openssl rand -hex 32` — and update the secret. For a trusted local
+network only, `gateway.allow_weak_keys: true` overrides. Embedded mode warns instead of
+refusing, so local dev is unaffected.
+
 ### "Redis failed over — what should I expect to see?"
 
 The client absorbs the reconnect burst rather than surfacing it: commands retry with
@@ -251,6 +280,7 @@ Distributed mode **fails closed** by design. Read the first error line:
 |---------|-------|-----|
 | "refusing to start … no API keys" (F-23) | distributed mode with no auth configured | set an API key, or `gateway.allow_anonymous: true` only if you truly mean open access |
 | "refusing … unauthenticated Redis" (F-24) | Redis URL has no password | [fix the Redis secret](#fix-the-redis-secret), or `redis.allow_insecure: true` for a trusted-network lab |
+| "Refusing to start in distributed mode with a weak API key" | a static key is under 16 chars or a common guessable value | `openssl rand -hex 32` and update the secret; `gateway.allow_weak_keys: true` overrides for a trusted local network |
 | "Refusing to start with gateway.trust_proxy_headers: true and no security.trusted_proxy_cidrs" | proxy trust enabled without saying which hops are yours — every client could then forge `X-Forwarded-For` and pick its own rate-limit bucket | list the ranges your proxy connects from (pod CIDR / LB range / `172.16.0.0/12` for Compose), or set `trust_proxy_headers: false` if there's no proxy in front. **Never** use `0.0.0.0/0` — that restores the bypass |
 | "Invalid security.trusted_proxy_cidrs" | a malformed entry in the list | fix the CIDR the message names; entries are rejected rather than skipped, because a silently-dropped range re-opens the spoofing hole |
 | config-validation **warnings** (F-50) | unknown/misplaced config keys | warnings don't block startup; fix the dotted path the warning names |
