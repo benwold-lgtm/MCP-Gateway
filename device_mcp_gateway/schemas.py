@@ -28,6 +28,10 @@ class DeviceSummary(BaseModel):
     pod_active: bool
     last_check: float | None = None
     rate_limit_rps: float | None = None
+    # "openapi" (translated from a spec) | "mcp" (a proxied remote MCP server). On the lean
+    # summary because it changes how every other field should be read — an operator scanning
+    # a list needs to know which upstreams are proxied without opening each one.
+    upstream_kind: str = "openapi"
 
     @classmethod
     def from_config(cls, cfg: DeviceConfig) -> DeviceSummary:
@@ -42,6 +46,7 @@ class DeviceSummary(BaseModel):
             pod_active=cfg.pod_active,
             last_check=cfg.last_check or None,
             rate_limit_rps=cfg.rate_limit_rps,
+            upstream_kind=cfg.upstream_kind,
         )
 
 
@@ -57,6 +62,9 @@ class DeviceDetail(DeviceSummary):
     # Bumps whenever a spec change mutated the tool set (F-41); poll to detect a
     # change and re-list tools.
     tools_revision: int = 0
+    # How the gateway reaches an "mcp" upstream. Meaningless for an OpenAPI device, so it
+    # stays off the lean summary.
+    upstream_transport: str = "http"
 
     @classmethod
     def from_config(cls, cfg: DeviceConfig) -> DeviceDetail:
@@ -74,6 +82,8 @@ class DeviceDetail(DeviceSummary):
             spawn_error=cfg.spawn_error,
             worker_id=cfg.worker_id,
             tools_revision=cfg.tools_revision,
+            upstream_kind=cfg.upstream_kind,
+            upstream_transport=cfg.upstream_transport,
         )
 
 
@@ -126,6 +136,9 @@ class DeviceDiagnostics(BaseModel):
     base_url: str
     spec_url: str | None = None
     transport: str
+    # Which upstream this device is, so the fields below read correctly: a proxied MCP
+    # server has no spec_url or spec_hash, and a missing one is normal rather than a fault.
+    upstream_kind: str = "openapi"
     reachable: bool
     pod_active: bool
     worker_id: str | None = None

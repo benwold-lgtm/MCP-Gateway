@@ -62,6 +62,73 @@ def _validate_transport(transport: str) -> None:
         )
 
 
+_UPSTREAM_KINDS = ("openapi", "mcp")
+_UPSTREAM_TRANSPORTS = ("http", "sse")
+
+
+def _validate_upstream(kind: str, upstream_transport: str, spec_url: str | None, declared: set[str]) -> None:
+    """Validate the upstream discriminators (ADR-0009).
+
+    ``declared`` is the set of upstream keys the caller actually sent, so a value that was
+    merely defaulted is not held against them — only an explicit ``upstream_transport`` on
+    an OpenAPI device is an error.
+
+    The value space is fixed here even where the implementation is not, so the field never
+    has to widen later. Two of these refusals are therefore "known but not yet built"
+    rather than "invalid", and they say so: a caller has to be able to tell a typo from a
+    feature that has not landed.
+    """
+    if kind not in _UPSTREAM_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"upstream_kind '{kind}' is not recognised; use one of {', '.join(_UPSTREAM_KINDS)}",
+        )
+    if upstream_transport not in _UPSTREAM_TRANSPORTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"upstream_transport '{upstream_transport}' is not recognised; "
+                f"use one of {', '.join(_UPSTREAM_TRANSPORTS)}"
+            ),
+        )
+    if kind == "openapi" and "upstream_transport" in declared:
+        raise HTTPException(
+            status_code=400,
+            detail="upstream_transport applies only to upstream_kind 'mcp'; an OpenAPI device is reached over HTTP",
+        )
+    if kind == "mcp" and spec_url:
+        raise HTTPException(
+            status_code=400,
+            detail="spec_url does not apply to upstream_kind 'mcp'; a proxied MCP server has no OpenAPI document",
+        )
+    if kind == "mcp" and upstream_transport == "sse":
+        raise HTTPException(
+            status_code=400,
+            detail="upstream_transport 'sse' is not yet supported; use 'http' (Streamable HTTP)",
+        )
+    if kind == "mcp":
+        # Phase 2 fixes the entity model; the proxy pod arrives in Phase 3. Refusing here is
+        # the honest failure: accepting the registration would store a device that the
+        # gateway then treats as OpenAPI, so it would provision, fail discovery, and look
+        # like a broken upstream rather than an unbuilt feature.
+        raise HTTPException(
+            status_code=501,
+            detail="upstream_kind 'mcp' is not yet served by this gateway; MCP passthrough is not yet available",
+        )
+
+
+def _read_upstream(data: dict, existing_kind: str = "openapi", existing_transport: str = "http") -> tuple[str, str]:
+    """Resolve the upstream discriminators from a request body, preserving stored values.
+
+    A PUT that says nothing about the upstream must not reset it to the default — the same
+    class of bug as the PUT-wipes-credentials regression.
+    """
+    return (
+        data.get("upstream_kind") or existing_kind,
+        data.get("upstream_transport") or existing_transport,
+    )
+
+
 def _parse_rate_limit(data: dict) -> float | None:
     rps = data.get("rate_limit_rps")
     if rps is None:
@@ -184,6 +251,8 @@ async def register_device(request: Request):
     spec_url = data.get("spec_url")
     _check_target_url(spec_url, "spec_url", allow_private, allowed_ports)
     rate_limit_rps = _parse_rate_limit(data)
+    upstream_kind, upstream_transport = _read_upstream(data)
+    _validate_upstream(upstream_kind, upstream_transport, spec_url, declared=set(data.keys()))
 
     device_cfg = await reg.register_device(
         hostname=hostname,
@@ -192,6 +261,8 @@ async def register_device(request: Request):
         auth=auth,
         transport=transport,
         rate_limit_rps=rate_limit_rps,
+        upstream_kind=upstream_kind,
+        upstream_transport=upstream_transport,
     )
 
     audit_request(request, "device.create", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
@@ -239,6 +310,8 @@ async def update_device(hostname: str, request: Request):
     transport = data.get("transport") or existing.transport
     _validate_transport(transport)
     rate_limit_rps = _parse_rate_limit(data)
+    upstream_kind, upstream_transport = _read_upstream(data, existing.upstream_kind, existing.upstream_transport)
+    _validate_upstream(upstream_kind, upstream_transport, spec_url, declared=set(data.keys()))
 
     device_cfg = await reg.replace_device(
         hostname=hostname,
@@ -248,6 +321,8 @@ async def update_device(hostname: str, request: Request):
         transport=transport,
         rate_limit_rps=rate_limit_rps,
         keep_auth=keep_auth,
+        upstream_kind=upstream_kind,
+        upstream_transport=upstream_transport,
     )
 
     audit_request(request, "device.update", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
@@ -375,6 +450,7 @@ async def device_diagnostics(hostname: str, request: Request):
         base_url=device.base_url,
         spec_url=device.spec_url,
         transport=device.transport,
+        upstream_kind=device.upstream_kind,
         reachable=device.reachable,
         pod_active=device.pod_active,
         worker_id=device.worker_id,

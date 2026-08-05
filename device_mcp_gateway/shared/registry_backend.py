@@ -52,6 +52,15 @@ class DeviceConfig:
     # set (F-41). A client polls this to detect "the tools moved under me" and
     # re-list; the audit stream records what changed and whether it was breaking.
     tools_revision: int = 0
+    # What the upstream SPEAKS: "openapi" (a document this gateway translates into tools)
+    # or "mcp" (a server this gateway proxies). A remote MCP server is deliberately the
+    # same entity as a device rather than a new one — see docs/adr/0009. The default keeps
+    # every record written before passthrough existed reading as what it is.
+    upstream_kind: str = "openapi"
+    # How this gateway TALKS to an "mcp" upstream: "http" (Streamable HTTP) or "sse".
+    # Unused when upstream_kind is "openapi". Distinct from ``transport`` above, which is
+    # INBOUND — how the pod serves MCP to its own clients — and must stay "sse".
+    upstream_transport: str = "http"
 
     # --- serialisation helpers ---
 
@@ -85,6 +94,12 @@ class DeviceConfig:
             spawn_error=_opt_str(h.get("spawn_error", "")),
             worker_id=_opt_str(h.get("worker_id", "")),
             tools_revision=int(h.get("tools_revision", "0") or "0"),
+            # `or` rather than a dict default: a hash written before these fields existed
+            # has no key at all, and to_redis_hash writes "" for an unset value. Both must
+            # land on the default — an empty upstream_kind would match no branch and route
+            # the device nowhere.
+            upstream_kind=h.get("upstream_kind", "") or "openapi",
+            upstream_transport=h.get("upstream_transport", "") or "http",
         )
 
 

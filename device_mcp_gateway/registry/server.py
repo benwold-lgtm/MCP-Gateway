@@ -149,12 +149,16 @@ class Registry:
         auth: AbstractAuth | None = None,
         transport: str = "sse",
         rate_limit_rps: float | None = None,
+        *,
+        upstream_kind: str = "openapi",
+        upstream_transport: str = "http",
     ) -> DeviceConfig:
         """POST semantics: create a new device."""
+        up = (upstream_kind, upstream_transport)
         if self._mode == "distributed":
-            return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
+            return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps, up)
         async with self._lock_for(hostname):
-            profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
+            profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps, up)
         # Provision off the request path (F-11) so a slow/unreachable device or a
         # long spec discovery can't stall the POST; the fast path still returns ready.
         await self._provision_in_background(profile, wait_budget=self._registration_provision_budget)
@@ -170,6 +174,8 @@ class Registry:
         rate_limit_rps: float | None = None,
         *,
         keep_auth: bool = False,
+        upstream_kind: str = "openapi",
+        upstream_transport: str = "http",
     ) -> DeviceConfig:
         """PUT semantics: kill existing pod and re-register atomically.
 
@@ -180,6 +186,7 @@ class Registry:
         ciphertext as JSON, failed, and silently re-registered the device with NO
         credentials (the PUT-wipes-credentials bug).
         """
+        up = (upstream_kind, upstream_transport)
         if self._mode == "distributed":
             await self._backend.publish_assignment("unassign", hostname)
             if keep_auth:
@@ -193,8 +200,9 @@ class Registry:
                     prev.auth_config if prev else None,
                     transport,
                     rate_limit_rps,
+                    up,
                 )
-            return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
+            return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps, up)
         async with self._lock_for(hostname):
             existing = self._profiles.get(hostname)
             if keep_auth and existing:
@@ -203,7 +211,7 @@ class Registry:
             if existing:
                 await self._pod_supervisor.kill(existing)
                 self._spec_service.invalidate(existing.base_url)
-            profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps)
+            profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps, up)
         # Re-provision off the request path (F-11), same as register_device.
         await self._provision_in_background(profile, wait_budget=self._registration_provision_budget)
         return profile.config
@@ -257,13 +265,14 @@ class Registry:
         auth: AbstractAuth | None,
         transport: str,
         rate_limit_rps: float | None,
+        upstream: tuple[str, str] = ("openapi", "http"),
     ) -> DeviceConfig:
         auth_type, auth_config_str = _auth_to_record(auth)
         # Encrypt credentials before they land in Redis (distributed mode).
         if auth_config_str:
             auth_config_str = self._codec.encrypt(auth_config_str)
         return await self._write_distributed(
-            hostname, base_url, spec_url, auth_type, auth_config_str, transport, rate_limit_rps
+            hostname, base_url, spec_url, auth_type, auth_config_str, transport, rate_limit_rps, upstream
         )
 
     async def _write_distributed(
@@ -275,6 +284,7 @@ class Registry:
         auth_config_str: str | None,
         transport: str,
         rate_limit_rps: float | None,
+        upstream: tuple[str, str] = ("openapi", "http"),
     ) -> DeviceConfig:
         """Persist a device record (auth_config already encrypted) and publish assign.
 
@@ -290,6 +300,8 @@ class Registry:
             auth_type=auth_type,
             auth_config=auth_config_str,
             rate_limit_rps=rate_limit_rps,
+            upstream_kind=upstream[0],
+            upstream_transport=upstream[1],
         )
         await self._backend.set_device(hostname, cfg)
         await self._backend.publish_assignment("assign", hostname)
@@ -308,6 +320,7 @@ class Registry:
         auth: AbstractAuth | None,
         transport: str,
         rate_limit_rps: float | None,
+        upstream: tuple[str, str] = ("openapi", "http"),
     ) -> DeviceProfile:
         """Caller must hold _lock_for(hostname)."""
         auth_type, auth_config_str = _auth_to_record(auth)
@@ -319,6 +332,8 @@ class Registry:
             auth_type=auth_type,
             auth_config=auth_config_str,
             rate_limit_rps=rate_limit_rps,
+            upstream_kind=upstream[0],
+            upstream_transport=upstream[1],
         )
         profile = DeviceProfile(config=cfg, auth=auth)
         self._profiles[hostname] = profile
@@ -334,6 +349,8 @@ class Registry:
                     "auth_type": auth_type,
                     "auth_config": auth.to_dict() if auth else None,
                     "rate_limit_rps": rate_limit_rps,
+                    "upstream_kind": upstream[0],
+                    "upstream_transport": upstream[1],
                 },
             )
 
@@ -410,6 +427,8 @@ class Registry:
                 spec_url=record.get("spec_url"),
                 transport=record.get("transport", "sse"),
                 rate_limit_rps=record.get("rate_limit_rps"),
+                upstream_kind=record.get("upstream_kind") or "openapi",
+                upstream_transport=record.get("upstream_transport") or "http",
             )
             profile = DeviceProfile(config=cfg, auth=auth)
             self._profiles[record["hostname"]] = profile
