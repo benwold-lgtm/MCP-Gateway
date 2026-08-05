@@ -33,6 +33,7 @@ from device_mcp_gateway.core.spec_limits import (
 from device_mcp_gateway.core.translator import manifest_to_dict
 from device_mcp_gateway.security.url_policy import build_guarded_client
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
+from device_mcp_gateway.shared.keys import KEYS
 
 # One pool + atexit reap for the whole worker process, shared with the spawn
 # path (worker.runner) — see worker/spec_pool.py. Names re-exported so callers
@@ -125,7 +126,7 @@ class WorkerHealthLoop:
             await asyncio.sleep(jittered(self._interval))  # F-61: de-sync worker health loops
 
     async def _check_device(self, hostname: str) -> None:
-        lock_key = f"health_lock:{hostname}"
+        lock_key = KEYS.health_lock(hostname)
         acquired = await self._r.set(lock_key, self._worker_id, nx=True, ex=self._lock_ttl)
         if not acquired:
             return  # another worker is handling this device

@@ -18,6 +18,7 @@ from loguru import logger
 
 from device_mcp_gateway import metrics
 from device_mcp_gateway.core.backoff import jittered
+from device_mcp_gateway.shared.keys import KEYS
 
 if TYPE_CHECKING:  # pragma: no cover
     from device_mcp_gateway.worker.runner import DeviceWorker
@@ -33,8 +34,8 @@ class Rebalancer:
         """Number of workers with a live heartbeat (membership alone overstates it)."""
         w = self._w
         live = 0
-        for wid in await w._r.smembers("workers:active"):
-            if await w._r.exists(f"worker:{wid}:heartbeat"):
+        for wid in await w._r.smembers(KEYS.workers_active):
+            if await w._r.exists(KEYS.worker_heartbeat(wid)):
                 live += 1
         return max(live, 1)
 
@@ -43,7 +44,7 @@ class Rebalancer:
         live-worker count. With this target the maximum fleet imbalance is one
         device, and at least one worker is always below target when a device needs
         a home (pigeonhole) — so declining at/over target can't starve placement."""
-        total = int(await self._w._r.scard("devices:all"))
+        total = int(await self._w._r.scard(KEYS.devices_set))
         live = await self.live_worker_count()
         return math.ceil(total / live), live
 
@@ -59,7 +60,7 @@ class Rebalancer:
         w = self._w
         if not w._rebalance_enabled:
             return False
-        if (await w._r.get(f"rebalance:cooldown:{hostname}")) == w._id:
+        if (await w._r.get(KEYS.rebalance_cooldown(hostname))) == w._id:
             logger.debug(f"Declining {hostname}: in our own rebalance cooldown")
             return True
         target, live = await self.rebalance_target()
@@ -100,7 +101,7 @@ class Rebalancer:
         """Release a device so another worker can take it. A short cooldown marks it
         ours so we don't immediately re-claim our own shed device."""
         w = self._w
-        await w._r.set(f"rebalance:cooldown:{hostname}", w._id, ex=w._claim_ttl)
+        await w._r.set(KEYS.rebalance_cooldown(hostname), w._id, ex=w._claim_ttl)
         await w._kill_pod(hostname)  # releases the claim + marks pod inactive
         if w._backend:
             await w._backend.publish_assignment("assign", hostname)

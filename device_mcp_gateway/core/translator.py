@@ -19,6 +19,7 @@ from openapi_spec_validator import validate as _validate_openapi_spec
 from openapi_spec_validator.validation.exceptions import OpenAPISpecValidatorError
 
 from device_mcp_gateway.core.spec_limits import enforce_operation_count
+from device_mcp_gateway.shared.keys import device_resource_uri
 
 # Device-supplied spec text (summaries/descriptions/titles) becomes LLM-facing tool
 # metadata, so it is untrusted (Tier-0 F-26 — schema poisoning / indirect prompt
@@ -532,7 +533,7 @@ class SpecTranslator:
     def _build_resource(self, path: str, op: dict, hostname: str) -> McpResource | None:
         """Convert a GET operation into a read-only MCP resource."""
         desc = _sanitize_text(op.get("description", "") or op.get("summary", "") or f"Resource at {path}")
-        uri = f"device://{hostname}{path}"
+        uri = device_resource_uri(hostname, path)
         name = _sanitize_name(path)
         return McpResource(
             uri=uri,

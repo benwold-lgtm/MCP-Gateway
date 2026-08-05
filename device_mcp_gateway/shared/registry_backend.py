@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from loguru import logger
+from device_mcp_gateway.shared.keys import KEYS
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -283,16 +284,12 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
 # Redis backend (distributed mode)
 # ---------------------------------------------------------------------------
 
-_DEVICES_SET = "devices:all"
-_ASSIGNMENTS_STREAM = "device:assignments"
-_WORKER_GROUP = "workers"
 # Unassign is delivered on a SEPARATE stream that every worker tails independently
 # (broadcast), not via the shared competing-consumers group. An "assign" only needs
 # one worker to act, but an "unassign" must reach whichever worker actually owns the
 # pod — and on the shared group it landed on one arbitrary worker that usually wasn't
 # the owner, so the pod was never torn down and a PUT-replace never applied its new
 # config. Bounded so a churny fleet can't grow it without limit.
-_UNASSIGN_STREAM = "device:unassignments"
 _UNASSIGN_STREAM_MAXLEN = 10_000
 # Cap a device's pending tool-call stream so a backlog (slow/crashed worker, no
 # consumer) can't grow Redis without bound (SRE #4). Approximate trimming keeps
@@ -318,7 +315,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
     async def initialize(self) -> None:
         # Ensure consumer group exists for the assignments stream.
         try:
-            await self._r.xgroup_create(_ASSIGNMENTS_STREAM, _WORKER_GROUP, id="0", mkstream=True)
+            await self._r.xgroup_create(KEYS.assignments_stream, KEYS.worker_group, id="0", mkstream=True)
             logger.info("Created Redis consumer group 'workers' on device:assignments")
         except Exception as exc:
             if "BUSYGROUP" in str(exc):
@@ -327,7 +324,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
                 logger.warning(f"xgroup_create warning: {exc}")
 
     async def get_device(self, hostname: str) -> DeviceConfig | None:
-        h = await self._r.hgetall(f"device:{hostname}:config")
+        h = await self._r.hgetall(KEYS.device_config(hostname))
         if not h:
             return None
         return DeviceConfig.from_redis_hash(h)
@@ -338,37 +335,37 @@ class RedisRegistryBackend(AbstractRegistryBackend):
             return []
         pipe = self._r.pipeline()
         for h in hostnames:
-            pipe.hgetall(f"device:{h}:config")
+            pipe.hgetall(KEYS.device_config(h))
         raw_hashes = await pipe.execute()
         return [DeviceConfig.from_redis_hash(h) for h in raw_hashes if h]
 
     async def set_device(self, hostname: str, config: DeviceConfig) -> None:
         pipe = self._r.pipeline()
-        pipe.hset(f"device:{hostname}:config", mapping=config.to_redis_hash())
-        pipe.sadd(_DEVICES_SET, hostname)
+        pipe.hset(KEYS.device_config(hostname), mapping=config.to_redis_hash())
+        pipe.sadd(KEYS.devices_set, hostname)
         await pipe.execute()
 
     async def update_device_fields(self, hostname: str, **fields: Any) -> None:
         mapping = {k: "" if v is None else str(v) for k, v in fields.items()}
-        await self._r.hset(f"device:{hostname}:config", mapping=mapping)
+        await self._r.hset(KEYS.device_config(hostname), mapping=mapping)
 
     async def delete_device(self, hostname: str) -> None:
         pipe = self._r.pipeline()
-        pipe.delete(f"device:{hostname}:config")
-        pipe.delete(f"device:{hostname}:manifest")
-        pipe.delete(f"device:{hostname}:tools_change")
+        pipe.delete(KEYS.device_config(hostname))
+        pipe.delete(KEYS.device_manifest(hostname))
+        pipe.delete(KEYS.device_tools_change(hostname))
         # Drop the tool-call stream and its dead-letter stream too, or they linger
         # in Redis after the device is gone and accumulate over churn (RC-4, SRE #4).
-        pipe.delete(f"device:{hostname}:calls")
-        pipe.delete(f"device:{hostname}:calls:dead")
-        pipe.srem(_DEVICES_SET, hostname)
+        pipe.delete(KEYS.device_calls(hostname))
+        pipe.delete(KEYS.device_calls_dead(hostname))
+        pipe.srem(KEYS.devices_set, hostname)
         await pipe.execute()
 
     async def list_hostnames(self) -> list[str]:
-        return list(await self._r.smembers(_DEVICES_SET))
+        return list(await self._r.smembers(KEYS.devices_set))
 
     async def get_manifest(self, hostname: str) -> dict | None:
-        raw = await self._r.get(f"device:{hostname}:manifest")
+        raw = await self._r.get(KEYS.device_manifest(hostname))
         if raw is None:
             return None
         try:
@@ -377,15 +374,15 @@ class RedisRegistryBackend(AbstractRegistryBackend):
             return None
 
     async def set_manifest(self, hostname: str, manifest: dict, ttl: int) -> None:
-        await self._r.set(f"device:{hostname}:manifest", json.dumps(manifest), ex=ttl)
+        await self._r.set(KEYS.device_manifest(hostname), json.dumps(manifest), ex=ttl)
 
     async def delete_manifest(self, hostname: str) -> None:
-        await self._r.delete(f"device:{hostname}:manifest")
+        await self._r.delete(KEYS.device_manifest(hostname))
 
     async def get_last_tool_change(self, hostname: str) -> dict | None:
         # Governance metadata — stored without a TTL (unlike the manifest) so the
         # "what last changed" answer outlives the spec cache; cleaned up on delete.
-        raw = await self._r.get(f"device:{hostname}:tools_change")
+        raw = await self._r.get(KEYS.device_tools_change(hostname))
         if raw is None:
             return None
         try:
@@ -394,17 +391,17 @@ class RedisRegistryBackend(AbstractRegistryBackend):
             return None
 
     async def set_last_tool_change(self, hostname: str, change: dict) -> None:
-        await self._r.set(f"device:{hostname}:tools_change", json.dumps(change))
+        await self._r.set(KEYS.device_tools_change(hostname), json.dumps(change))
 
     async def publish_assignment(self, action: str, hostname: str) -> None:
         if action == "unassign":
             # Broadcast: every worker tails this stream so the actual owner tears down
-            # its pod (non-owners no-op). See _UNASSIGN_STREAM rationale above.
+            # its pod (non-owners no-op). See KEYS.unassign_stream rationale above.
             await self._r.xadd(
-                _UNASSIGN_STREAM, {"hostname": hostname}, maxlen=_UNASSIGN_STREAM_MAXLEN, approximate=True
+                KEYS.unassign_stream, {"hostname": hostname}, maxlen=_UNASSIGN_STREAM_MAXLEN, approximate=True
             )
         else:
-            await self._r.xadd(_ASSIGNMENTS_STREAM, {"action": action, "hostname": hostname})
+            await self._r.xadd(KEYS.assignments_stream, {"action": action, "hostname": hostname})
         logger.debug(f"Published assignment: action={action} hostname={hostname}")
 
     async def publish_tool_call(
@@ -419,7 +416,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         subject: str = "",
     ) -> None:
         await self._r.xadd(
-            f"device:{hostname}:calls",
+            KEYS.device_calls(hostname),
             {
                 "request_id": request_id,
                 "session_id": session_id,
@@ -446,9 +443,9 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         Returns 0 when the stream/group doesn't exist yet (nothing queued) or on
         any Redis error, so a metrics hiccup never wrongly sheds live traffic.
         """
-        group = f"workers-{hostname}"
+        group = KEYS.device_calls_group(hostname)
         try:
-            groups = await self._r.xinfo_groups(f"device:{hostname}:calls")
+            groups = await self._r.xinfo_groups(KEYS.device_calls(hostname))
         except Exception:
             return 0
         for g in groups:
@@ -477,7 +474,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         return out
 
     async def dead_letter_list(self, hostname: str, count: int = 50) -> list[dict]:
-        key = f"device:{hostname}:calls:dead"
+        key = KEYS.device_calls_dead(hostname)
         try:
             entries = await self._r.xrevrange(key, count=count)  # newest first
         except Exception:
@@ -513,8 +510,8 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         any still-live session correlate; the DLQ-only ``reason``/``ts`` are dropped.
         A result for an expired session is best-effort — the call still re-executes.
         """
-        dead_key = f"device:{hostname}:calls:dead"
-        calls_key = f"device:{hostname}:calls"
+        dead_key = KEYS.device_calls_dead(hostname)
+        calls_key = KEYS.device_calls(hostname)
         try:
             if ids:
                 entries = []
@@ -541,7 +538,7 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         return replayed
 
     async def dead_letter_purge(self, hostname: str, ids: list[str] | None = None) -> int:
-        key = f"device:{hostname}:calls:dead"
+        key = KEYS.device_calls_dead(hostname)
         try:
             if ids:
                 return int(await self._r.xdel(key, *ids))
