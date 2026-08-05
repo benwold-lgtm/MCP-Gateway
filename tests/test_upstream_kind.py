@@ -234,16 +234,61 @@ def test_the_inbound_transport_is_still_restricted_to_sse(client):
     assert "Transport" in resp.json()["detail"]
 
 
-def test_registering_an_mcp_upstream_is_accepted_as_a_value_but_not_yet_served(client):
-    """Phase 2 fixes the entity model; Phase 3 makes it work. Until the proxy pod exists the
-    gateway must refuse rather than accept an MCP upstream and quietly treat it as OpenAPI —
-    a device that registers successfully and then never serves a tool is the worse failure.
+def test_an_mcp_upstream_registers_and_persists_its_kind(client, mock_target_url):
+    """Phase 3 replaced Phase 2's 501 gate with a working proxy pod. The upstream here does
+    not speak MCP, so it will not become reachable — registration still succeeds and stores
+    the kind, which is the F-11 async-registration contract for any unreachable device."""
+    resp = _register(client, "uk-mcp-live", upstream_kind="mcp", base_url=mock_target_url)
+    try:
+        assert resp.status_code == 200
+        device = resp.json()["device"]
+        assert device["upstream_kind"] == "mcp"
+        assert device["upstream_transport"] == "http"
+        assert device["transport"] == "sse", "the inbound transport is unchanged by proxying"
+        assert client.get("/v1/devices/uk-mcp-live").json()["upstream_kind"] == "mcp"
+    finally:
+        client.delete("/v1/devices/uk-mcp-live")
 
-    This test flips in Phase 3, which is deliberate: it is the reminder to remove the gate.
+
+def test_an_mcp_upstream_is_refused_in_distributed_mode_until_the_worker_supports_it(tmp_path):
+    """The worker's pod spawner still builds a DevicePod unconditionally. Accepting an MCP
+    upstream in distributed mode would assign it to a worker and serve it with the OpenAPI
+    pod — it would register cleanly, then never serve a tool. Refusing is the honest failure
+    until the worker learns the discriminator.
+
+    Flips in Phase 4, deliberately: it is the reminder to remove this gate too.
     """
-    resp = _register(client, "uk-mcp-live", upstream_kind="mcp")
+    from cryptography.fernet import Fernet
+    from fastapi.testclient import TestClient
+
+    from device_mcp_gateway.main import create_app
+
+    app = create_app(
+        override_config={
+            "registry": {"mode": "distributed"},
+            "storage": {"db_path": str(tmp_path / "d.db")},
+            "metrics": {"enabled": False},
+            "redis": {"allow_insecure": True},
+            # Distributed mode refuses to start without a credential-encryption key or
+            # any configured API key — both are startup gates in their own right here.
+            "gateway": {
+                "allow_weak_keys": True,
+                "allow_anonymous": True,
+                "secret_key": Fernet.generate_key().decode(),
+            },
+        }
+    )
+    resp = TestClient(app).post(
+        "/v1/devices",
+        json={
+            "hostname": "uk-dist-mcp",
+            "base_url": "http://192.0.2.99/mcp",
+            "auth_type": "none",
+            "upstream_kind": "mcp",
+        },
+    )
     assert resp.status_code == 501
-    assert "not yet" in resp.json()["detail"].lower()
+    assert "distributed" in resp.json()["detail"]
 
 
 def test_an_ordinary_registration_is_unaffected_and_reports_openapi(client):

@@ -66,7 +66,9 @@ _UPSTREAM_KINDS = ("openapi", "mcp")
 _UPSTREAM_TRANSPORTS = ("http", "sse")
 
 
-def _validate_upstream(kind: str, upstream_transport: str, spec_url: str | None, declared: set[str]) -> None:
+def _validate_upstream(
+    kind: str, upstream_transport: str, spec_url: str | None, declared: set[str], mode: str = "embedded"
+) -> None:
     """Validate the upstream discriminators (ADR-0009).
 
     ``declared`` is the set of upstream keys the caller actually sent, so a value that was
@@ -106,14 +108,17 @@ def _validate_upstream(kind: str, upstream_transport: str, spec_url: str | None,
             status_code=400,
             detail="upstream_transport 'sse' is not yet supported; use 'http' (Streamable HTTP)",
         )
-    if kind == "mcp":
-        # Phase 2 fixes the entity model; the proxy pod arrives in Phase 3. Refusing here is
-        # the honest failure: accepting the registration would store a device that the
-        # gateway then treats as OpenAPI, so it would provision, fail discovery, and look
-        # like a broken upstream rather than an unbuilt feature.
+    if kind == "mcp" and mode == "distributed":
+        # The worker's pod spawner still builds a DevicePod unconditionally, so a proxied
+        # upstream registered here would be assigned to a worker and served by the OpenAPI
+        # pod — a device that registers cleanly and never serves a tool. Refuse until the
+        # worker learns the discriminator (Phase 4).
         raise HTTPException(
             status_code=501,
-            detail="upstream_kind 'mcp' is not yet served by this gateway; MCP passthrough is not yet available",
+            detail=(
+                "upstream_kind 'mcp' is not yet supported in distributed mode; "
+                "MCP passthrough currently runs in embedded mode only"
+            ),
         )
 
 
@@ -238,21 +243,24 @@ async def register_device(request: Request):
 
     if not hostname or not base_url:
         raise HTTPException(status_code=400, detail="hostname and base_url required")
+    # All body validation happens before the existence check, so a malformed or
+    # unsupported request is rejected without a registry round-trip.
     _validate_hostname(hostname)
     _check_target_url(base_url, "base_url", allow_private, allowed_ports)
-
-    existing = await reg.get_device(hostname)
-    if existing:
-        raise HTTPException(status_code=409, detail=f"Device '{hostname}' already registered; use PUT to update")
-
-    auth = _parse_auth(data, cfg, allow_private, allowed_ports)
     transport = data.get("transport") or cfg.get("transport", {}).get("default", "sse")
     _validate_transport(transport)
     spec_url = data.get("spec_url")
     _check_target_url(spec_url, "spec_url", allow_private, allowed_ports)
     rate_limit_rps = _parse_rate_limit(data)
     upstream_kind, upstream_transport = _read_upstream(data)
-    _validate_upstream(upstream_kind, upstream_transport, spec_url, declared=set(data.keys()))
+    _validate_upstream(
+        upstream_kind, upstream_transport, spec_url, declared=set(data.keys()), mode=request.app.state.mode
+    )
+    auth = _parse_auth(data, cfg, allow_private, allowed_ports)
+
+    existing = await reg.get_device(hostname)
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Device '{hostname}' already registered; use PUT to update")
 
     device_cfg = await reg.register_device(
         hostname=hostname,
@@ -311,7 +319,9 @@ async def update_device(hostname: str, request: Request):
     _validate_transport(transport)
     rate_limit_rps = _parse_rate_limit(data)
     upstream_kind, upstream_transport = _read_upstream(data, existing.upstream_kind, existing.upstream_transport)
-    _validate_upstream(upstream_kind, upstream_transport, spec_url, declared=set(data.keys()))
+    _validate_upstream(
+        upstream_kind, upstream_transport, spec_url, declared=set(data.keys()), mode=request.app.state.mode
+    )
 
     device_cfg = await reg.replace_device(
         hostname=hostname,

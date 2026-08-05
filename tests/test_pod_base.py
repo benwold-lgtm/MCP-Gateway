@@ -215,14 +215,10 @@ def test_egress_posture_is_configured_on_auth_by_the_base():
 # --- Phase 3 forcing function -------------------------------------------------
 
 
-@pytest.mark.xfail(reason="McpProxyPod arrives in Phase 3 of the MCP-passthrough plan", strict=True)
 def test_device_pod_and_proxy_pod_expose_the_same_protocol_surface():
     """Every caller — PodSupervisor, the worker's dispatch loop, the diagnostics endpoint —
-    holds a pod through this surface alone. If the proxy pod is missing any of it, those
+    holds a pod through this surface alone. If either pod kind is missing any of it, those
     call sites need per-kind branches, which is exactly what the base class exists to avoid.
-
-    ``strict=True``: when Phase 3 lands this test starts passing, and pytest fails the run
-    until the marker is removed. That is the point — an xfail nobody revisits is a lie.
     """
     from device_mcp_gateway.pods.mcp_proxy_pod import McpProxyPod  # noqa: F401
 
