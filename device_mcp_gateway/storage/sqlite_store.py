@@ -17,15 +17,29 @@ from device_mcp_gateway.shared.crypto import CredentialCodec
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS devices (
-    hostname       TEXT PRIMARY KEY,
-    base_url       TEXT NOT NULL,
-    spec_url       TEXT,
-    transport      TEXT NOT NULL DEFAULT 'sse',
-    auth_type      TEXT,
-    auth_config    TEXT,
-    rate_limit_rps REAL
+    hostname           TEXT PRIMARY KEY,
+    base_url           TEXT NOT NULL,
+    spec_url           TEXT,
+    transport          TEXT NOT NULL DEFAULT 'sse',
+    auth_type          TEXT,
+    auth_config        TEXT,
+    rate_limit_rps     REAL,
+    upstream_kind      TEXT NOT NULL DEFAULT 'openapi',
+    upstream_transport TEXT NOT NULL DEFAULT 'http'
 )
 """
+
+# Columns added after the first release. ``CREATE TABLE IF NOT EXISTS`` is a no-op against a
+# database that already exists, so extending the DDL above does nothing for one already on
+# disk — and the next INSERT naming a new column fails with "no such column". Every addition
+# needs a matching ALTER here or an upgraded deployment comes back up unable to register.
+# ADD COLUMN with a DEFAULT backfills existing rows, which is what makes this safe to
+# re-run: the second attempt raises "duplicate column name" and is swallowed.
+_MIGRATIONS = (
+    "ALTER TABLE devices ADD COLUMN rate_limit_rps REAL",
+    "ALTER TABLE devices ADD COLUMN upstream_kind TEXT NOT NULL DEFAULT 'openapi'",
+    "ALTER TABLE devices ADD COLUMN upstream_transport TEXT NOT NULL DEFAULT 'http'",
+)
 
 
 class SqliteDeviceStore(AbstractDeviceStore):
@@ -50,10 +64,11 @@ class SqliteDeviceStore(AbstractDeviceStore):
 
         with sqlite3.connect(db_path) as conn:
             conn.execute(_CREATE_TABLE)
-            try:
-                conn.execute("ALTER TABLE devices ADD COLUMN rate_limit_rps REAL")
-            except Exception:
-                pass  # column already exists
+            for stmt in _MIGRATIONS:
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    pass  # column already exists
 
     def _encrypt(self, plaintext: str) -> str:
         return self._codec.encrypt(plaintext)
@@ -64,11 +79,11 @@ class SqliteDeviceStore(AbstractDeviceStore):
     async def initialize(self) -> None:
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(_CREATE_TABLE)
-            # Migration: add rate_limit_rps column for databases created before this version.
-            try:
-                await db.execute("ALTER TABLE devices ADD COLUMN rate_limit_rps REAL")
-            except Exception:
-                pass  # column already exists
+            for stmt in _MIGRATIONS:
+                try:
+                    await db.execute(stmt)
+                except Exception:
+                    pass  # column already exists
             await db.commit()
         logger.info(f"SQLite device store initialised at {self._db_path}")
 
@@ -78,8 +93,9 @@ class SqliteDeviceStore(AbstractDeviceStore):
             await db.execute(
                 """
                 INSERT OR REPLACE INTO devices
-                    (hostname, base_url, spec_url, transport, auth_type, auth_config, rate_limit_rps)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (hostname, base_url, spec_url, transport, auth_type, auth_config,
+                     rate_limit_rps, upstream_kind, upstream_transport)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     hostname,
@@ -89,6 +105,8 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     record.get("auth_type"),
                     self._encrypt(json.dumps(auth_config)) if auth_config else None,
                     record.get("rate_limit_rps"),
+                    record.get("upstream_kind") or "openapi",
+                    record.get("upstream_transport") or "http",
                 ),
             )
             await db.commit()
@@ -138,7 +156,8 @@ class SqliteDeviceStore(AbstractDeviceStore):
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT hostname, base_url, spec_url, transport, auth_type, auth_config, rate_limit_rps FROM devices"
+                "SELECT hostname, base_url, spec_url, transport, auth_type, auth_config, "
+                "rate_limit_rps, upstream_kind, upstream_transport FROM devices"
             ) as cursor:
                 rows = await cursor.fetchall()
         result = []
@@ -161,6 +180,10 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     "auth_type": row["auth_type"],
                     "auth_config": auth_config,
                     "rate_limit_rps": row["rate_limit_rps"],
+                    # A row backfilled by the ALTER carries the DEFAULT, but a row written
+                    # by an older binary through a migrated table can still hold NULL.
+                    "upstream_kind": row["upstream_kind"] or "openapi",
+                    "upstream_transport": row["upstream_transport"] or "http",
                 }
             )
         return result

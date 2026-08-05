@@ -47,6 +47,7 @@ def test_summary_from_config_projects_lean_fields():
         "pod_active": True,
         "last_check": 1234.5,
         "rate_limit_rps": 5.0,
+        "upstream_kind": "openapi",
     }
     # The lean summary must NOT leak detail-only fields.
     assert "spawn_error" not in s.model_dump()
