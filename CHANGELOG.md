@@ -10,6 +10,92 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+Resolution of an independent third-party review (12 findings, all closed). Two of these are
+**security fixes that change request handling**, and two add **startup gates that a
+misconfigured deployment will now hit** — read those notes before upgrading.
+
+### Security
+
+- **`X-Forwarded-For` was attacker-controlled, so any client could choose its own rate-limit
+  bucket.** The rate limiter keyed on the *left-most* XFF entry when `trust_proxy_headers`
+  was on. nginx, traefik and the k8s ingresses **append** to that header rather than replace
+  it, so a caller who sent their own `X-Forwarded-For` owned the left-most value — and could
+  reset their counter simply by rotating it, defeating per-IP limits entirely and poisoning
+  IP-based audit attribution. The client is now resolved by walking the header
+  **right-to-left** from the TCP peer, popping hops while each falls inside the new
+  `security.trusted_proxy_cidrs`; the first hop outside them is the client. A caller who
+  skips the proxy is stopped at the first step, because their own peer address isn't trusted,
+  and their header is never read. **Breaking:** enabling `gateway.trust_proxy_headers`
+  without `security.trusted_proxy_cidrs` is now refused at startup — trusting the header
+  without knowing which hops are yours is what created the hole.
+- **DNS-rebinding race in the SSRF guard.** `validate_target_url` resolved the host, then
+  httpx resolved it *again* when connecting — two lookups, so a 0-TTL alternating record
+  could pass validation and connect to the blocked address. Validating more often does not
+  close that window; the checked address has to *be* the dialled one. The validated address
+  is now pinned through to connect, with `Host`/`sni_hostname` carrying the original name so
+  virtual hosting and TLS certificate verification are unaffected.
+- **Outbound port policy.** `http://host:22/` was accepted, so the guard could be aimed at a
+  non-HTTP service to port-scan or smuggle a payload into another protocol. Ports carrying a
+  non-HTTP protocol (22, 25, 3306, 6379, 27017, …) are now refused by default, plus
+  2375/2376 — which *are* HTTP but expose the Docker daemon as a direct RCE pivot. Ordinary
+  HTTP ports including non-standard ones (8000, 8080, 8443) are unaffected;
+  `security.allowed_target_ports` switches to a strict allowlist for a tighter posture.
+- **Weak static API keys are refused in production.** `MCP_ADMIN_KEY=admin` was accepted
+  silently. A static key is a full bearer credential — and with OIDC enabled it is also the
+  break-glass path that still works when the IdP is down. Keys under 16 characters or
+  matching a common-value list now warn in every mode and **refuse to start in distributed
+  mode** (`gateway.allow_weak_keys` overrides). The floor sits below anything this project
+  generates or documents, so a real deployment is unaffected.
+- **OAuth2 refresh tokens rotated at runtime were never persisted**, so a provider that
+  rotates on use eventually locked the device out.
+
+### Added
+
+- **`mcp_oidc_validation_failures_total{reason}`.** OIDC validation failures fell through to
+  static keys at `debug` log level, so an IdP or JWKS outage silently degraded the whole
+  deployment to break-glass-keys-only with no operator signal, and forged-JWT probing
+  produced nothing at all. Failures are now counted and warned about (rate-limited to one per
+  minute, carrying the suppressed count). `reason` is a fixed six-value set rather than the
+  error text, because the raw error embeds attacker-controlled JWT contents and would be an
+  unbounded-cardinality vector.
+- **[docs/testing-gaps.md](docs/testing-gaps.md)** — what is implemented and reasoned about
+  but **not empirically validated**, and why: chaos/fault injection (F-63), the scale
+  baseline, HA Redis failover, live-cluster verification, and arm64 runtime verification.
+
+### Changed
+
+- **Redis client now survives a failover.** `create_redis` passed only `socket_timeout` and
+  `max_connections` — no retry, health check or connect timeout — so a primary failover
+  reached callers as a burst of hard `ConnectionError`s and pointing the gateway at an HA
+  Redis bought almost nothing. Now configured with jittered exponential-backoff retries,
+  `retry_on_error`, `health_check_interval` and `socket_connect_timeout`. The jitter is
+  deliberate: a failover hits every replica and worker at once, so an un-jittered curve has
+  them retry in lockstep against the newly promoted primary. The budget (~2.5s by default) is
+  sized to absorb the reconnect burst and a *short* election, **not** to block through a long
+  Sentinel promotion — stalling a request for tens of seconds is worse than failing it.
+  See [testing-gaps.md](docs/testing-gaps.md) (TG-3) for what remains unverified.
+- **Kubernetes manifests are digest-pinned to a published image.** They referenced
+  `device-mcp-gateway:latest`, which has no registry component and so resolved to Docker Hub —
+  following the k8s docs produced `ImagePullBackOff`. Both deployments now pin by digest to
+  the multi-arch GHCR image, with `imagePullPolicy` explicit and identical on both (the
+  worker previously set none, defaulting to `Always` under `:latest` while the gateway used
+  `IfNotPresent`, so the two could run different builds of the same tag). `kustomization.yaml`
+  gains an `images:` block so retargeting is one edit rather than two.
+- **CI coverage floor ratcheted 65% → 81%** (measured actual is 83%), and the CI-gating dev
+  tools (`black`, `flake8`, `mypy`, `pytest`) are upper-bounded — `black --check` is a
+  blocking gate, so an unbounded spec let an upstream major turn an unrelated PR red.
+
+### Fixed
+
+- **Embedded `tools/call` was recorded as an error on every success**, inverting both
+  `mcp_tool_calls_total` and the audit outcome for the entire embedded-mode dispatch path.
+- **`mcp` was unbounded (`>=1.0.0`)**, so a clean install resolved to 2.0.0, which removed
+  `mcp.server.fastmcp` — CI had been red on every branch. Now bounded, with a test asserting
+  critical dependencies reject the next major.
+- **Documentation pointed at an image tag that does not exist** (`:0.1.2`, 404 on GHCR), and
+  `docs/upgrade.md` referenced a `device-mcp-worker` image that has never existed — the worker
+  runs the gateway image with a different command.
+
 ## [0.1.4] - 2026-07-06
 
 ### Fixed
@@ -255,7 +341,9 @@ This release is the output of a comprehensive security, reliability, and operabi
 
 - **Resilience is designed but not yet empirically demonstrated** (F-63): the
   chaos / fault-injection plan (experiments E1–E10) is written but requires a live platform
-  to execute. Analysis only so far.
+  to execute. Analysis only so far. This and every other unvalidated claim — the scale
+  baseline, HA Redis failover, live-cluster and arm64 verification — are tracked in
+  [docs/testing-gaps.md](docs/testing-gaps.md).
 - **Not FIPS-validated**: credential encryption uses Fernet (AES-128-CBC + HMAC), which is
   not a FIPS 140-validated module — a blocker for FedRAMP / FISMA-High as shipped. Mitigation:
   delegate credential secrecy to a FIPS-validated KMS (see [docs/compliance.md](docs/compliance.md)).
