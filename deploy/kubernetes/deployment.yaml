@@ -48,9 +48,20 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          # Pin to an immutable digest or semantic tag in production — never ship :latest.
-          # Example: ghcr.io/your-org/device-mcp-gateway:1.2.3
-          image: device-mcp-gateway:latest
+          # Immutable digest pin. The digest — not the tag — is what Kubernetes resolves,
+          # so every replica on every node runs byte-identical bits, and a re-pushed tag
+          # cannot silently change what is deployed. The :0.1.4 tag is kept alongside it
+          # purely as a human-readable label; the digest wins.
+          #
+          # To upgrade, change BOTH here and in worker-deployment.yaml (or override once
+          # via the `images:` block in kustomization.yaml). Read a digest with:
+          #   docker buildx imagetools inspect ghcr.io/benwold-lgtm/device-mcp-gateway:<tag>
+          #
+          # Using a MOVING tag instead (:latest, :lite) requires imagePullPolicy: Always —
+          # with IfNotPresent a node keeps running whatever it cached, indefinitely.
+          image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.1.4@sha256:a8a05f53cbccf090456b5834876a1498fa216351a81283e1917716941f457563
+          # Correct for a digest/immutable tag: the bits can't change under a fixed digest,
+          # so re-pulling would be pure overhead.
           imagePullPolicy: IfNotPresent
           # Container hardening. readOnlyRootFilesystem is safe because the
           # distributed-mode gateway writes only to /app/logs (mounted as an

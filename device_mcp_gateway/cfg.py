@@ -61,8 +61,11 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "url": str,
         "allow_insecure": bool,
         "socket_timeout": _NUM,
+        "socket_connect_timeout": _NUM,
         "max_connections": int,
         "pubsub_max_connections": int,
+        "retries": int,
+        "health_check_interval": _NUM,
     },
     "auth": {
         "type": str,

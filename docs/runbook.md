@@ -185,6 +185,29 @@ under `registry.spec_max_bytes` (F-09); credentials decrypt (no `MCP_SECRET_KEY`
 mismatch — see [secret-rotation.md](secret-rotation.md)); `spawn_error` in the device
 record names the failure.
 
+### "Redis failed over — what should I expect to see?"
+
+The client absorbs the reconnect burst rather than surfacing it: commands retry with
+**jittered** exponential backoff (`redis.retries`, default 5 — up to ~2.5s worst case), idle
+pooled connections are health-checked (`redis.health_check_interval`, 30s), and a vanished
+primary fails the TCP connect fast (`redis.socket_connect_timeout`, 5s) instead of hanging on
+the OS default. Expect a brief latency bump, not a burst of errors.
+
+Two limits worth knowing, so you don't misread what you see:
+
+- **It is not sized to block through a long election.** A Sentinel promotion can take tens
+  of seconds; the retry budget is ~2.5s by default, because stalling a request for 30s is
+  worse than failing it and letting the caller retry. Hard `ConnectionError`s during a
+  *long* failover are expected, not a bug. Raise `redis.retries` if you would rather wait.
+- **It does not hide a dead Redis.** The budget is finite, so readiness probes and
+  `MCPNoLiveWorkers` still fire on a genuine outage.
+
+Note a deliberate trade-off: a retried command can execute twice if the failure landed after
+the server ran it but before the reply arrived. That is safe here — the rate-limit `INCR`
+only over-counts (fails closed), and dispatch writes are covered by
+`registry.idempotency_guard` (on by default). If you turn that guard off, you are also opting
+out of this protection.
+
 ### "Registering a device returns 400 Rejected base_url / spec_url"
 
 The egress policy refused the target. The message says which rule:

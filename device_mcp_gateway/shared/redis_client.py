@@ -10,6 +10,17 @@ from urllib.parse import urlparse
 from loguru import logger
 
 import redis.asyncio as aioredis
+from redis.asyncio.retry import Retry
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
+try:
+    # Jitter matters more than the curve here: a failover hits every gateway replica and
+    # every worker at the same instant, so un-jittered backoff has them all retry in
+    # lockstep and hammer the newly promoted primary in synchronised waves.
+    from redis.backoff import ExponentialWithJitterBackoff as _Backoff
+except ImportError:  # pragma: no cover - older redis-py within our >=5.0 floor
+    from redis.backoff import ExponentialBackoff as _Backoff  # type: ignore[assignment]
 
 
 def redis_url(cfg: dict[str, Any]) -> str:
@@ -49,19 +60,56 @@ def assert_redis_secure(cfg: dict[str, Any]) -> None:
 async def create_redis(cfg: dict[str, Any], max_connections: int | None = None) -> aioredis.Redis:
     """Create and return a shared async Redis client from config.
 
-    Reads cfg["redis"] for url, socket_timeout, and max_connections.
+    Reads cfg["redis"] for url, socket_timeout, max_connections, and the failover
+    resilience knobs (retries, health_check_interval, socket_connect_timeout).
     The MCP_REDIS_URL env var overrides cfg["redis"]["url"].
 
     Pass max_connections to override the pool size — used for the dedicated
     pub/sub client, which needs one connection per open SSE stream and so must
     be sized well above the command pool.
+
+    **Failover resilience (review item 6).** This used to pass only ``socket_timeout``
+    and ``max_connections``, which meant a primary failover reached callers as a burst of
+    hard ``ConnectionError``s — pointing the gateway at a properly built HA Redis bought
+    almost nothing, because the client never reconnected transparently. Four settings fix
+    that, and they only work together:
+
+    - ``retry`` with jittered exponential backoff — absorbs the reconnect burst and a short
+      election instead of failing the first command that lands mid-failover. Jitter is the
+      important part: a failover hits every replica and worker simultaneously, so
+      un-jittered backoff would have them retry in lockstep against the new primary.
+    - ``retry_on_error`` — ``retry`` alone governs connection *setup*; this is what lets an
+      already-issued command be retried on the new primary.
+    - ``health_check_interval`` — a connection left half-open by a failover is otherwise
+      only discovered when a real command fails on it, so idle pooled connections would
+      each fail once after every failover.
+    - ``socket_connect_timeout`` — without it a vanished primary hangs on the OS default
+      TCP connect timeout, which is far longer than the failover itself.
+
+    Retrying a command can execute it twice when the failure happened after the server
+    ran it but before the reply arrived. That is deliberate and safe here: the rate-limit
+    ``INCR`` merely over-counts (fails closed), and dispatch writes are already covered by
+    the worker's idempotency guard (``registry.idempotency_guard``, on by default). A
+    permanent outage still surfaces — the retry budget is finite, so readiness probes and
+    alerting still see a genuinely dead Redis.
     """
     redis_cfg = cfg.get("redis", {})
     url = redis_url(cfg)
     pool_size = max_connections if max_connections is not None else redis_cfg.get("max_connections", 20)
+    retries = int(redis_cfg.get("retries", 5))
+    # base=50ms, cap=1s, jittered: 5 retries spend up to ~2.5s worst case. Sized to absorb
+    # the reconnect burst and a short election — NOT to block through a long Sentinel
+    # promotion, which can run tens of seconds; blocking a request that long is worse than
+    # failing it and letting the caller retry. Raise redis.retries if your election is
+    # slower and you would rather wait.
+    retry = Retry(_Backoff(base=0.05, cap=1.0), retries)
     return aioredis.from_url(
         url,
         socket_timeout=redis_cfg.get("socket_timeout", 5),
+        socket_connect_timeout=redis_cfg.get("socket_connect_timeout", 5),
         max_connections=pool_size,
         decode_responses=True,
+        retry=retry,
+        retry_on_error=[RedisConnectionError, RedisTimeoutError],
+        health_check_interval=redis_cfg.get("health_check_interval", 30),
     )
