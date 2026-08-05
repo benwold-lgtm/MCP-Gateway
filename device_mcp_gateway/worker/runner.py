@@ -54,6 +54,7 @@ from device_mcp_gateway.core.spec_limits import (
 )
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.pods.pod_base import BasePod
 from device_mcp_gateway.security.mtls import build_verify
 from device_mcp_gateway.shared.keys import KEYS
 from device_mcp_gateway.security.url_policy import (
@@ -121,7 +122,7 @@ class DeviceWorker:
         # the subscribing gateway replica is briefly not reading.
         self._session_router = SessionRouter(redis_client)
 
-        self._pods: dict[str, DevicePod] = {}
+        self._pods: dict[str, BasePod] = {}
         self._assigned: set[str] = set()
         self._call_tasks: dict[str, asyncio.Task] = {}
         self._stop_event = asyncio.Event()

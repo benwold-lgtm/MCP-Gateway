@@ -155,7 +155,7 @@ async def fleet_sse_message(request: Request, session_id: str = Query(...)):
         msg_id = payload.get("id") if isinstance(payload, dict) else None
 
         if method == "initialize":
-            from device_mcp_gateway.pods.device_pod import negotiate_protocol_version
+            from device_mcp_gateway.pods.pod_base import negotiate_protocol_version
 
             params = payload.get("params") or {}
             return {

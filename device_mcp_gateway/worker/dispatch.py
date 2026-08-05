@@ -31,7 +31,7 @@ from device_mcp_gateway.audit import audit_log
 from device_mcp_gateway.core.backoff import jittered
 from device_mcp_gateway.core.errors import RPC_DUPLICATE, RPC_INTERNAL_ERROR, RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.observability import tracing
-from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.pods.pod_base import BasePod
 from device_mcp_gateway.shared.keys import KEYS
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -200,7 +200,7 @@ class CallDispatcher:
     # Idempotency guard (F-08)
     # ------------------------------------------------------------------
 
-    async def guard_duplicate(self, hostname: str, request_id: str, pod: DevicePod, message: dict) -> str | None:
+    async def guard_duplicate(self, hostname: str, request_id: str, pod: BasePod, message: dict) -> str | None:
         """Decide whether a (possibly redelivered) call should be (re-)executed.
 
         Returns None to proceed, or a reason string to suppress execution:
@@ -235,7 +235,7 @@ class CallDispatcher:
         w = self._w
         return bool(await w._r.set(KEYS.exec_marker(request_id), w._id, nx=True, ex=w._idempotency_ttl))
 
-    def is_idempotent_call(self, pod: DevicePod, message: dict) -> bool:
+    def is_idempotent_call(self, pod: BasePod, message: dict) -> bool:
         """True if re-executing this call carries no extra side effect.
 
         Read-only MCP methods (tools/list, resources/read, ping, …) are inherently
