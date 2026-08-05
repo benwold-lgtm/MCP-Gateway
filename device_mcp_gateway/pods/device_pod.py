@@ -155,6 +155,7 @@ class DevicePod:
         retry_policy: RetryPolicy | None = None,
         tls_verify: "ssl.SSLContext | bool" = True,
         allow_private: bool = False,
+        allowed_ports: set[int] | None = None,
     ):
         self.hostname = hostname
         self.manifest = manifest
@@ -171,8 +172,9 @@ class DevicePod:
         # handler that makes its own outbound calls (OAuth2 token fetch) so it shares
         # the same policy as the dispatch client.
         self._allow_private = allow_private
+        self._allowed_ports = allowed_ports
         if self.auth is not None:
-            self.auth.configure_egress(allow_private=allow_private)
+            self.auth.configure_egress(allow_private=allow_private, allowed_ports=allowed_ports)
         # Bounded jittered retries for idempotent tool calls (F-05/F-44).
         self._retry_policy = retry_policy or RetryPolicy()
         # One reused HTTP client per pod (created lazily) instead of one per
@@ -218,12 +220,14 @@ class DevicePod:
             #    Authorization across origins, not custom headers).
             #  - the SsrfGuardTransport re-validates the target host on EVERY call, so a
             #    DNS-rebind of a registered device to an internal/metadata address is
-            #    caught at dispatch time, not only at registration (closes that residual;
-            #    costs one host resolution per call). The validate→connect window is the
-            #    documented residual that full IP-pinning would close.
+            #    caught at dispatch time, not only at registration (costs one host
+            #    resolution per call). The validated address is then pinned through to
+            #    connect, so httpx never re-resolves — closing the validate→connect window
+            #    that previously let a 0-TTL alternating record win the race.
             self._http = build_guarded_client(
                 verify=self._tls_verify,
                 allow_private=self._allow_private,
+                allowed_ports=self._allowed_ports,
                 follow_redirects=False,
                 timeout=self._request_timeout,
             )

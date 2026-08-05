@@ -81,6 +81,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
     "security": {
         "allow_private_targets": bool,
         "trusted_proxy_cidrs": list,
+        "allowed_target_ports": list,
         "mtls": {
             "client_cert": str,
             "client_key": str,

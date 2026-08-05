@@ -33,7 +33,12 @@ from device_mcp_gateway.schemas import (
     ToolChangeRecord,
     ToolsDiffResponse,
 )
-from device_mcp_gateway.security.url_policy import UrlPolicyError, resolve_allow_private, validate_target_url
+from device_mcp_gateway.security.url_policy import (
+    UrlPolicyError,
+    resolve_allow_private,
+    resolve_allowed_ports,
+    validate_target_url,
+)
 
 router = APIRouter()
 
@@ -70,19 +75,22 @@ def _parse_rate_limit(data: dict) -> float | None:
     return rps
 
 
-def _check_target_url(url: str | None, field: str, allow_private: bool) -> None:
+def _check_target_url(url: str | None, field: str, allow_private: bool, allowed_ports: set[int] | None = None) -> None:
     """SSRF policy for device target URLs (Tier-0 F-02). base_url/spec_url are fetched
     server-side, so reject internal/loopback/link-local targets unless explicitly allowed
-    (security.allow_private_targets, or the MCP_ALLOW_PRIVATE_TARGETS env override)."""
+    (security.allow_private_targets, or the MCP_ALLOW_PRIVATE_TARGETS env override), and
+    refuse non-HTTP service ports (security.allowed_target_ports)."""
     if not url:
         return
     try:
-        validate_target_url(url, allow_private=allow_private)
+        validate_target_url(url, allow_private=allow_private, allowed_ports=allowed_ports)
     except UrlPolicyError as exc:
         raise HTTPException(status_code=400, detail=f"Rejected {field}: {exc}")
 
 
-def _parse_auth(data: dict, cfg: dict, allow_private: bool) -> AbstractAuth | None:
+def _parse_auth(
+    data: dict, cfg: dict, allow_private: bool, allowed_ports: set[int] | None = None
+) -> AbstractAuth | None:
     auth_type = data.get("auth_type") or data.get("auth", {}).get("type") or cfg.get("auth", {}).get("type", "api_key")
     if auth_type == "api_key":
         auth_cfg = data.get("auth", {})
@@ -116,7 +124,7 @@ def _parse_auth(data: dict, cfg: dict, allow_private: bool) -> AbstractAuth | No
         # outbound device target too — run it through the same URL policy as base_url/
         # spec_url. Without this a devices:write caller could exfiltrate the secret to
         # an internal/metadata address (F-02/F-29).
-        _check_target_url(token_endpoint, "token_endpoint", allow_private)
+        _check_target_url(token_endpoint, "token_endpoint", allow_private, allowed_ports)
         # F-42: optional grant/style/audience and provider-specific knobs.
         try:
             return OAuth2Auth(
@@ -157,23 +165,24 @@ async def register_device(request: Request):
     reg: Registry = request.app.state.registry
     cfg = request.app.state.config
     allow_private = resolve_allow_private(cfg)
+    allowed_ports = resolve_allowed_ports(cfg)
     hostname = data.get("hostname")
     base_url = data.get("base_url")
 
     if not hostname or not base_url:
         raise HTTPException(status_code=400, detail="hostname and base_url required")
     _validate_hostname(hostname)
-    _check_target_url(base_url, "base_url", allow_private)
+    _check_target_url(base_url, "base_url", allow_private, allowed_ports)
 
     existing = await reg.get_device(hostname)
     if existing:
         raise HTTPException(status_code=409, detail=f"Device '{hostname}' already registered; use PUT to update")
 
-    auth = _parse_auth(data, cfg, allow_private)
+    auth = _parse_auth(data, cfg, allow_private, allowed_ports)
     transport = data.get("transport") or cfg.get("transport", {}).get("default", "sse")
     _validate_transport(transport)
     spec_url = data.get("spec_url")
-    _check_target_url(spec_url, "spec_url", allow_private)
+    _check_target_url(spec_url, "spec_url", allow_private, allowed_ports)
     rate_limit_rps = _parse_rate_limit(data)
 
     device_cfg = await reg.register_device(
@@ -204,6 +213,7 @@ async def update_device(hostname: str, request: Request):
     reg: Registry = request.app.state.registry
     cfg = request.app.state.config
     allow_private = resolve_allow_private(cfg)
+    allowed_ports = resolve_allowed_ports(cfg)
     existing = await reg.get_device(hostname)
     if not existing:
         raise HTTPException(status_code=404, detail=f"Device '{hostname}' not found")
@@ -212,14 +222,14 @@ async def update_device(hostname: str, request: Request):
     base_url = data.get("base_url") or existing.base_url
     spec_url = data.get("spec_url", existing.spec_url)
     # Re-validate target URLs on update (a PUT can change base_url/spec_url) — Tier-0 F-02.
-    _check_target_url(base_url, "base_url", allow_private)
-    _check_target_url(spec_url, "spec_url", allow_private)
+    _check_target_url(base_url, "base_url", allow_private, allowed_ports)
+    _check_target_url(spec_url, "spec_url", allow_private, allowed_ports)
 
     _AUTH_KEYS = {"auth_type", "auth", "api_key"}
     auth: AbstractAuth | None = None
     keep_auth = False
     if _AUTH_KEYS & data.keys():
-        auth = _parse_auth(data, cfg, allow_private)
+        auth = _parse_auth(data, cfg, allow_private, allowed_ports)
     else:
         # No auth field in the PUT body → preserve the stored credentials. We must
         # NOT reconstruct them here: in distributed mode existing.auth_config is

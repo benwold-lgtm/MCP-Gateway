@@ -80,6 +80,12 @@ curl -X POST http://localhost:8000/v1/devices \
 > private addresses, start with `MCP_ALLOW_PRIVATE_TARGETS=true` (or set
 > `security.allow_private_targets: true`). Leave it off when devices are reachable over
 > public DNS/addresses.
+>
+> Separately, target **ports** carrying a non-HTTP service (22 SSH, 25 SMTP, 3306, 6379,
+> 27017, … plus 2375/2376 Docker) are refused regardless of that setting — the gateway only
+> ever speaks HTTP to a device, so those can only be a port scan or protocol smuggling.
+> Ordinary HTTP ports including non-standard ones (8000, 8080, 8443) work by default; see
+> [`security.allowed_target_ports`](config.yaml) to switch to a strict allowlist instead.
 
 ## Quick Start (distributed mode)
 

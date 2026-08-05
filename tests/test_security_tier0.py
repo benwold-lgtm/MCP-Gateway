@@ -493,3 +493,229 @@ def test_device_pod_propagates_egress_policy_to_oauth2_auth():
         hostname="dev", manifest=manifest, transport="sse", base_url="http://dev.local", auth=auth, allow_private=True
     )
     assert auth._allow_private is True
+
+
+# --- R6 / item 5: DNS-rebinding TOCTOU — pin the validated address ------------
+#
+# validate_target_url did its own getaddrinfo; httpx then resolved INDEPENDENTLY when it
+# connected. Two resolutions = a race window: a 0-TTL alternating record passes validation
+# on the first lookup and connects to the blocked address on the second. Re-validating more
+# often does not close it — the address that was checked must be the address dialled.
+
+
+def _alternating_resolver(monkeypatch, *ips):
+    """Patch getaddrinfo to hand out a different address on each successive lookup."""
+    import socket as _socket
+
+    seq = iter(ips)
+    last = [ips[-1]]
+
+    def _fake(host, *args, **kwargs):
+        try:
+            ip = next(seq)
+        except StopIteration:
+            ip = last[0]
+        return [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", _fake)
+
+
+class _Recorder:
+    """An inner transport that records exactly what it was asked to connect to."""
+
+    def __init__(self, status=200):
+        self.seen = None
+        self._status = status
+
+    async def handle_async_request(self, request):
+        import httpx
+
+        self.seen = request
+        return httpx.Response(self._status)
+
+    async def aclose(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_dns_rebind_race_connects_to_the_validated_address(monkeypatch):
+    """THE race. Validation resolves to a public IP; the very next lookup returns cloud
+    metadata. The connection must go to the address that was actually checked."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    _alternating_resolver(monkeypatch, "93.184.216.34", "169.254.169.254")
+    rec = _Recorder()
+    guard = SsrfGuardTransport(rec, allow_private=False)
+
+    await guard.handle_async_request(httpx.Request("GET", "https://rebind.test/x"))
+
+    # Pinned to the validated address — no hostname left for httpx to re-resolve.
+    assert rec.seen.url.host == "93.184.216.34"
+
+
+@pytest.mark.asyncio
+async def test_pinning_preserves_host_header_and_sni(monkeypatch):
+    """Pinning must not break virtual hosting or TLS: the origin still has to see the
+    real Host, and the certificate must still be verified against the real hostname."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    _alternating_resolver(monkeypatch, "93.184.216.34")
+    rec = _Recorder()
+    guard = SsrfGuardTransport(rec, allow_private=False)
+
+    await guard.handle_async_request(httpx.Request("GET", "https://rebind.test:8443/x"))
+
+    assert rec.seen.url.host == "93.184.216.34"
+    assert rec.seen.url.port == 8443  # port survives the rewrite
+    assert rec.seen.headers.get("Host") == "rebind.test:8443"
+    # httpcore uses sni_hostname for BOTH the TLS SNI and the cert hostname check, so
+    # without this a pinned request would fail verification against the IP.
+    assert rec.seen.extensions.get("sni_hostname") == "rebind.test"
+
+
+@pytest.mark.asyncio
+async def test_rebind_to_internal_is_blocked_at_validation(monkeypatch):
+    """A host that resolves internally on the FIRST lookup is still refused outright."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    _alternating_resolver(monkeypatch, "169.254.169.254", "93.184.216.34")
+    guard = SsrfGuardTransport(_Recorder(), allow_private=False)
+
+    with pytest.raises(UrlPolicyError):
+        await guard.handle_async_request(httpx.Request("GET", "https://rebind.test/x"))
+
+
+@pytest.mark.asyncio
+async def test_ip_literal_target_is_not_rewritten(monkeypatch):
+    """No DNS, no race — an IP literal must pass through untouched (and keep its Host)."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    rec = _Recorder()
+    guard = SsrfGuardTransport(rec, allow_private=False)
+    await guard.handle_async_request(httpx.Request("GET", "http://93.184.216.34/x"))
+
+    assert rec.seen.url.host == "93.184.216.34"
+    assert rec.seen.headers.get("Host") == "93.184.216.34"
+
+
+@pytest.mark.asyncio
+async def test_allow_private_skips_pinning(monkeypatch):
+    """A trusted internal fleet has opted into internal targets, so there is nothing for a
+    rebind to escalate to — leave resolution to httpx rather than pinning a private IP."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    rec = _Recorder()
+    guard = SsrfGuardTransport(rec, allow_private=True)
+    await guard.handle_async_request(httpx.Request("GET", "http://device.lan/x"))
+
+    assert rec.seen.url.host == "device.lan"  # untouched
+
+
+@pytest.mark.asyncio
+async def test_pinned_request_keeps_method_body_and_headers(monkeypatch):
+    """The rewrite must carry the whole request, not just the URL."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    _alternating_resolver(monkeypatch, "93.184.216.34")
+    rec = _Recorder()
+    guard = SsrfGuardTransport(rec, allow_private=False)
+
+    req = httpx.Request("POST", "https://rebind.test/api", headers={"X-Custom": "keep-me"}, content=b'{"a":1}')
+    await guard.handle_async_request(req)
+
+    assert rec.seen.method == "POST"
+    assert rec.seen.headers.get("X-Custom") == "keep-me"
+    assert bytes(rec.seen.read()) == b'{"a":1}'
+
+
+# --- R6 / item 9: outbound port policy ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com:22/",  # SSH — the review's example
+        "http://example.com:25/",  # SMTP
+        "http://example.com:6379/",  # Redis
+        "http://example.com:3306/",  # MySQL
+        "http://example.com:11211/",  # memcached
+        "http://example.com:2375/",  # Docker daemon (HTTP, but a direct RCE pivot)
+    ],
+)
+def test_non_http_service_ports_are_blocked_by_default(url):
+    with pytest.raises(UrlPolicyError, match="port"):
+        validate_target_url(url, allow_private=False)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com/",  # 80 implied
+        "https://example.com/",  # 443 implied
+        "http://example.com:8080/",  # the fleet's real ports must keep working
+        "http://example.com:8000/",
+        "https://example.com:8443/",
+    ],
+)
+def test_http_ports_including_nonstandard_are_allowed_by_default(url):
+    validate_target_url(url, allow_private=False)  # must not raise
+
+
+def test_explicit_allowlist_overrides_the_denylist():
+    # An operator who sets the knob gets a strict allowlist, not denylist+allowlist.
+    validate_target_url("http://example.com:9000/", allow_private=False, allowed_ports={9000})
+    with pytest.raises(UrlPolicyError, match="port"):
+        validate_target_url("http://example.com:8080/", allow_private=False, allowed_ports={9000})
+    # ...and the allowlist can deliberately re-open a denylisted port.
+    validate_target_url("http://example.com:22/", allow_private=False, allowed_ports={22})
+
+
+def test_port_policy_applies_to_private_targets_too():
+    """allow_private opens internal ADDRESSES, not internal SSH."""
+    with pytest.raises(UrlPolicyError, match="port"):
+        validate_target_url("http://10.0.0.5:22/", allow_private=True)
+
+
+def test_out_of_range_port_is_rejected():
+    with pytest.raises(UrlPolicyError):
+        validate_target_url("http://example.com:99999/", allow_private=False)
+
+
+def test_resolve_allowed_ports_reads_config():
+    from device_mcp_gateway.security.url_policy import resolve_allowed_ports
+
+    assert resolve_allowed_ports({}) is None  # unset => denylist default
+    assert resolve_allowed_ports({"security": {"allowed_target_ports": []}}) is None
+    assert resolve_allowed_ports({"security": {"allowed_target_ports": [80, 443, 8080]}}) == {80, 443, 8080}
+
+
+@pytest.mark.asyncio
+async def test_port_policy_is_enforced_on_every_hop(monkeypatch):
+    """A redirect to a denylisted port must be refused at the hop, like any other target."""
+    import httpx
+
+    from device_mcp_gateway.security.url_policy import SsrfGuardTransport
+
+    public_ip = "93.184.216.34"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.port in (None, 80):
+            return httpx.Response(302, headers={"location": f"http://{public_ip}:22/"})
+        return httpx.Response(200, text="REACHED SSH")
+
+    guard = SsrfGuardTransport(httpx.MockTransport(handler), allow_private=False)
+    async with httpx.AsyncClient(transport=guard, follow_redirects=True) as client:
+        with pytest.raises(UrlPolicyError):
+            await client.get(f"http://{public_ip}/")

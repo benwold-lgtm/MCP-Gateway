@@ -77,6 +77,7 @@ class OIDCConfig:
     jwks_min_refresh_interval: int = 30  # rate-limit on kid-miss refetch, seconds
     http_timeout: float = 5.0
     allow_private_targets: bool = False
+    allowed_target_ports: set[int] | None = None
 
     def __post_init__(self) -> None:
         if not self.issuer:
@@ -101,7 +102,7 @@ class OIDCConfig:
 
     def _check_url(self, url: str, field_name: str) -> None:
         try:
-            validate_target_url(url, allow_private=self.allow_private_targets)
+            validate_target_url(url, allow_private=self.allow_private_targets, allowed_ports=self.allowed_target_ports)
         except UrlPolicyError as exc:
             raise ValueError(
                 f"{field_name} rejected by egress policy: {exc}. For an on-prem IdP on a "
@@ -172,9 +173,12 @@ class JWKSCache:
         # behaviour (an IdP redirect is not chased to another origin), and the guard
         # re-validates the host on the request hop. validate_target_url stays as the
         # explicit pre-flight check on the resolved/discovered URI.
-        validate_target_url(uri, allow_private=self._cfg.allow_private_targets)
+        validate_target_url(
+            uri, allow_private=self._cfg.allow_private_targets, allowed_ports=self._cfg.allowed_target_ports
+        )
         async with build_guarded_client(
             allow_private=self._cfg.allow_private_targets,
+            allowed_ports=self._cfg.allowed_target_ports,
             follow_redirects=False,
             timeout=self._cfg.http_timeout,
         ) as client:
@@ -188,9 +192,12 @@ class JWKSCache:
             return self._discovered_jwks_uri
         # OIDC discovery: <issuer>/.well-known/openid-configuration → jwks_uri.
         disco = self._cfg.issuer.rstrip("/") + "/.well-known/openid-configuration"
-        validate_target_url(disco, allow_private=self._cfg.allow_private_targets)
+        validate_target_url(
+            disco, allow_private=self._cfg.allow_private_targets, allowed_ports=self._cfg.allowed_target_ports
+        )
         async with build_guarded_client(
             allow_private=self._cfg.allow_private_targets,
+            allowed_ports=self._cfg.allowed_target_ports,
             follow_redirects=False,
             timeout=self._cfg.http_timeout,
         ) as client:
@@ -286,7 +293,7 @@ def build_oidc_validator(cfg: dict) -> Optional[OIDCValidator]:
     ``api_key`` / ``rbac``). Resolution failures raise ``ValueError`` so a misconfigured
     IdP fails fast at startup rather than on the first login.
     """
-    from device_mcp_gateway.security.url_policy import resolve_allow_private
+    from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
 
     oidc_cfg = (cfg.get("gateway", {}) or {}).get("oidc", {}) or {}
     if not oidc_cfg.get("enabled", False):
@@ -306,6 +313,7 @@ def build_oidc_validator(cfg: dict) -> Optional[OIDCValidator]:
         jwks_min_refresh_interval=int(oidc_cfg.get("jwks_min_refresh_interval", 30)),
         http_timeout=float(oidc_cfg.get("http_timeout", 5.0)),
         allow_private_targets=resolve_allow_private(cfg),
+        allowed_target_ports=resolve_allowed_ports(cfg),
     )
     logger.info(
         f"OIDC inbound auth enabled: issuer={config.issuer} audience={config.audience} "

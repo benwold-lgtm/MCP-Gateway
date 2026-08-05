@@ -68,6 +68,7 @@ class WorkerHealthLoop:
         spec_translate_timeout: float = DEFAULT_TRANSLATE_TIMEOUT,
         tls_verify: ssl.SSLContext | bool = True,
         allow_private: bool = False,
+        allowed_ports: set[int] | None = None,
     ) -> None:
         self._worker_id = worker_id
         self._backend = backend
@@ -93,6 +94,7 @@ class WorkerHealthLoop:
         # assigned devices share one config today, so one client is sufficient.
         self._tls_verify = tls_verify
         self._allow_private = allow_private
+        self._allowed_ports = allowed_ports
         # Per-device timestamp of the last spec poll. Tracked separately from
         # cfg.last_check (which updates every health cycle) so the much longer
         # spec_poll_interval is honoured instead of always short-circuiting.
@@ -104,7 +106,9 @@ class WorkerHealthLoop:
         if self._http is None or self._http.is_closed:
             # SSRF-guarded: the worker re-checks every reachability/spec hop against the
             # URL policy (incl. redirects), so it can't be steered to an internal address.
-            self._http = build_guarded_client(verify=self._tls_verify, allow_private=self._allow_private)
+            self._http = build_guarded_client(
+                verify=self._tls_verify, allow_private=self._allow_private, allowed_ports=self._allowed_ports
+            )
         return self._http
 
     async def run_forever(self, assigned: set[str]) -> None:
