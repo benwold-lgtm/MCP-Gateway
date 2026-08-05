@@ -24,6 +24,7 @@ from typing import Protocol, Sequence
 
 from fastapi import HTTPException, Request
 from loguru import logger
+from device_mcp_gateway.shared.keys import KEYS
 
 _PERIODS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
 
@@ -187,7 +188,7 @@ class RedisRateLimiter:
         self._r = redis_client
 
     async def hit(self, key: str, limit: int, window: int) -> tuple[bool, int]:
-        rkey = f"rl:{key}"
+        rkey = KEYS.ratelimit(key)
         # INCR + EXPIRE in one MULTI/EXEC so they execute as an atomic server-side unit.
         # The previous code set EXPIRE only on the first hit (count == 1) as a separate
         # call, so a crash or a failed EXPIRE between the two left a TTL-less key that

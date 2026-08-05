@@ -18,6 +18,7 @@ from loguru import logger
 
 from device_mcp_gateway import metrics
 from device_mcp_gateway.core.errors import RPC_NO_WORKER, rpc_error
+from device_mcp_gateway.shared.keys import KEYS
 
 # Gateway instance ID — used to tag SSE sessions in distributed mode.
 _GATEWAY_ID = os.getenv("GATEWAY_ID", str(uuid.uuid4()))
@@ -37,7 +38,7 @@ async def _watch_tool_call_timeout(
     """
     try:
         await asyncio.sleep(timeout)
-        if await redis.get(f"result:{request_id}"):
+        if await redis.get(KEYS.result_marker(request_id)):
             return  # worker handled it
         metrics.tool_call_timeouts_total.labels(hostname=hostname).inc()
         await session_router.publish_result(

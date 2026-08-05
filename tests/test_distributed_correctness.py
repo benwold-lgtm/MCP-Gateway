@@ -33,9 +33,8 @@ from device_mcp_gateway.core.translator import (
 )
 from device_mcp_gateway.registry.server import Registry, _auth_from_record
 from device_mcp_gateway.shared.crypto import CredentialCodec
+from device_mcp_gateway.shared.keys import KEYS
 from device_mcp_gateway.shared.registry_backend import (
-    _ASSIGNMENTS_STREAM,
-    _UNASSIGN_STREAM,
     MemoryRegistryBackend,
     RedisRegistryBackend,
 )
@@ -175,8 +174,8 @@ async def test_unassign_routes_to_broadcast_stream_not_shared_group():
     await backend.publish_assignment("unassign", "dev1")
     # assign is load-balanced (shared group); unassign is broadcast so every worker
     # — including the actual owner — sees it.
-    assert await r.xlen(_ASSIGNMENTS_STREAM) == 1
-    assert await r.xlen(_UNASSIGN_STREAM) == 1
+    assert await r.xlen(KEYS.assignments_stream) == 1
+    assert await r.xlen(KEYS.unassign_stream) == 1
 
 
 class _StubPod:

@@ -18,12 +18,12 @@ from loguru import logger
 
 from device_mcp_gateway import metrics
 from device_mcp_gateway.core.backoff import jittered
+from device_mcp_gateway.shared.keys import KEYS
 
 if TYPE_CHECKING:  # pragma: no cover
     from device_mcp_gateway.worker.runner import DeviceWorker
 
 # Leader lock: exactly one worker runs the reconciler sweep at a time (SRE #1/#2).
-_RECONCILER_LOCK = "reconciler:leader"
 
 
 class Reconciler:
@@ -64,7 +64,7 @@ class Reconciler:
         worker take over.
         """
         w = self._w
-        key = _RECONCILER_LOCK
+        key = KEYS.reconciler_leader
         if await w._r.set(key, w._id, nx=True, ex=ttl):
             return True
         if (await w._r.get(key)) == w._id:
@@ -91,7 +91,7 @@ class Reconciler:
         hostnames = await w._backend.list_hostnames()
         reassigned = 0
         for hostname in hostnames:
-            if await w._r.get(f"claim:{hostname}") is not None:
+            if await w._r.get(KEYS.claim(hostname)) is not None:
                 # A live worker holds the claim — clear any orphan streak so a past
                 # transient lapse doesn't count toward a future reassignment (F-62).
                 w._orphan_miss_counts.pop(hostname, None)
@@ -133,7 +133,7 @@ class Reconciler:
         heartbeat, so a worker pruned during its brief startup race re-registers.
         """
         w = self._w
-        for wid in await w._r.smembers("workers:active"):
-            if not await w._r.exists(f"worker:{wid}:heartbeat"):
-                await w._r.srem("workers:active", wid)
+        for wid in await w._r.smembers(KEYS.workers_active):
+            if not await w._r.exists(KEYS.worker_heartbeat(wid)):
+                await w._r.srem(KEYS.workers_active, wid)
                 logger.info(f"Pruned dead worker {wid} from workers:active")

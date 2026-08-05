@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Ben Wold. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
+"""The single place Redis key names are built.
+
+Every key used to be an inline f-string at its call site — around seventy of them across a
+dozen modules, with no helper and no shared vocabulary. Nothing was wrong with that while
+one deployment owns one Redis. It becomes expensive the moment that stops being true: a
+tenant or cell prefix would have to be threaded through every one, and each edit is a chance
+to rename a key and silently orphan whatever is already stored under the old name — live
+device config, claim leases, dead letters.
+
+Routing them through one builder makes that a single change. It also makes a cheaper
+intermediate deployment possible without any application change: several small stacks
+sharing one Redis under different prefixes.
+
+**The prefix is an explicit constructor argument, deliberately.** There is no ambient or
+request-scoped prefixing — no contextvar, no global mutation. Implicit scoping is the part
+that is hard to audit (you cannot tell from a call site which keyspace you are in) and hard
+to remove if the tenancy model goes a different way. An explicit argument is legible and
+costs nothing to delete.
+
+Two things that live here but are deliberately *not* prefixed, because they are not keys:
+
+- **Consumer group names.** A group is scoped to its stream, so prefixing one is meaningless
+  at best. At worst it creates a *second* group on the same stream, and every message gets
+  delivered to both — silent duplicate execution.
+- **``device://`` resource URIs.** These are handed to MCP clients and may be cached by
+  them. They are part of the external contract, not the keyspace.
+"""
+
+from __future__ import annotations
+
+
+class KeyBuilder:
+    """Builds every Redis key the gateway and workers use.
+
+    ``prefix`` is empty by default, which reproduces the historical key names exactly.
+    """
+
+    __slots__ = ("_prefix",)
+
+    def __init__(self, prefix: str = "") -> None:
+        self._prefix = f"{prefix}:" if prefix else ""
+
+    @property
+    def prefix(self) -> str:
+        """The configured prefix without its separator ("" when unprefixed)."""
+        return self._prefix[:-1] if self._prefix else ""
+
+    def _k(self, suffix: str) -> str:
+        return f"{self._prefix}{suffix}"
+
+    # --- registry state ------------------------------------------------------
+
+    @property
+    def devices_set(self) -> str:
+        """Set of every registered hostname."""
+        return self._k("devices:all")
+
+    def device_config(self, hostname: str) -> str:
+        """Hash holding a device's DeviceConfig."""
+        return self._k(f"device:{hostname}:config")
+
+    def device_manifest(self, hostname: str) -> str:
+        """Cached translated manifest (TTL'd)."""
+        return self._k(f"device:{hostname}:manifest")
+
+    def device_tools_change(self, hostname: str) -> str:
+        """Last recorded tool-set change (no TTL — governance history)."""
+        return self._k(f"device:{hostname}:tools_change")
+
+    # --- streams -------------------------------------------------------------
+
+    @property
+    def assignments_stream(self) -> str:
+        """Competing-consumers stream: which worker owns which device."""
+        return self._k("device:assignments")
+
+    @property
+    def unassign_stream(self) -> str:
+        """Broadcast stream — every worker tails it independently."""
+        return self._k("device:unassignments")
+
+    def device_calls(self, hostname: str) -> str:
+        """Per-device tool-call stream."""
+        return self._k(f"device:{hostname}:calls")
+
+    def device_calls_dead(self, hostname: str) -> str:
+        """Per-device dead-letter stream."""
+        return self._k(f"device:{hostname}:calls:dead")
+
+    # --- consumer groups (NOT keys — never prefixed; see module docstring) ----
+
+    @property
+    def worker_group(self) -> str:
+        """Consumer group on the assignments stream."""
+        return "workers"
+
+    def device_calls_group(self, hostname: str) -> str:
+        """Consumer group on a device's call stream."""
+        return f"workers-{hostname}"
+
+    # --- sessions ------------------------------------------------------------
+
+    def session(self, hostname_or_session_id: str) -> str:
+        """Hash of {hostname, gateway_id, owner} for an open MCP session."""
+        return self._k(f"session:{hostname_or_session_id}")
+
+    def session_results(self, session_id: str) -> str:
+        """Durable per-session results stream, so a reconnecting client loses nothing."""
+        return self._k(f"session:{session_id}:results")
+
+    def fleet_tools(self, session_id: str) -> str:
+        """Display-name -> tool entry map for a fleet session."""
+        return self._k(f"fleet:{session_id}:tools")
+
+    # --- worker membership and leases ---------------------------------------
+
+    @property
+    def workers_active(self) -> str:
+        return self._k("workers:active")
+
+    def worker_heartbeat(self, worker_id: str) -> str:
+        return self._k(f"worker:{worker_id}:heartbeat")
+
+    def worker_devices(self, worker_id: str) -> str:
+        return self._k(f"worker:{worker_id}:devices")
+
+    def claim(self, hostname: str) -> str:
+        """Single-owner device lease (ADR-0003)."""
+        return self._k(f"claim:{hostname}")
+
+    def rebalance_cooldown(self, hostname: str) -> str:
+        return self._k(f"rebalance:cooldown:{hostname}")
+
+    def health_lock(self, hostname: str) -> str:
+        return self._k(f"health_lock:{hostname}")
+
+    # --- leader locks --------------------------------------------------------
+
+    @property
+    def reconciler_leader(self) -> str:
+        return self._k("reconciler:leader")
+
+    @property
+    def gauge_leader(self) -> str:
+        return self._k("gateway:gauge-leader")
+
+    # --- idempotency markers -------------------------------------------------
+
+    def exec_marker(self, request_id: str) -> str:
+        """ "Started" marker for a non-idempotent call (F-08)."""
+        return self._k(f"exec:{request_id}")
+
+    def result_marker(self, request_id: str) -> str:
+        """ "Already completed" marker, so a redelivery is not re-executed (F-08)."""
+        return self._k(f"result:{request_id}")
+
+    # --- rate limiting -------------------------------------------------------
+
+    def ratelimit(self, key: str) -> str:
+        """Fixed-window counter. ``key`` is the caller-derived bucket ("scope:client")."""
+        return self._k(f"rl:{key}")
+
+
+def device_resource_uri(hostname: str, path: str = "") -> str:
+    """An MCP resource URI for a device path.
+
+    Client-facing and part of the external contract — a module-level function rather than a
+    ``KeyBuilder`` method precisely so it cannot pick up a keyspace prefix by accident.
+    """
+    return f"device://{hostname}{path}"
+
+
+#: Default unprefixed builder. Call sites use this; a future tenant-aware caller would
+#: construct its own ``KeyBuilder(prefix=...)`` and pass it down explicitly.
+KEYS = KeyBuilder()

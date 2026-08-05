@@ -32,6 +32,7 @@ from device_mcp_gateway.core.backoff import jittered
 from device_mcp_gateway.core.errors import RPC_DUPLICATE, RPC_INTERNAL_ERROR, RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.shared.keys import KEYS
 
 if TYPE_CHECKING:  # pragma: no cover
     from device_mcp_gateway.worker.runner import DeviceWorker
@@ -71,8 +72,8 @@ class CallDispatcher:
 
     async def consume_calls(self, hostname: str) -> None:
         w = self._w
-        stream = f"device:{hostname}:calls"
-        group = f"workers-{hostname}"
+        stream = KEYS.device_calls(hostname)
+        group = KEYS.device_calls_group(hostname)
         # Ensure consumer group for this device's call stream
         try:
             await w._r.xgroup_create(stream, group, id="0", mkstream=True)
@@ -189,7 +190,7 @@ class CallDispatcher:
             payload["reason"] = reason
             payload["ts"] = str(time.time())
             await self._w._r.xadd(
-                f"device:{hostname}:calls:dead", payload, maxlen=_runner_mod()._DLQ_MAXLEN, approximate=True
+                KEYS.device_calls_dead(hostname), payload, maxlen=_runner_mod()._DLQ_MAXLEN, approximate=True
             )
             metrics.dead_letter_total.labels(hostname=hostname).inc()
         except Exception:
@@ -223,7 +224,7 @@ class CallDispatcher:
 
     async def already_completed(self, request_id: str) -> bool:
         """True if a result was already recorded for this call (dedup fast path)."""
-        return bool(await self._w._r.exists(f"result:{request_id}"))
+        return bool(await self._w._r.exists(KEYS.result_marker(request_id)))
 
     async def begin_exec(self, request_id: str) -> bool:
         """SET-NX a 'started' marker; True only for the first executor of this id.
@@ -232,7 +233,7 @@ class CallDispatcher:
         so a non-idempotent operation runs at most once across the fleet.
         """
         w = self._w
-        return bool(await w._r.set(f"exec:{request_id}", w._id, nx=True, ex=w._idempotency_ttl))
+        return bool(await w._r.set(KEYS.exec_marker(request_id), w._id, nx=True, ex=w._idempotency_ttl))
 
     def is_idempotent_call(self, pod: DevicePod, message: dict) -> bool:
         """True if re-executing this call carries no extra side effect.
@@ -294,7 +295,7 @@ class CallDispatcher:
                         ),
                     )
                 if request_id:
-                    await w._r.set(f"result:{request_id}", "1", ex=w._result_marker_ttl)
+                    await w._r.set(KEYS.result_marker(request_id), "1", ex=w._result_marker_ttl)
                 audit_log(
                     "tool dispatch",
                     hostname=hostname,
@@ -327,7 +328,7 @@ class CallDispatcher:
                                     ),
                                 ),
                             )
-                        await w._r.set(f"result:{request_id}", "1", ex=w._result_marker_ttl)
+                        await w._r.set(KEYS.result_marker(request_id), "1", ex=w._result_marker_ttl)
                     metrics.duplicate_calls_suppressed_total.labels(hostname=hostname, reason=decision).inc()
                     audit_log(
                         "tool dispatch",
@@ -366,7 +367,7 @@ class CallDispatcher:
             # Mark the call as handled so the gateway's timeout watcher (F6)
             # stands down even when the result reached a different gateway replica.
             if request_id:
-                await w._r.set(f"result:{request_id}", "1", ex=w._result_marker_ttl)
+                await w._r.set(KEYS.result_marker(request_id), "1", ex=w._result_marker_ttl)
             # Distributed-mode audit log with execution latency (SRE O2/O3): the
             # gateway only logs "dispatched", so per-call latency lives here.
             audit_log(
@@ -401,7 +402,7 @@ class CallDispatcher:
                         ),
                     )
                 if request_id:
-                    await w._r.set(f"result:{request_id}", "1", ex=w._result_marker_ttl)
+                    await w._r.set(KEYS.result_marker(request_id), "1", ex=w._result_marker_ttl)
                 audit_log(
                     "tool dispatch",
                     hostname=hostname,

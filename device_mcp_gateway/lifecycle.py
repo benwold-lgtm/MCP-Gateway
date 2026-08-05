@@ -19,10 +19,9 @@ from loguru import logger
 
 from device_mcp_gateway import metrics
 from device_mcp_gateway.core.backoff import jittered
+from device_mcp_gateway.shared.keys import KEYS
 
 _LOOP_HEARTBEAT_INTERVAL = 1.0  # seconds between event-loop liveness ticks
-
-_GAUGE_LEADER_LOCK = "gateway:gauge-leader"
 
 
 async def _event_loop_heartbeat(app: FastAPI) -> None:
@@ -49,12 +48,12 @@ async def _count_live_workers(redis) -> int:
     /health (SRE #7): a gateway with zero live workers still serves read endpoints,
     but tool calls will time out, and operators/UI should see that.
     """
-    ids = await redis.smembers("workers:active")
+    ids = await redis.smembers(KEYS.workers_active)
     if not ids:
         return 0
     pipe = redis.pipeline()
     for wid in ids:
-        pipe.exists(f"worker:{wid}:heartbeat")
+        pipe.exists(KEYS.worker_heartbeat(wid))
     return sum(1 for present in await pipe.execute() if present)
 
 
@@ -65,10 +64,10 @@ async def _acquire_gauge_leadership(redis, leader_id: str, ttl: int) -> bool:
     sticky while this replica is alive but lapses soon after it dies, letting
     another replica take over. Mirrors the worker reconciler's election.
     """
-    if await redis.set(_GAUGE_LEADER_LOCK, leader_id, nx=True, ex=ttl):
+    if await redis.set(KEYS.gauge_leader, leader_id, nx=True, ex=ttl):
         return True
-    if (await redis.get(_GAUGE_LEADER_LOCK)) == leader_id:
-        await redis.expire(_GAUGE_LEADER_LOCK, ttl)
+    if (await redis.get(KEYS.gauge_leader)) == leader_id:
+        await redis.expire(KEYS.gauge_leader, ttl)
         return True
     return False
 

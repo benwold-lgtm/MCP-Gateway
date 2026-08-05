@@ -41,6 +41,7 @@ from device_mcp_gateway.pods.sse_server import SseTransport
 from device_mcp_gateway.pods.rate_limiter import TokenBucket
 from device_mcp_gateway.core.translator import McpManifest, McpTool
 from device_mcp_gateway.security.url_policy import build_guarded_client
+from device_mcp_gateway.shared.keys import device_resource_uri
 
 # MCP protocol versions this gateway speaks, newest first. The `initialize`
 # handshake echoes the client's requested version when we support it, otherwise
@@ -458,7 +459,7 @@ class DevicePod:
 
         if method == "resources/read":
             uri: str = params.get("uri") or ""
-            prefix = f"device://{self.hostname}"
+            prefix = device_resource_uri(self.hostname)
             if not uri.startswith(prefix):
                 return rpc_error(RPC_INVALID_PARAMS, msg_id, message=f"Unknown resource URI: {uri}")
             path = uri[len(prefix) :]

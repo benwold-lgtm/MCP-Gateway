@@ -55,6 +55,7 @@ from device_mcp_gateway.core.spec_limits import (
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.security.mtls import build_verify
+from device_mcp_gateway.shared.keys import KEYS
 from device_mcp_gateway.security.url_policy import (
     build_guarded_client,
     resolve_allow_private,
@@ -66,15 +67,12 @@ from device_mcp_gateway.shared.session_router import SessionRouter
 from device_mcp_gateway.worker.dispatch import CallDispatcher, _decode_fields  # noqa: F401  (re-exported)
 from device_mcp_gateway.worker.health import WorkerHealthLoop, _manifest_to_dict
 from device_mcp_gateway.worker.rebalance import Rebalancer
-from device_mcp_gateway.worker.reconcile import _RECONCILER_LOCK, Reconciler  # noqa: F401  (re-exported)
+from device_mcp_gateway.worker.reconcile import Reconciler
 from device_mcp_gateway.worker.spec_pool import _spec_executor, _translate_spec_sync  # noqa: F401  (re-exported)
 
-_ASSIGNMENTS_STREAM = "device:assignments"
-_WORKER_GROUP = "workers"
 # Broadcast unassign stream — every worker tails it independently (XREAD from "$"),
 # so the worker that actually owns the pod tears it down; non-owners no-op. Kept in
-# sync with registry_backend._UNASSIGN_STREAM.
-_UNASSIGN_STREAM = "device:unassignments"
+# sync with registry_backend.KEYS.unassign_stream.
 _HEARTBEAT_INTERVAL = 10  # seconds
 # Bound for a device's dead-letter stream (undeliverable tool calls, SRE #4).
 # Canonical here (tests monkeypatch it as runner._DLQ_MAXLEN); dispatch.py reads
@@ -251,7 +249,7 @@ class DeviceWorker:
         await backend.initialize()
 
         # Register worker
-        await self._r.sadd("workers:active", self._id)
+        await self._r.sadd(KEYS.workers_active, self._id)
         logger.info(f"Worker {self._id} started")
 
         # Recover any devices previously assigned to this worker
@@ -299,7 +297,7 @@ class DeviceWorker:
             await asyncio.gather(*tasks, *self._call_tasks.values(), return_exceptions=True)
             await self._drain_inflight_calls()
             await self._shutdown_pods()
-            await self._r.srem("workers:active", self._id)
+            await self._r.srem(KEYS.workers_active, self._id)
             await self._health.close()
             logger.info(f"Worker {self._id} shut down")
 
@@ -329,12 +327,12 @@ class DeviceWorker:
 
     async def _heartbeat_loop(self) -> None:
         ttl = self._config.get("registry", {}).get("health_check_interval", 30) * 2
-        key = f"worker:{self._id}:heartbeat"
+        key = KEYS.worker_heartbeat(self._id)
         while not self._stop_event.is_set():
             if self._loops_healthy():
                 # Re-assert set membership each beat so a worker pruned during its
                 # startup race (added before its first heartbeat) re-registers.
-                await self._r.sadd("workers:active", self._id)
+                await self._r.sadd(KEYS.workers_active, self._id)
                 await self._r.set(key, str(time.time()), ex=ttl)
                 await self._refresh_claims()  # keep device-claim leases alive (RC-6)
                 self._touch_liveness_file()  # cheap local liveness signal for K8s (F-17)
@@ -398,7 +396,7 @@ class DeviceWorker:
         pending = 0
         undelivered = 0
         for hostname in list(self._assigned):
-            stream, group = f"device:{hostname}:calls", f"workers-{hostname}"
+            stream, group = KEYS.device_calls(hostname), KEYS.device_calls_group(hostname)
             pending += await self._stream_pending(stream, group)
             undelivered += await self._stream_lag(stream, group)
         metrics.worker_pending_calls.set(pending)
@@ -406,7 +404,7 @@ class DeviceWorker:
         # without this, a saturated worker shows low pending while work piles up
         # undelivered in the stream, hiding the backlog from the HPA.
         metrics.worker_undelivered_calls.set(undelivered)
-        metrics.worker_assignments_lag.set(await self._stream_pending(_ASSIGNMENTS_STREAM, _WORKER_GROUP))
+        metrics.worker_assignments_lag.set(await self._stream_pending(KEYS.assignments_stream, KEYS.worker_group))
 
     async def _stream_pending(self, stream: str, group: str) -> int:
         """Count delivered-but-unacked entries for a consumer group (XPENDING summary).
@@ -459,9 +457,9 @@ class DeviceWorker:
             self._assignment_progress = time.monotonic()
             try:
                 results = await self._r.xreadgroup(
-                    _WORKER_GROUP,
+                    KEYS.worker_group,
                     self._id,
-                    {_ASSIGNMENTS_STREAM: ">"},
+                    {KEYS.assignments_stream: ">"},
                     count=10,
                     block=2000,
                 )
@@ -476,7 +474,7 @@ class DeviceWorker:
                                 await self._spawn_pod(hostname)
                             elif action == "unassign":
                                 await self._kill_pod(hostname)
-                            await self._r.xack(_ASSIGNMENTS_STREAM, _WORKER_GROUP, msg_id)
+                            await self._r.xack(KEYS.assignments_stream, KEYS.worker_group, msg_id)
                         except Exception:
                             logger.exception(f"Failed to process assignment {action} {hostname}")
             except asyncio.CancelledError:
@@ -499,7 +497,7 @@ class DeviceWorker:
         while not self._stop_event.is_set():
             self._assignment_progress = time.monotonic()
             try:
-                results = await self._r.xread({_UNASSIGN_STREAM: last_id}, count=10, block=2000)
+                results = await self._r.xread({KEYS.unassign_stream: last_id}, count=10, block=2000)
                 if not results:
                     continue
                 for _stream, messages in results:
@@ -526,7 +524,7 @@ class DeviceWorker:
         per-worker — so a pending-assignment reclaim could otherwise hand the
         same device to two workers. Returns True if this worker holds the claim.
         """
-        key = f"claim:{hostname}"
+        key = KEYS.claim(hostname)
         if await self._r.set(key, self._id, nx=True, ex=self._claim_ttl):
             return True
         # Key already exists — only proceed if we already own it, which happens
@@ -542,14 +540,14 @@ class DeviceWorker:
         expiring and being re-taken between the get and the delete — is not
         reachable in practice.
         """
-        key = f"claim:{hostname}"
+        key = KEYS.claim(hostname)
         if (await self._r.get(key)) == self._id:
             await self._r.delete(key)
 
     async def _refresh_claims(self) -> None:
         """Extend the lease on every owned device claim (called per heartbeat)."""
         for hostname in list(self._assigned):
-            await self._r.expire(f"claim:{hostname}", self._claim_ttl)
+            await self._r.expire(KEYS.claim(hostname), self._claim_ttl)
 
     def _decrypt_auth(self, hostname: str, auth_config_str: str | None) -> str | None:
         """Decrypt a stored credential blob from Redis (distributed mode).
@@ -655,7 +653,7 @@ class DeviceWorker:
         self._pods[hostname] = pod
         self._assigned.add(hostname)
         await self._backend.update_device_fields(hostname, pod_active=True, worker_id=self._id, spawn_error=None)
-        await self._r.sadd(f"worker:{self._id}:devices", hostname)
+        await self._r.sadd(KEYS.worker_devices(self._id), hostname)
 
         # Start call consumer task for this device
         task = asyncio.create_task(self._consume_calls(hostname), name=f"calls-{hostname}")
@@ -675,7 +673,7 @@ class DeviceWorker:
             task.cancel()
         if self._backend:
             await self._backend.update_device_fields(hostname, pod_active=False, worker_id=None)
-        await self._r.srem(f"worker:{self._id}:devices", hostname)
+        await self._r.srem(KEYS.worker_devices(self._id), hostname)
         await self._release_claim(hostname)
         logger.info(f"Pod killed for {hostname} by worker {self._id}")
 
@@ -694,7 +692,7 @@ class DeviceWorker:
 
     async def _recover_assigned(self) -> None:
         """Re-spawn pods for devices this worker owned before a restart."""
-        devices = await self._r.smembers(f"worker:{self._id}:devices")
+        devices = await self._r.smembers(KEYS.worker_devices(self._id))
         if not devices:
             return
         logger.info(f"Recovering {len(devices)} previously assigned device(s)")

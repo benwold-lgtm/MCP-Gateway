@@ -31,6 +31,7 @@ import time
 from typing import Any, AsyncGenerator
 
 from loguru import logger
+from device_mcp_gateway.shared.keys import KEYS
 
 _SESSION_TTL = 86_400  # 24 h — refreshed periodically while the stream is active
 _REFRESH_THROTTLE = 60.0  # min seconds between TTL refreshes on a busy stream
@@ -44,11 +45,11 @@ _XREAD_BLOCK_MS = 5_000
 
 
 def _results_key(session_id: str) -> str:
-    return f"session:{session_id}:results"
+    return KEYS.session_results(session_id)
 
 
 def _fleet_tools_key(session_id: str) -> str:
-    return f"fleet:{session_id}:tools"
+    return KEYS.fleet_tools(session_id)
 
 
 def _field(fields: dict, name: str) -> str | None:
@@ -113,7 +114,7 @@ class SessionRouter:
         ``owner`` is the principal subject that opened the session; it binds the
         session to that principal so another caller can't post to it (F-37).
         """
-        key = f"session:{session_id}"
+        key = KEYS.session(session_id)
         mapping = {"hostname": hostname, "gateway_id": gateway_id}
         if owner is not None:
             mapping["owner"] = owner
@@ -126,7 +127,7 @@ class SessionRouter:
         logger.debug(f"Session registered: session_id={session_id} gateway={gateway_id}")
 
     async def get(self, session_id: str) -> dict | None:
-        h = await self._r.hgetall(f"session:{session_id}")
+        h = await self._r.hgetall(KEYS.session(session_id))
         if not h:
             return None
         # Decode defensively: real Redis with decode_responses=True already returns
@@ -142,14 +143,14 @@ class SessionRouter:
         # on a key that doesn't exist (e.g. fleet_tools for a per-device session)
         # is a harmless no-op.
         pipe = self._r.pipeline()
-        pipe.expire(f"session:{session_id}", ttl)
+        pipe.expire(KEYS.session(session_id), ttl)
         pipe.expire(_results_key(session_id), ttl)
         pipe.expire(_fleet_tools_key(session_id), ttl)
         await pipe.execute()
 
     async def delete(self, session_id: str) -> None:
         pipe = self._r.pipeline()
-        pipe.delete(f"session:{session_id}")
+        pipe.delete(KEYS.session(session_id))
         pipe.delete(_results_key(session_id))
         pipe.delete(_fleet_tools_key(session_id))
         await pipe.execute()
