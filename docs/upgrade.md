@@ -62,16 +62,29 @@ different sequence.
 Because the fleet is mixed-version safe, a standard Kubernetes rolling update works. Do it
 **one deployment at a time** so you can stop on the first sign of trouble:
 
+The gateway and the worker run the **same image** — the worker just overrides the command —
+so both steps below reference one image reference. Pin it by digest, and use the *same*
+digest for both: they share the Redis data model, so a version skew across a schema change
+is a split-brain risk. Read it with
+`docker buildx imagetools inspect ghcr.io/benwold-lgtm/device-mcp-gateway:<tag>`.
+
 ```bash
+IMG='ghcr.io/benwold-lgtm/device-mcp-gateway:<tag>@sha256:<digest>'
+
 # 1. Workers first — they own the device connections; a roll rebalances devices (F-07).
-kubectl -n mcp set image deploy/device-mcp-worker worker=<registry>/device-mcp-worker:<tag>
+#    Container name is `worker`, but the image is the gateway image.
+kubectl -n mcp set image deploy/device-mcp-worker worker="$IMG"
 kubectl -n mcp rollout status deploy/device-mcp-worker
 
 # 2. Then the gateway — stateless; losing a replica only drops its in-flight SSE streams,
 #    which clients reconnect and retry (F-20).
-kubectl -n mcp set image deploy/device-mcp-gateway gateway=<registry>/device-mcp-gateway:<tag>
+kubectl -n mcp set image deploy/device-mcp-gateway gateway="$IMG"
 kubectl -n mcp rollout status deploy/device-mcp-gateway
 ```
+
+Managing the cluster with kustomize instead? Update the `digest:` in
+`deploy/kubernetes/kustomization.yaml`'s `images:` block and re-apply — that retargets both
+deployments from one place, which is harder to get half-done than two `set image` calls.
 
 Between the two steps, sanity-check the [post-upgrade verification](#post-upgrade-verification).
 Workers-first means new execution logic lands before the new dispatch logic that may rely

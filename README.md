@@ -578,28 +578,42 @@ The bundled manifests assume the following are already installed in the target c
 
 ### Point the manifests at an image
 
-The manifests reference `image: device-mcp-gateway:latest` as a placeholder. Prebuilt
-multi-arch (amd64/arm64) images are published to GHCR on every release — pin a version
-tag (or better, a digest; never `:latest`) in **both** `deployment.yaml` and
-`worker-deployment.yaml` (they share one image):
+**Nothing to do for a default install.** The manifests ship pinned to a published,
+multi-arch (amd64/arm64) GHCR image *by digest*:
+
+```
+ghcr.io/benwold-lgtm/device-mcp-gateway:0.1.4@sha256:a8a05f53...
+```
+
+The digest — not the tag — is what Kubernetes resolves, so every replica on every node
+runs byte-identical bits and a re-pushed tag can't silently change what's deployed.
+
+To move to a different version, edit the `images:` block in `kustomization.yaml` **once**
+rather than hand-editing both deployments (they share one image and must stay in lockstep —
+they share the Redis data model, so a version skew across a schema change is a split-brain
+risk). Read the digest for a tag with:
 
 ```bash
-sed -i 's#image: device-mcp-gateway:latest#image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.1.2#' \
-  deploy/kubernetes/deployment.yaml deploy/kubernetes/worker-deployment.yaml
+docker buildx imagetools inspect ghcr.io/benwold-lgtm/device-mcp-gateway:0.1.4
 ```
 
 Prefer to build from source? The repo root holds the Dockerfile — build, push to a
-registry your cluster can pull from, and point both deployments at that instead:
+registry your cluster can pull from, and retarget via the same `images:` block:
 
 ```bash
-docker build -t <your-registry>/device-mcp-gateway:0.1.2 .
-docker push <your-registry>/device-mcp-gateway:0.1.2
+docker build -t <your-registry>/device-mcp-gateway:0.1.4 .
+docker push <your-registry>/device-mcp-gateway:0.1.4
 ```
 
-> **kind / minikube shortcut.** To skip a registry entirely, build locally and load the image
-> into the cluster: `kind load docker-image device-mcp-gateway:0.1.2` (or
-> `minikube image load …`). The manifests' `imagePullPolicy: IfNotPresent` then uses the
-> loaded image. Keep the `device-mcp-gateway:0.1.2` tag in both manifests in that case.
+> **kind / minikube shortcut.** To skip a registry entirely, build locally and load the
+> image into the cluster: `kind load docker-image my-gateway:dev` (or `minikube image
+> load …`), then point `kustomization.yaml`'s `images:` block at `newName: my-gateway`,
+> `newTag: dev`. Drop the digest when you do — a digest pin will not resolve against a
+> locally built image. `imagePullPolicy: IfNotPresent` then uses the loaded image.
+>
+> If you use a **moving** tag (`:latest`, `:lite`) anywhere, switch `imagePullPolicy` to
+> `Always` in both deployments — with `IfNotPresent` a node keeps running whatever it
+> cached, indefinitely.
 
 ### Deploy
 

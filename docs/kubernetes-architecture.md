@@ -437,13 +437,16 @@ and `servicemonitor.yaml` are excluded from `kustomization.yaml` so a cluster wi
 CRDs still applies cleanly. See the README's "Cluster prerequisites" table.
 
 ```bash
-# 1. Point BOTH deployment.yaml and worker-deployment.yaml (they share one image) at a
-#    published multi-arch image from GHCR — pin a version tag or digest, never :latest.
-sed -i 's#image: device-mcp-gateway:latest#image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.1.2#' \
-  deploy/kubernetes/deployment.yaml deploy/kubernetes/worker-deployment.yaml
-#    (Building from source instead: `docker build -t <your-registry>/device-mcp-gateway:0.1.2 .`,
-#    push it to a registry the cluster can pull from, and use that reference;
-#    kind/minikube: skip the push and `kind load docker-image device-mcp-gateway:0.1.2`)
+# 1. The image is already pinned by DIGEST to a published multi-arch GHCR image, so there
+#    is nothing to edit for a default install. To retarget it (different version, your own
+#    registry, or a locally built image), edit the `images:` block in kustomization.yaml
+#    ONCE — it applies to both the gateway and the worker, which share one image and must
+#    stay in lockstep across a Redis schema change.
+#      docker buildx imagetools inspect ghcr.io/benwold-lgtm/device-mcp-gateway:0.1.4
+#    (Building from source: `docker build -t <your-registry>/device-mcp-gateway:0.1.4 .`,
+#    push it somewhere the cluster can pull from, then set newName/newTag in that block;
+#    kind/minikube: skip the push, `kind load docker-image my-gateway:dev`, and DROP the
+#    digest — a digest pin will not resolve against a locally built image.)
 #    Also customise:
 #    deploy/kubernetes/ingress.yaml       — replace mcp-gateway.example.com
 #    deploy/kubernetes/worker-deployment.yaml — adjust replicas and resources

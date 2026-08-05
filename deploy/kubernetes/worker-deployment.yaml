@@ -50,8 +50,15 @@ spec:
           type: RuntimeDefault
       containers:
         - name: worker
-          # Pin to an immutable digest or semantic tag in production — never ship :latest
-          image: device-mcp-gateway:latest
+          # Immutable digest pin — keep in lockstep with deployment.yaml. A worker running
+          # different bits from the gateway is a split-brain risk: they share the Redis
+          # data model, so a version skew across a schema change is exactly what an
+          # unpinned :latest used to allow one node at a time to drift into.
+          image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.1.4@sha256:a8a05f53cbccf090456b5834876a1498fa216351a81283e1917716941f457563
+          # Explicit, and matching the gateway. Previously unset, which with :latest meant
+          # Kubernetes defaulted this pod to Always while the gateway used IfNotPresent —
+          # the two could pull different builds of the same tag.
+          imagePullPolicy: IfNotPresent
           command: ["device-mcp-worker"]
           # Container hardening. readOnlyRootFilesystem is safe because the worker
           # writes only to /app/logs and to its liveness file under /tmp — both

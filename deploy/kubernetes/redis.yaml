@@ -38,6 +38,13 @@ spec:
     spec:
       containers:
         - name: redis
+          # Deliberately a moving minor tag, unlike the digest-pinned gateway/worker images:
+          # this bundled single-replica Redis is a getting-started convenience, not the
+          # production data plane (see docs/kubernetes-architecture.md — production wants a
+          # managed or properly HA Redis presenting one stable address). Floating on 7-alpine
+          # keeps picking up patch/CVE fixes on reschedule, which matters more here than
+          # reproducibility. Digest-pin it if your policy requires that:
+          #   docker buildx imagetools inspect redis:7-alpine
           image: redis:7-alpine
           # Require AUTH (Tier-0 F-24): the gateway/worker refuse to connect to an
           # unauthenticated Redis. The password comes from the gateway-secrets secret

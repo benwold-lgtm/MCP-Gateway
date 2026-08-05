@@ -205,6 +205,33 @@ redis:
   # replica — size it to your expected concurrency (not shared with commands).
   pubsub_max_connections: 1000
 
+  # --- Failover resilience ---
+  # These are what make an HA Redis actually highly available to the gateway. Without
+  # them a primary failover reaches callers as a burst of hard ConnectionErrors instead
+  # of a transparent reconnect, no matter how well the Redis side is built.
+  #
+  # Retry attempts for a command that hits a connection error or timeout, with JITTERED
+  # exponential backoff (base 50ms, cap 1s) — so 5 retries spend up to ~2.5s worst case.
+  # Jitter matters because a failover hits every replica and worker at the same instant;
+  # without it they all retry in lockstep and hammer the newly promoted primary.
+  # This is sized to absorb the reconnect burst and a SHORT election — not to block
+  # through a long Sentinel promotion, which can take tens of seconds. Blocking a request
+  # that long is worse than failing it and letting the caller retry; raise this if your
+  # election is slower and you would rather wait.
+  # Set 0 to disable retrying and see every failure immediately (debugging).
+  # NOTE: a retry can run a command twice if the failure landed after the server
+  # executed it but before the reply arrived. That is safe here — the rate-limit INCR
+  # only over-counts (fails closed), and dispatch writes are covered by
+  # registry.idempotency_guard. A permanent outage still surfaces; the budget is finite.
+  retries: 5
+  # Seconds between PINGs on idle pooled connections. A connection left half-open by a
+  # failover is otherwise only discovered when a real command fails on it, so every
+  # idle connection would fail once after each failover. Set 0 to disable.
+  health_check_interval: 30
+  # Seconds to wait for the TCP connect itself. Without a bound, a vanished primary
+  # hangs on the OS default (often ~2 minutes) — far longer than the failover.
+  socket_connect_timeout: 5
+
 auth:
   # Default auth type (api_key or oauth2)
   type: "api_key"

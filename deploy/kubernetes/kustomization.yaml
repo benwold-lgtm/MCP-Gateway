@@ -15,6 +15,26 @@ resources:
   - pdb.yaml
   - hpa.yaml
 
+# Single place to retarget the image for BOTH the gateway and the worker — they must
+# stay in lockstep (they share the Redis data model, so a version skew across a schema
+# change is a split-brain risk). Uncomment and edit rather than hand-editing two
+# manifests, and prefer `digest:` over `newTag:` so what runs can't change under you.
+#
+# Read the digest for a tag with:
+#   docker buildx imagetools inspect ghcr.io/benwold-lgtm/device-mcp-gateway:<tag>
+#
+# images:
+#   - name: ghcr.io/benwold-lgtm/device-mcp-gateway
+#     digest: sha256:...                      # preferred: immutable
+#     # newTag: "0.1.5"                       # or a semver tag; never :latest in production
+#
+# Building locally instead (kind/minikube)? Point `newName` at your local image and load
+# it into the cluster — `kind load docker-image my-gateway:dev` — since a digest pin will
+# not resolve against a locally built image:
+#   - name: ghcr.io/benwold-lgtm/device-mcp-gateway
+#     newName: my-gateway
+#     newTag: dev
+
 # Prometheus Operator resources are NOT applied by default — they require the
 # Operator's CRDs (monitoring.coreos.com/v1: PrometheusRule, ServiceMonitor),
 # and a `kubectl apply -k` would fail on a cluster without them. If you run the
