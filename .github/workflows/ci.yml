@@ -48,8 +48,11 @@ jobs:
       - name: Type check (mypy)
         run: mypy device_mcp_gateway/ --ignore-missing-imports
 
+      # Ratchet: measured 83% at the time of writing, floor set to actual-minus-2 so a
+      # PR that quietly drops coverage fails instead of coasting under a stale 65.
+      # Raise this when actual rises — never lower it to make a red build green.
       - name: Run tests (with coverage gate)
-        run: pytest tests/ -v --cov=device_mcp_gateway --cov-report=term-missing --cov-fail-under=65
+        run: pytest tests/ -v --cov=device_mcp_gateway --cov-report=term-missing --cov-fail-under=81
 
       - name: Build Docker image
         run: docker build -t device-mcp-gateway:ci .

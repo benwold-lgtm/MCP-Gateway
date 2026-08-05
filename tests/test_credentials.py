@@ -9,6 +9,7 @@ decrypt them on read. Distributed mode refuses to start without a key.
 """
 
 import json
+import secrets
 
 import pytest
 import fakeredis.aioredis
@@ -244,7 +245,9 @@ def test_distributed_with_api_key_starts_without_anonymous(monkeypatch):
     from device_mcp_gateway.main import create_app
 
     monkeypatch.delenv("MCP_SECRET_KEY", raising=False)
-    app = create_app(override_config=_distributed_secure_base(api_key="some-admin-key"))  # must not raise
+    # A realistic key, not a hand-typed one: distributed mode also enforces key strength
+    # (review item 11), so the fixture has to look like something an operator would issue.
+    app = create_app(override_config=_distributed_secure_base(api_key=secrets.token_hex(24)))  # must not raise
     assert app.state.mode == "distributed"
 
 

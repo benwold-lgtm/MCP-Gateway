@@ -61,6 +61,12 @@ gateway:
   # and workers REFUSE to start in distributed mode without a secret_key so
   # credentials are never written in plaintext. Set true to override (dev only).
   allow_plaintext_credentials: false
+  # Distributed mode refuses to start on a static API key that is under 16 characters or a
+  # common guessable value (admin, changeme, ...). These are full bearer credentials, and
+  # with OIDC enabled the same key is the break-glass path that still works when the IdP is
+  # down. Embedded mode only warns, so local dev is unaffected. Generate a real key with
+  # `openssl rand -hex 32`. Set true to override (trusted local network only).
+  allow_weak_keys: false
   # Maximum POST/PUT request body size in bytes (default 1 MB). Requests exceeding this return 413.
   max_body_bytes: 1048576
   # Seconds to cache the /admin/overview read aggregate per replica, so a polling

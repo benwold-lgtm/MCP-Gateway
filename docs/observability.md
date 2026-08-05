@@ -66,6 +66,7 @@ process-global registry needs no multiprocess mode.
 | `mcp_dead_letter_total` | counter | `hostname` | worker | Tool calls moved to a device's dead-letter stream because they were undeliverable. |
 | `mcp_tool_call_timeouts_total` | counter | `hostname` | gateway | Calls that hit the no-worker-responded timeout (F6). |
 | `mcp_calls_rejected_overload_total` | counter | `hostname` | gateway | Calls fast-failed with 429 because the device backlog exceeded the admission watermark (F-06). |
+| `mcp_oidc_validation_failures_total` | counter | `reason` | gateway | JWTs the OIDC validator rejected, falling through to static break-glass keys. `reason` ∈ `jwks_unavailable`/`expired`/`invalid_token`/`bad_algorithm`/`malformed`/`other` — a fixed set, because the raw error embeds attacker-controlled JWT contents. Sustained `jwks_unavailable` = the IdP is unreachable and the deployment has **silently degraded to break-glass-keys-only**; rising `invalid_token`/`bad_algorithm` usually means someone is probing with forged tokens. |
 | `mcp_circuit_breaker_opens_total` | counter | `hostname` | gateway/worker | Calls rejected because a device pod's circuit breaker was open. |
 
 The standard `prometheus_client` process/runtime collectors (`process_*`,

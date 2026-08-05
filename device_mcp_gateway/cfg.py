@@ -27,6 +27,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "secret_key": str,
         "secret_keys": list,
         "allow_plaintext_credentials": bool,
+        "allow_weak_keys": bool,
         "max_body_bytes": int,
         "read_cache_ttl": _NUM,
         "trust_proxy_headers": bool,

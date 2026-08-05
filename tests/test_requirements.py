@@ -121,3 +121,65 @@ def test_critical_deps_exclude_the_next_major():
         "critical dependencies need an upper bound so a clean `pip install -e .` cannot "
         "resolve past the tested major: " + "; ".join(unbounded)
     )
+
+
+# --- review item 12: the CI-gating dev tools need upper bounds too -----------
+
+# `black --check` FAILS the build, and flake8/mypy gate it as well. An unbounded spec on
+# those means an upstream major release turns an unrelated PR red with no change from us:
+# a new black reformats the tree, a new flake8/mypy adds a rule. The runtime guard above
+# does not cover them, because they live in the `dev` extra rather than in
+# project.dependencies. pre-commit is excluded deliberately — it is developer convenience
+# and gates nothing in CI.
+_CI_GATING_DEV_TOOLS = frozenset({"black", "flake8", "mypy", "pytest", "pytest-asyncio", "pytest-cov"})
+
+
+def _pyproject_dev_specs() -> dict[str, Requirement]:
+    data = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    dev = data["project"]["optional-dependencies"]["dev"]
+    return {_dep_name(d): Requirement(d) for d in dev}
+
+
+def test_ci_gating_dev_tools_exclude_the_next_major():
+    """Same shape as the runtime guard, applied to the tools that can fail the build."""
+    specs = _pyproject_dev_specs()
+    missing = _CI_GATING_DEV_TOOLS - set(specs)
+    assert not missing, f"expected these in the dev extra: {sorted(missing)}"
+
+    unbounded = []
+    for name in sorted(_CI_GATING_DEV_TOOLS):
+        req = specs[name]
+        installed = _installed_version(name)
+        if installed is None:
+            continue
+        next_major = f"{Version(installed).major + 1}.0.0"
+        if req.specifier.contains(next_major, prereleases=True):
+            unbounded.append(f"{name} (installed {installed}) still admits {next_major} via '{req.specifier or 'any'}'")
+    assert (
+        not unbounded
+    ), "CI-gating dev tools need an upper bound so an upstream major cannot turn an " "unrelated PR red: " + "; ".join(
+        unbounded
+    )
+
+
+def test_installed_dev_tools_satisfy_their_specifiers():
+    """The bounds must admit what is actually installed — a too-tight bound is its own
+    outage, and would mean CI and local dev disagree about which tool version is legal."""
+    specs = _pyproject_dev_specs()
+    violations = []
+    for name in sorted(_CI_GATING_DEV_TOOLS):
+        installed = _installed_version(name)
+        if installed is None:
+            continue
+        if not specs[name].specifier.contains(installed, prereleases=True):
+            violations.append(f"{name}: installed {installed} not in {specs[name].specifier}")
+    assert not violations, "dev tool bounds exclude the installed version: " + "; ".join(violations)
+
+
+def _installed_version(canonical_name: str) -> str | None:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version(canonical_name)
+    except PackageNotFoundError:
+        return None

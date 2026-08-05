@@ -245,6 +245,15 @@ calls_rejected_overload_total = Counter(
     "being silently trimmed at MAXLEN.",
     ["hostname"],
 )
+oidc_validation_failures_total = Counter(
+    "mcp_oidc_validation_failures_total",
+    "JWTs the OIDC validator rejected, falling through to static break-glass keys "
+    "(review item 10). A sustained rise in reason=jwks_unavailable means the IdP or its "
+    "JWKS endpoint is unreachable and the deployment has silently degraded to "
+    "break-glass-keys-only; reason=invalid_token/bad_algorithm rising instead usually "
+    "means someone is probing with forged tokens.",
+    ["reason"],
+)
 worker_calls_throttled_total = Counter(
     "mcp_worker_calls_throttled_total",
     "Tool-call dispatches that had to wait on the worker-wide concurrency cap "

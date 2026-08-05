@@ -52,7 +52,7 @@ from device_mcp_gateway.lifecycle import (  # noqa: F401  (re-exported, see abov
 from device_mcp_gateway.logging_setup import setup_logging
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.ratelimit import InMemoryRateLimiter, RedisRateLimiter, client_ip_key_func
-from device_mcp_gateway.rbac import authenticate_request, build_authenticator
+from device_mcp_gateway.rbac import authenticate_request, build_authenticator, weak_static_keys
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import MemoryRegistryBackend, RedisRegistryBackend
@@ -195,6 +195,23 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             "least one key (MCP_GATEWAY_API_KEY / MCP_ADMIN_KEY / gateway.rbac) or, for a trusted local "
             "network only, set gateway.allow_anonymous: true to override."
         )
+
+    # Static-key strength gate (review item 11): a weak API key is a full bearer credential,
+    # and with OIDC enabled it is also the break-glass key that still works when the IdP is
+    # down — so `MCP_ADMIN_KEY=admin` is not meaningfully better than no auth at all. Warned
+    # in every mode by build_static_authenticator; hard-failed in distributed (production)
+    # like the other Tier-0 gates. The floor sits well below anything this project generates
+    # or documents, so a real deployment never trips it.
+    if _mode == "distributed" and not _gateway_cfg.get("allow_weak_keys", False):
+        _weak = weak_static_keys(cfg)
+        if _weak:
+            _detail = "; ".join(f"{name} ({why})" for name, why in _weak)
+            raise RuntimeError(
+                f"Refusing to start in distributed mode with a weak API key: {_detail}. "
+                "These are full bearer credentials (and the break-glass path when OIDC is "
+                "enabled). Generate a strong one — openssl rand -hex 32 — or, for a trusted "
+                "local network only, set gateway.allow_weak_keys: true to override."
+            )
 
     # Redis control-plane authn gate (Tier-0 F-24): distributed mode keeps all shared state in
     # Redis; refuse an unauthenticated Redis (no password) unless redis.allow_insecure is set.

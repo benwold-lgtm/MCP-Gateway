@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -23,6 +24,7 @@ from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 
+from device_mcp_gateway import metrics
 from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, audit_event
 
 if TYPE_CHECKING:
@@ -134,6 +136,38 @@ def _looks_like_jwt(token: str) -> bool:
     return len(parts) == 3 and all(parts)
 
 
+# Fixed, small set of failure labels. The raw OIDCError text must NEVER become a metric
+# label: it embeds attacker-controlled JWT contents (kid, alg), which would let a caller
+# mint unbounded Prometheus time series just by varying a header (review item 10).
+_OIDC_FAILURE_REASONS = ("jwks_unavailable", "expired", "invalid_token", "bad_algorithm", "malformed", "other")
+
+# Seconds between OIDC-failure warnings. A forged-JWT flood or an IdP outage would
+# otherwise emit one line per request; one warning per minute carrying the suppressed
+# count keeps the signal without the flood.
+_OIDC_WARN_INTERVAL = 60.0
+
+
+def _classify_oidc_failure(message: str) -> str:
+    """Map an OIDCError message onto :data:`_OIDC_FAILURE_REASONS`.
+
+    Substring matching against our own raised messages (``oidc.py``) — deliberately
+    coarse, because the value is telling an operator "the IdP is down" apart from
+    "someone is forging tokens", not reproducing the exception.
+    """
+    text = (message or "").lower()
+    if "jwks" in text or "unreachable" in text or "discovery" in text:
+        return "jwks_unavailable"
+    if "expired" in text:
+        return "expired"
+    if "alg " in text or "allow-list" in text:
+        return "bad_algorithm"
+    if "malformed" in text or "no kid" in text or "missing subject" in text:
+        return "malformed"
+    if "validation failed" in text or "signature" in text:
+        return "invalid_token"
+    return "other"
+
+
 class CompositeAuthenticator:
     """Federated OIDC first, static break-glass keys second, else 401 (ADR-0007).
 
@@ -141,11 +175,41 @@ class CompositeAuthenticator:
     static key; **else** 401. Static keys keep working when the IdP/JWKS is unreachable,
     because an opaque key never enters the OIDC path and an OIDC failure falls through to
     the key match (TM-I-12 — fail closed for OIDC, open to break-glass keys).
+
+    That fall-through used to be logged at ``debug``, which made the *degraded* state
+    invisible: an IdP or JWKS outage silently reduced the whole deployment to
+    break-glass-keys-only, and forged-JWT probing produced no signal at all (review item
+    10). It now increments ``mcp_oidc_validation_failures_total`` and emits a rate-limited
+    WARNING. Falling through is still the correct behaviour — it is what keeps break-glass
+    working — it just is not silent any more.
     """
 
     def __init__(self, *, static: Authenticator, oidc: "OIDCValidator") -> None:
         self._static = static
         self._oidc = oidc
+        self._oidc_warn_last = 0.0
+        self._oidc_warn_suppressed = 0
+
+    def _note_oidc_failure(self, exc: Exception) -> None:
+        """Count every failure; warn at most once per :data:`_OIDC_WARN_INTERVAL`."""
+        message = str(exc)
+        reason = _classify_oidc_failure(message)
+        metrics.oidc_validation_failures_total.labels(reason=reason).inc()
+
+        now = time.monotonic()
+        if now - self._oidc_warn_last < _OIDC_WARN_INTERVAL:
+            self._oidc_warn_suppressed += 1
+            return
+        suppressed = self._oidc_warn_suppressed
+        self._oidc_warn_last = now
+        self._oidc_warn_suppressed = 0
+        extra = f" ({suppressed} similar suppressed in the last {int(_OIDC_WARN_INTERVAL)}s)" if suppressed else ""
+        logger.warning(
+            f"OIDC validation failed (reason={reason}), falling through to static break-glass "
+            f"keys{extra}: {message}. If this persists, the IdP or its JWKS endpoint is "
+            "unreachable and only break-glass keys can authenticate — see "
+            "mcp_oidc_validation_failures_total."
+        )
 
     @property
     def enabled(self) -> bool:
@@ -170,7 +234,8 @@ class CompositeAuthenticator:
             except OIDCError as exc:
                 # Not a valid JWT for us — fall through to static keys (it may be a
                 # break-glass key that happens to be JWT-shaped, or the IdP is down).
-                logger.debug(f"OIDC validation fell through to static keys: {exc}")
+                # Counted + rate-limit-warned so the degraded state is not silent.
+                self._note_oidc_failure(exc)
                 principal = None
 
         if principal is None:
@@ -208,7 +273,80 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
     enabled = len(keys) > 0
     if enabled:
         logger.info(f"Gateway static-key auth: {len(keys)} API key(s) configured")
+        for name, why in weak_static_keys(cfg):
+            logger.warning(
+                f"Gateway API key '{name}' is weak ({why}). It is a full bearer credential — "
+                "with OIDC enabled it is also the break-glass key that still works when the "
+                "IdP is down. Generate a real one: openssl rand -hex 32. "
+                "(Distributed mode refuses to start on this; override with "
+                "gateway.allow_weak_keys: true.)"
+            )
     return Authenticator(keys, enabled)
+
+
+# Guessable regardless of length — the review's example was literally MCP_ADMIN_KEY=admin.
+_WEAK_KEY_VALUES = frozenset(
+    {
+        "admin",
+        "administrator",
+        "password",
+        "passwd",
+        "changeme",
+        "change-me",
+        "secret",
+        "test",
+        "testing",
+        "dev",
+        "development",
+        "default",
+        "mcp",
+        "gateway",
+        "key",
+        "apikey",
+        "api-key",
+        "token",
+        "letmein",
+        "hunter2",
+        "12345678",
+        "please-change-me",
+    }
+)
+
+# Comfortably below everything this project generates or documents: the LITE bootstrap
+# uses secrets.token_urlsafe(24) (32 chars) and the docs use `openssl rand -hex 24/32`
+# (48/64 chars). So this flags hand-typed keys without breaking a real deployment.
+_MIN_KEY_LENGTH = 16
+
+
+def weak_static_keys(cfg: dict) -> list[tuple[str, str]]:
+    """Static API keys that are too guessable to be a bearer credential (review item 11).
+
+    Returns ``[(source_name, reason)]`` — empty when every configured key is acceptable,
+    and empty when no keys are configured at all (auth-disabled is the separate F-23
+    finding, with its own gate; reporting it here too would just be noise).
+
+    Deliberately a *shape* check — length plus a small guessable-value list — not an
+    entropy estimate. Shannon entropy over a short string is nearly meaningless and would
+    reject legitimate high-entropy keys that happen to look repetitive, while a length
+    floor catches the actual failure mode: someone typing a memorable key by hand.
+    """
+    gateway = cfg.get("gateway", {})
+    found: list[tuple[str, str]] = []
+
+    def _check(token: Optional[str], name: str) -> None:
+        if not token:
+            return
+        if token.strip().lower() in _WEAK_KEY_VALUES:
+            found.append((name, "a common, guessable value"))
+        elif len(token) < _MIN_KEY_LENGTH:
+            found.append((name, f"only {len(token)} characters; use at least {_MIN_KEY_LENGTH}"))
+
+    _check(os.getenv("MCP_GATEWAY_API_KEY") or gateway.get("api_key"), "MCP_GATEWAY_API_KEY/gateway.api_key")
+    _check(os.getenv("MCP_ADMIN_KEY"), "MCP_ADMIN_KEY")
+    _check(os.getenv("MCP_VIEWER_KEY"), "MCP_VIEWER_KEY")
+    for entry in gateway.get("rbac", []) or []:
+        _check(entry.get("key"), f"gateway.rbac[{entry.get('name') or entry.get('role', '?')}]")
+    return found
 
 
 def build_authenticator(cfg: dict) -> Union[Authenticator, CompositeAuthenticator]:
