@@ -126,13 +126,13 @@ def rewrite_tools_call(manifest: FleetManifest, message: dict[str, Any]) -> tupl
 async def handle_fleet_message(reg: Any, manifest: FleetManifest, message: dict[str, Any]) -> dict[str, Any] | None:
     """Dispatch one JSON-RPC message for a fleet session.
 
-    Mirrors ``DevicePod._handle_mcp_message``'s method set (initialize/ping/
+    Mirrors ``BasePod._handle_mcp_message``'s method set (initialize/ping/
     tools/list/tools/call) but aggregated across ``manifest``'s devices. Passed
     as the ``message_handler`` to an ``SseTransport``, so — same contract as a
     per-device pod — the return value here is what gets pushed onto the
     session's SSE queue, not the HTTP POST response body.
     """
-    from device_mcp_gateway.pods.device_pod import negotiate_protocol_version
+    from device_mcp_gateway.pods.pod_base import negotiate_protocol_version
 
     method = message.get("method", "") if isinstance(message, dict) else ""
     msg_id = message.get("id") if isinstance(message, dict) else None

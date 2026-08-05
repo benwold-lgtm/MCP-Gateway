@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from device_mcp_gateway.auth.base import AbstractAuth
-from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.pods.pod_base import BasePod
 from device_mcp_gateway.shared.registry_backend import DeviceConfig
 
 
@@ -29,7 +29,7 @@ class DeviceProfile:
     config: DeviceConfig
     auth: AbstractAuth | None = None
     spec_data: dict[str, Any] | None = None
-    pod: DevicePod | None = None
+    pod: BasePod | None = None
 
     # Convenience pass-throughs so call-sites don't need to know about .config
     @property

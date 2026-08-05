@@ -18,10 +18,10 @@ import pytest
 
 from device_mcp_gateway import API_V1_PREFIX
 from device_mcp_gateway.core.translator import McpManifest
-from device_mcp_gateway.pods.device_pod import (
+from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.pods.pod_base import (
     PREFERRED_PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
-    DevicePod,
     negotiate_protocol_version,
 )
 

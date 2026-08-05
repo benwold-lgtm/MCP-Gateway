@@ -21,9 +21,9 @@ from device_mcp_gateway.core.translator import SpecTranslator, _sanitize_text
 from device_mcp_gateway.pods.device_pod import (
     _MAX_RESPONSE_BYTES,
     _sanitize_header_params,
-    _validate_arguments,
     DevicePod,
 )
+from device_mcp_gateway.pods.pod_base import _validate_arguments
 from device_mcp_gateway.core.translator import McpManifest, McpTool
 from device_mcp_gateway.security.url_policy import UrlPolicyError, validate_target_url
 
