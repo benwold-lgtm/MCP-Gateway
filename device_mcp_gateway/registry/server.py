@@ -40,6 +40,7 @@ from device_mcp_gateway.shared.registry_backend import (
     MemoryRegistryBackend,
 )
 from device_mcp_gateway.storage.base import AbstractDeviceStore
+from device_mcp_gateway.upstream.mcp_discovery import McpDiscoveryService
 
 # Re-exported for backward compatibility — DeviceProfile moved to registry.models
 # during the F-12 decomposition, but importers may still reference it here.
@@ -96,6 +97,12 @@ class Registry:
         # collaborators. The Registry orchestrates them (CRUD, provisioning, health).
         self._spec_service = SpecService(
             backend=self._backend, config=config, tls_verify=self._tls_verify, retry_policy=self._retry_policy
+        )
+        # The proxy-side counterpart, for devices whose upstream is an MCP server rather
+        # than an OpenAPI document. It reuses the SpecService's guarded client rather than
+        # building a second one, so both discovery paths share one egress policy and pool.
+        self._mcp_discovery = McpDiscoveryService(
+            backend=self._backend, config=config, client_factory=self._spec_service.client
         )
         self._pod_supervisor = PodSupervisor(
             backend=self._backend,
@@ -370,7 +377,7 @@ class Registry:
             try:
                 reachable = await self.check_reachability(profile)
                 if reachable:
-                    await self._spec_service.fetch_spec(profile)
+                    await self._discovery_for(profile).fetch_spec(profile)
                     if profile.spec_data and not profile.pod_active:
                         await self._pod_supervisor.spawn(profile)
             except Exception as exc:
@@ -435,16 +442,32 @@ class Registry:
             await self._backend.set_device(record["hostname"], cfg)
             await self._provision_device(profile)
 
+    def _discovery_for(self, profile: DeviceProfile) -> Any:
+        """The discovery implementation for this device's upstream kind (ADR-0009).
+
+        Both expose ``fetch_spec(profile) -> bool`` ("did the tool set change"), so
+        provisioning and the health loop pick one here rather than branching inline.
+        """
+        if profile.config.upstream_kind == "mcp":
+            return self._mcp_discovery
+        return self._spec_service
+
     async def check_reachability(self, profile: DeviceProfile) -> bool:
-        try:
-            resp = await send_with_retry(
-                lambda: self._spec_service.client().get(profile.base_url, timeout=5),
-                method="GET",
-                policy=self._retry_policy,
-            )
-            profile.config.reachable = resp.status_code < 500
-        except Exception:
-            profile.config.reachable = False
+        if profile.config.upstream_kind == "mcp":
+            # An MCP endpoint answers a bare GET with 404/405, so the ``status_code < 500``
+            # test below would score a dead or misconfigured upstream as healthy and spawn
+            # a pod against nothing. Reachability here is a successful ``initialize``.
+            profile.config.reachable = await self._mcp_discovery.check_reachable(profile)
+        else:
+            try:
+                resp = await send_with_retry(
+                    lambda: self._spec_service.client().get(profile.base_url, timeout=5),
+                    method="GET",
+                    policy=self._retry_policy,
+                )
+                profile.config.reachable = resp.status_code < 500
+            except Exception:
+                profile.config.reachable = False
         profile.config.last_check = time.time()
         await self._backend.update_device_fields(
             profile.hostname, reachable=profile.config.reachable, last_check=profile.config.last_check
@@ -460,7 +483,7 @@ class Registry:
                     reachable = await self.check_reachability(profile)
                     spec_changed = False
                     if reachable:
-                        spec_changed = await self._spec_service.fetch_spec(profile)
+                        spec_changed = await self._discovery_for(profile).fetch_spec(profile)
                     if profile.reachable and not profile.pod_active:
                         await self._pod_supervisor.spawn(profile)
                     elif not profile.reachable and profile.pod_active:

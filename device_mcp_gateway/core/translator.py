@@ -69,20 +69,52 @@ class RequestBodySpec:
 
 
 @dataclass
+class ProxyToolSpec:
+    """What a proxied tool needs that a translated one does not (ADR-0009).
+
+    ``upstream_tool_name`` is the name to send in ``tools/call``, kept verbatim while the
+    LLM-facing ``McpTool.name`` is sanitised and deduped — the same split as
+    ``param_wire_names`` for OpenAPI parameters (F-04). Losing it means calling the wrong
+    tool, or none.
+
+    The hints mirror MCP's tool annotations. They are advisory metadata from an untrusted
+    upstream, so they may relax nothing that matters for safety: idempotency defaults to
+    ``False`` and a redelivered proxied call is refused rather than re-run (F-08).
+    """
+
+    upstream_tool_name: str
+    idempotent_hint: bool = False
+    read_only_hint: bool = False
+
+
+@dataclass
 class McpTool:
-    """MCP tool representation."""
+    """MCP tool representation.
+
+    Two kinds share this shape, discriminated by ``source``: a tool translated from an
+    OpenAPI operation (``method``/``path``/``param_locations`` populated) and one proxied
+    from a remote MCP server (``proxy`` populated, no HTTP shape at all).
+
+    **Readers must branch on ``source``, never on ``method == ""``.** A missing method is
+    also what a failed round-trip looks like, and conflating the two is how a proxied write
+    would come to look idempotent and be re-executed on redelivery.
+    """
 
     name: str
     description: str
     schema: dict[str, Any]
-    method: str  # GET, POST, PUT, DELETE, PATCH
-    path: str
+    # OpenAPI only — empty for a proxied tool, which has no HTTP shape.
+    method: str = ""
+    path: str = ""
     tags: list[str] = field(default_factory=list)
     param_locations: dict[str, str] = field(default_factory=dict)
     request_body: RequestBodySpec | None = None
     # MCP-arg-name -> upstream wire name, only for params renamed to resolve a
     # cross-location name collision (F-04). Empty for the common no-collision case.
     param_wire_names: dict[str, str] = field(default_factory=dict)
+    # "openapi" | "proxy" — see the class docstring.
+    source: str = "openapi"
+    proxy: ProxyToolSpec | None = None
 
 
 @dataclass

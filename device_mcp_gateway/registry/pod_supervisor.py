@@ -24,9 +24,16 @@ from typing import Any
 from loguru import logger
 
 from device_mcp_gateway.auth.base import CredentialsChangedHook
-from device_mcp_gateway.core.spec_limits import DEFAULT_TRANSLATE_TIMEOUT, SpecTooLargeError, run_translation
+from device_mcp_gateway.core.spec_limits import (
+    DEFAULT_MAX_OPERATIONS,
+    DEFAULT_TRANSLATE_TIMEOUT,
+    SpecTooLargeError,
+    run_translation,
+)
 from device_mcp_gateway.core.translator import SpecTranslator, manifest_to_dict
 from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.pods.mcp_proxy_pod import McpProxyPod
+from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest
 from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
 from device_mcp_gateway.registry.models import DeviceProfile
 from device_mcp_gateway.registry.spec_service import SpecService
@@ -77,6 +84,7 @@ class PodSupervisor:
         self._profiles = profiles
         self._max_pods = config.get("max_concurrent_pods", 50)
         self._spec_translate_timeout = config.get("spec_translate_timeout", DEFAULT_TRANSLATE_TIMEOUT)
+        self._max_upstream_tools = config.get("max_upstream_tools", DEFAULT_MAX_OPERATIONS)
 
     async def spawn(self, profile: DeviceProfile) -> None:
         if sum(1 for p in self._profiles.values() if p.pod_active) >= self._max_pods:
@@ -90,13 +98,23 @@ class PodSupervisor:
             logger.warning(msg)
             profile.config.spawn_error = msg
             return
+        is_proxy = profile.config.upstream_kind == "mcp"
         try:
-            mcp_manifest = await run_translation(
-                _spec_executor,
-                partial(_translate_spec_sync, spec, profile.hostname),
-                timeout=self._spec_translate_timeout,
-                hostname=profile.hostname,
-            )
+            if is_proxy:
+                # Already-discovered tool definitions: no parsing to offload, so this does
+                # NOT go through the translation pool. That pool is for CPU-bound parsing
+                # of a document; running discovery output through it would occupy a worker
+                # slot for no benefit and demand a picklable callable.
+                mcp_manifest = build_proxy_manifest(
+                    profile.hostname, spec.get("tools", []), max_tools=self._max_upstream_tools
+                )
+            else:
+                mcp_manifest = await run_translation(
+                    _spec_executor,
+                    partial(_translate_spec_sync, spec, profile.hostname),
+                    timeout=self._spec_translate_timeout,
+                    hostname=profile.hostname,
+                )
         except (SpecTooLargeError, ValueError) as exc:
             msg = f"Spec for {profile.hostname} rejected: {exc} (F-09)"
             logger.warning(msg)
@@ -105,7 +123,8 @@ class PodSupervisor:
         keep_alive = self._config.get("transport", {}).get("sse", {}).get("keep_alive_interval", 30)
         if profile.auth is not None and self._credential_writeback is not None:
             profile.auth.on_credentials_changed(self._credential_writeback(profile.hostname))
-        pod = DevicePod(
+        pod_cls = McpProxyPod if is_proxy else DevicePod
+        pod = pod_cls(
             hostname=profile.hostname,
             manifest=mcp_manifest,
             transport=profile.transport,
