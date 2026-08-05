@@ -34,7 +34,7 @@ _ALLOWED_SCHEMES = {"http", "https"}
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
-# Ports carrying a NON-HTTP wire protocol (F-63 / review item 9). The gateway only ever
+# Ports carrying a NON-HTTP wire protocol (third-party review item 9). The gateway only ever
 # speaks HTTP to a target, so pointing it at one of these can't be a legitimate device —
 # it can only be a port scan or an attempt to smuggle a payload into another protocol via
 # a crafted request line/headers.

@@ -75,6 +75,9 @@ against a measured load baseline** (run the [load harness](load-testing.md); F-2
 
 ## 7. Maintenance
 
+Note the mitigations below are **designed and unit-tested, not yet demonstrated under real
+faults** — see [testing-gaps.md](testing-gaps.md) (TG-1).
+
 Add a row when a new failure mode is found (incident, chaos run — F-63) or a new component
 is introduced. Every row's **Detection** must name a real signal; a failure with no
 detection is the gap to close first (add a metric/alert before the next release).

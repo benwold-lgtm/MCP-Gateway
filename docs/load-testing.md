@@ -93,3 +93,8 @@ Fault-injection / game-day is tracked separately as **F-63** — the experiment 
 (`E1–E10`) is ready to run when a live platform exists. Combine the two: baseline first,
 then break things and confirm the failure-mode mitigations in
 [failure-modes.md](failure-modes.md) behave as documented.
+
+Both are recorded in [testing-gaps.md](testing-gaps.md) — the baseline table below is
+**TG-2** and is still empty, which is exactly the gap. Chaos is **TG-1**, and depends on
+this baseline existing first: chaos results are uninterpretable without a healthy
+comparison.
