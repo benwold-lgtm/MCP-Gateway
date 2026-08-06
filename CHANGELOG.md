@@ -117,6 +117,25 @@ misconfigured deployment will now hit** — read those notes before upgrading.
 
 ### Fixed
 
+- **A device's cached manifest expired an hour after its pod spawned and never came back**, so
+  a healthy device silently became undiscoverable. The manifest is stored with
+  `ex=spec_cache_ttl`, but its only writers were the spawn path (which runs only when the cache
+  is *already* empty) and the changed-spec branch of the health loop — and the spec poll
+  returned early whenever the hash matched, which is the normal case for a stable device.
+  Nothing renewed the key. The pod kept its manifest in memory throughout, so MCP clients saw
+  no problem at all while `GET /devices/{h}/tools` returned 409, **`GET /v1/fleet/sse` returned
+  404 "no reachable devices" for an entire healthy fleet**, and the UI showed a reachable,
+  pod-active device with zero tools. The manifest is now renewed on every poll of an unchanged
+  spec — a lease held up by the worker serving the device, lapsing once none does — and rebuilt
+  from the current spec if it has already gone, instead of waiting for a pod respawn. Found on
+  a live cluster four hours into a run; no test had ever let a TTL elapse.
+- **An idle MCP session expired under a stream the client still had open.** The session TTL was
+  refreshed inside the results-stream reader but *after* the branch handling an elapsed
+  `XREAD` block, so it was unreachable on a session carrying no results — i.e. a connected
+  client waiting, which is the steady state. After 24 h the session key vanished and the next
+  POST got a 404 for a session that was, from the client's side, plainly alive. Found while
+  auditing every TTL'd key after the manifest defect above; the rest (leader locks, device
+  claims, heartbeats) renew correctly, and the short-lived ones are meant to expire.
 - **Tool-change governance never ran in distributed mode.** The worker's health loop compared
   each spec poll against `spec_hash`, but the only writers of that field lived in the
   registry-side spec services, which distributed mode does not run — so the field stayed empty,

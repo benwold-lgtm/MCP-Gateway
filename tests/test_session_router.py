@@ -251,3 +251,38 @@ async def test_subscribe_throttles_refresh_across_rapid_messages(monkeypatch):
     assert len(results) == 3
     # All three messages land within one 60s throttle window → a single refresh.
     assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_idle_stream_still_renews_its_session_lease(monkeypatch):
+    """A session's lease must track how long the client held the stream open, not how much
+    traffic crossed it.
+
+    The refresh used to sit *after* the ``if not resp: continue`` that handles an elapsed
+    XREAD block, so it was unreachable on a stream carrying no results. A quiet session —
+    an MCP client connected and waiting, which is the steady state — expired at
+    _SESSION_TTL under a stream it still had open, and its next POST got a 404 for a
+    session that was, from the client's side, plainly alive.
+    """
+    from device_mcp_gateway.shared import session_router as sr
+
+    # Make the XREAD block elapse promptly so the loop spins without ever seeing a message.
+    monkeypatch.setattr(sr, "_XREAD_BLOCK_MS", 10)
+    router = _router()
+    await router.register("quiet", "dev1", "gw-a")
+    calls = {"n": 0}
+
+    async def _counting_refresh(session_id, ttl=None):
+        calls["n"] += 1
+
+    monkeypatch.setattr(router, "refresh", _counting_refresh)
+
+    async def _consume():
+        async for _ in router.subscribe("quiet"):
+            pass  # nothing is ever published
+
+    task = asyncio.create_task(_consume())
+    await asyncio.sleep(0.2)  # several empty XREAD windows
+    task.cancel()
+
+    assert calls["n"] >= 1, "an idle session never renewed its TTL"
