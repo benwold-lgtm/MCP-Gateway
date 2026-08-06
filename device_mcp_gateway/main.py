@@ -328,10 +328,15 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         loop_hb_task = asyncio.create_task(_event_loop_heartbeat(app))
 
         if _mode == "distributed":
-            from device_mcp_gateway.shared.redis_client import create_redis
+            from device_mcp_gateway.shared.redis_client import create_redis, wait_for_redis
             from device_mcp_gateway.shared.session_router import SessionRouter
 
             redis_client = await create_redis(cfg)
+            # Wait for Redis rather than dying on the first command. Ordering between this
+            # and Redis is not guaranteed on any orchestrator, and a startup race should
+            # not present as a crash. See wait_for_redis for why the command-level retry
+            # budget is the wrong tool here.
+            await wait_for_redis(redis_client, cfg, component="gateway")
             # Dedicated client/pool for SSE pub/sub: one connection per open
             # stream, so it must be sized above the command pool (F3).
             _pubsub_max = cfg.get("redis", {}).get("pubsub_max_connections", 1000)

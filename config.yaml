@@ -238,6 +238,17 @@ redis:
   # hangs on the OS default (often ~2 minutes) — far longer than the failover.
   socket_connect_timeout: 5
 
+  # --- Startup ---
+  # Seconds to wait at process start for Redis to become reachable, retrying with
+  # jittered backoff. This is NOT the same job as `retries` above: that budget is
+  # deliberately short because a request caught mid-failover should fail fast rather
+  # than block a caller. At startup nobody is waiting on a response, and the usual
+  # reason Redis is unreachable is that it simply hasn't finished starting — start
+  # order is not guaranteed on any orchestrator.
+  # Exceeding this is still a hard failure with a non-zero exit, so a genuinely dead
+  # Redis reaches your probes and alerts. Set 0 to fail on the first attempt instead.
+  startup_timeout: 60
+
 auth:
   # Default auth type (api_key or oauth2)
   type: "api_key"

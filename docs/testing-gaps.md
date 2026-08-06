@@ -129,7 +129,9 @@ ConfigMap/Secret wiring, probe timing, ordering and ingress admission all exerci
   symptom (a timeout that never names the policy) and a one-liner to confirm it. The
   behaviour is unchanged and intentional; what was missing was any way to find out.
 - Workers `exit(1)` on the first Redis connection failure at startup instead of retrying;
-  kubelet backoff masks it. **Still open** — the only one of these that wants a code change.
+  kubelet backoff masks it. **Fixed 2026-08-06** — both the gateway and the worker now wait
+  for Redis with jittered backoff up to `redis.startup_timeout`, then still fail hard so a
+  genuinely dead Redis reaches the probes.
 - In-cluster upstreams require `security.allow_private_targets`, which is correct behaviour
   but undocumented for k8s users — and the shipped ConfigMap's `security:` block is commented
   out, so a naive YAML patch of it silently does nothing. **Fixed 2026-08-06** — the block
@@ -148,7 +150,11 @@ ConfigMap/Secret wiring, probe timing, ordering and ingress admission all exerci
   that trust set onto every outbound call the process makes. **Still open**, recorded as a
   residual in [threat-model.md](threat-model.md); the real fix is per-device trust.
 - Unknown tool arguments are silently ignored rather than rejected (generated schemas carry no
-  `additionalProperties: false`), so a hallucinated argument reads as success. **Still open.**
+  `additionalProperties: false`), so a hallucinated argument reads as success. **Fixed
+  2026-08-06** — generated schemas are closed, which is a statement of fact rather than a
+  strictness preference: the translator lists every argument the dispatcher can place, and
+  anything else was being dropped anyway. Proxied MCP schemas are left as the upstream
+  published them.
 
 **Harness caveat, not a product finding.** Cilium's `cni.exclusive=true` removes kind's
 chained `portmap` plugin, so `hostPort` ingress does not work on kind. Production uses

@@ -67,6 +67,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "pubsub_max_connections": int,
         "retries": int,
         "health_check_interval": _NUM,
+        "startup_timeout": _NUM,
     },
     "auth": {
         "type": str,
