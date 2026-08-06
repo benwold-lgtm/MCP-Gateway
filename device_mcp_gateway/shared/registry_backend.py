@@ -153,6 +153,19 @@ class AbstractRegistryBackend(ABC):
     @abstractmethod
     async def delete_manifest(self, hostname: str) -> None: ...
 
+    async def touch_manifest(self, hostname: str, ttl: int) -> bool:
+        """Extend a cached manifest's lease, reporting whether there was one to extend.
+
+        The manifest is stored with a TTL so a device no longer served by any worker
+        stops being cached. That only works if the worker actually serving it keeps
+        renewing the lease — otherwise the cache expires under a live pod. Returns
+        False when the key is already gone, which tells the caller to rebuild.
+
+        Default implementation is for backends that do not expire manifests at all
+        (the in-memory one), where a stored manifest is always still there.
+        """
+        return await self.get_manifest(hostname) is not None
+
     # Tool-set change governance (F-41). Non-abstract with a safe default so a
     # backend (or test double) that doesn't persist the last change still works —
     # the diff endpoint then simply reports "no change recorded".
@@ -393,6 +406,12 @@ class RedisRegistryBackend(AbstractRegistryBackend):
 
     async def delete_manifest(self, hostname: str) -> None:
         await self._r.delete(KEYS.device_manifest(hostname))
+
+    async def touch_manifest(self, hostname: str, ttl: int) -> bool:
+        # EXPIRE returns 0 when the key does not exist, which is exactly the
+        # "cache already lapsed, rebuild it" signal the health loop needs — and
+        # it costs one round trip on the common path, unlike a GET-then-SET.
+        return bool(await self._r.expire(KEYS.device_manifest(hostname), ttl))
 
     async def get_last_tool_change(self, hostname: str) -> dict | None:
         # Governance metadata — stored without a TTL (unlike the manifest) so the

@@ -188,6 +188,19 @@ class WorkerHealthLoop:
             is_proxy = getattr(cfg, "upstream_kind", "openapi") == "mcp"
             new_hash = spec_fingerprint(spec, is_proxy=is_proxy)
             if new_hash == cfg.spec_hash:
+                # Unchanged spec — the overwhelmingly common case, and the one that used
+                # to fall straight out of this method. The manifest is cached with a TTL
+                # and its only writers are the spawn path (cold start) and the changed-
+                # spec branch below, so a device whose spec never changes lost its cache
+                # `spec_cache_ttl` after its pod spawned and did not get it back until the
+                # pod respawned. The pod itself holds the manifest in memory and kept
+                # serving MCP normally, so nothing looked wrong: the device stayed
+                # reachable and pod_active, while GET /tools returned 409, the fleet
+                # endpoint 404'd with "no reachable devices", and the UI showed a healthy
+                # device with no tools. Renewing here makes the TTL behave like the lease
+                # it is meant to be — held up by the worker that serves the device, and
+                # lapsing once none does.
+                await self._renew_manifest(hostname, spec, is_proxy=is_proxy)
                 return
             if not cfg.spec_hash:
                 # No baseline stored yet. The spawn path writes one from the spec it built
@@ -239,6 +252,37 @@ class WorkerHealthLoop:
                     await self.on_spec_changed(hostname)
         finally:
             await self._r.delete(lock_key)
+
+    async def _renew_manifest(self, hostname: str, spec: dict[str, Any], *, is_proxy: bool) -> None:
+        """Keep an unchanged device's cached manifest alive, rebuilding it if it lapsed.
+
+        Renewal is one EXPIRE on the common path. The rebuild only runs when the key
+        is already gone — a worker that was down while it expired, or an upgrade from
+        a version that never renewed — and it uses the spec the caller just fetched, so
+        it costs a translation but no extra request to the device.
+        """
+        if await self._backend.touch_manifest(hostname, self._spec_cache_ttl):
+            return
+        logger.info(f"Cached manifest for {hostname} had expired; rebuilding from the current spec")
+        try:
+            if is_proxy:
+                manifest_obj = build_proxy_manifest(hostname, spec.get("tools", []))
+            else:
+                manifest_obj = await run_translation(
+                    _spec_executor,
+                    partial(_translate_spec_sync, spec, hostname),
+                    timeout=self._spec_translate_timeout,
+                    hostname=hostname,
+                )
+        except (SpecTooLargeError, ValueError) as exc:
+            # Same treatment as the changed-spec path: log and leave the cache empty
+            # rather than storing something we could not translate.
+            logger.warning(f"Spec for {hostname} rejected while rebuilding cache: {exc} (F-09)")
+            return
+        # No governance diff here on purpose. The spec hash is unchanged, so the tool set
+        # is unchanged by definition — recording a change would report the device's whole
+        # tool set as added every time a cache happened to lapse.
+        await self._backend.set_manifest(hostname, _manifest_to_dict(manifest_obj), ttl=self._spec_cache_ttl)
 
     def _upstream_for(self, cfg: Any) -> Any:
         """A Streamable HTTP client for an MCP upstream, over the worker's guarded client."""

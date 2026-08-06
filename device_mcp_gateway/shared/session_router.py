@@ -195,12 +195,17 @@ class SessionRouter:
         try:
             while True:
                 resp = await self._ps.xread({key: last_id}, count=10, block=_XREAD_BLOCK_MS)
-                if not resp:
-                    continue  # block elapsed with no new entries — loop (allows cancellation)
                 # Throttle TTL refreshes so a busy stream doesn't issue one EXPIRE
-                # per message (RC-3).
+                # per message (RC-3). This runs BEFORE the empty-response check: the
+                # session's lease should track how long the client has held the stream
+                # open, not how much traffic crossed it. With the check after, an idle
+                # session never renewed and its key expired at _SESSION_TTL under a
+                # stream the client still had open — the next POST then got a 404 for a
+                # session that was, from the client's side, plainly alive.
                 if throttle.ready(time.monotonic()):
                     await self.refresh(session_id)
+                if not resp:
+                    continue  # block elapsed with no new entries — loop (allows cancellation)
                 for _stream, entries in resp:
                     for msg_id, fields in entries:
                         last_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
