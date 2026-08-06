@@ -185,6 +185,27 @@ under `registry.spec_max_bytes` (F-09); credentials decrypt (no `MCP_SECRET_KEY`
 mismatch — see [secret-rotation.md](secret-rotation.md)); `spawn_error` in the device
 record names the failure.
 
+### "`pod_active: true` but `/sse` returns 404" (transient, after a worker roll)
+
+Expected during a worker rollout, and it **self-resolves in seconds** — do not start
+deleting device records over it.
+
+The device record's `pod_active` flag and the worker actually holding the device's lease
+are two pieces of state that converge, not one atomic fact. While a worker is terminating,
+its lease has not yet expired and the flag still reads true, but the pod that would serve
+the stream is gone — so a session opened in that window gets a 404.
+
+```bash
+kubectl -n $NS rollout status deploy/device-mcp-worker    # is a roll actually in progress?
+curl -H "Authorization: Bearer $KEY" "$GW/v1/devices/$H/diagnostics"   # watch worker_id change
+```
+
+`worker_id` moving to a different worker is the reconciler completing the reassignment.
+Retry the connection after that. If the 404 persists past a minute with no roll in
+progress, it is not this — treat it as
+["A device shows `reachable: false`"](#a-device-shows-reachable-false--its-tools-fail-d1)
+and check `spawn_error`.
+
 ### "OIDC logins stopped working / everyone is on break-glass keys"
 
 `mcp_oidc_validation_failures_total` is the signal, and the `reason` label says which
@@ -252,6 +273,28 @@ The egress policy refused the target. The message says which rule:
   port isn't in it.
 
 Non-standard HTTP ports (8000, 8080, 8443) are allowed by default and need no config.
+
+**On Kubernetes, expect to hit the first of those.** A device addressed by Service DNS
+(`http://my-device.mcp-gateway.svc.cluster.local`) resolves into the service or pod CIDR,
+which is private — so an in-cluster upstream is refused until you set
+`security.allow_private_targets: true`. The shipped
+[ConfigMap](../deploy/kubernetes/configmap.yaml) carries the key explicitly for this
+reason. Set `MCP_ALLOW_PRIVATE_TARGETS=true` on the **worker** as well as the gateway: in
+distributed mode the worker performs the fetch, so configuring only the gateway gets the
+device registered and then fails it at health-check time.
+
+**A device that registers cleanly and is still unreachable is usually the NetworkPolicy,
+not the egress guard.** These are two independent controls and passing one says nothing
+about the other. The shipped policies allow egress to 80/443/8080/8443 only, so a device
+on any other port (a BMC on 623, Prism on 9440, an appliance on 8006) times out with
+nothing naming the policy as the cause. Add the port to **both** policies in
+[networkpolicy.yaml](../deploy/kubernetes/networkpolicy.yaml) — the worker's is the one
+that matters in distributed mode:
+
+```bash
+kubectl -n $NS exec deploy/device-mcp-worker -- \
+  python -c "import socket;socket.create_connection(('DEVICE_HOST', PORT), 5)"   # hangs = blocked
+```
 
 ### "Clients are getting 429s"
 

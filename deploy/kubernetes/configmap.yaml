@@ -77,17 +77,35 @@ data:
       # Set specific origins for production browser clients; empty disables CORS.
       allowed_origins: []
 
-    # security:
-    #   # Companion to gateway.trust_proxy_headers above. List the ranges the ingress
-    #   # controller actually connects from — your cluster pod CIDR, plus the service/LB
-    #   # range if traffic traverses one. These are cluster-specific; read them off your
-    #   # cluster rather than copying (kubectl get pod -n ingress-nginx -o wide, or the
-    #   # --cluster-cidr / --service-cluster-ip-range flags on the control plane).
-    #   # Only list infrastructure you control: each range is a hop an attacker no longer
-    #   # has to get past, and 0.0.0.0/0 would restore the spoofing bypass outright.
-    #   trusted_proxy_cidrs:
-    #     - "10.244.0.0/16"   # pod CIDR (kubeadm/flannel default — verify yours)
-    #     - "10.96.0.0/12"    # service CIDR (kubeadm default — verify yours)
+    # This block is deliberately NOT commented out. It used to be, and that was a trap:
+    # an operator adding a key under a commented-out parent produces a file where the
+    # parent still does not exist, so the setting silently does nothing and the gateway
+    # keeps the default. Keep `security:` present and add keys under it.
+    security:
+      # SSRF policy (Tier-0 F-02). The gateway fetches base_url/spec_url server-side, so
+      # by default it refuses targets resolving to private/loopback/link-local addresses
+      # — including cloud metadata at 169.254.169.254.
+      #
+      # ⚠️ In Kubernetes this default rejects in-cluster upstreams. A device addressed by
+      # Service DNS (http://my-device.mcp-gateway.svc.cluster.local) resolves into the
+      # service or pod CIDR, which IS private, so registration fails with
+      # "resolves to a blocked address" — correct behaviour, surprising the first time.
+      # Set true only when your fleet legitimately lives on private addresses, which is
+      # the normal case for a cluster-internal deployment.
+      # Env override: MCP_ALLOW_PRIVATE_TARGETS=true (set on the worker too — it does the
+      # fetching in distributed mode).
+      allow_private_targets: false
+
+      # Companion to gateway.trust_proxy_headers above. List the ranges the ingress
+      # controller actually connects from — your cluster pod CIDR, plus the service/LB
+      # range if traffic traverses one. These are cluster-specific; read them off your
+      # cluster rather than copying (kubectl get pod -n ingress-nginx -o wide, or the
+      # --cluster-cidr / --service-cluster-ip-range flags on the control plane).
+      # Only list infrastructure you control: each range is a hop an attacker no longer
+      # has to get past, and 0.0.0.0/0 would restore the spoofing bypass outright.
+      # trusted_proxy_cidrs:
+      #   - "10.244.0.0/16"   # pod CIDR (kubeadm/flannel default — verify yours)
+      #   - "10.96.0.0/12"    # service CIDR (kubeadm default — verify yours)
 
     logging:
       level: "INFO"

@@ -34,7 +34,17 @@ spec:
     - ports:
         - port: 6379
           protocol: TCP
-    # Downstream device APIs
+    # Downstream device APIs.
+    #
+    # ⚠️ THIS IS AN ALLOWLIST YOU ARE EXPECTED TO EXTEND. It covers the common HTTP
+    # ports only. A device on any other port — a BMC on 623, Prism on 9440, a vendor
+    # appliance on 8006 — is simply unreachable until you add it here, and the symptom
+    # is a connection timeout at health-check time rather than anything naming this
+    # policy. Add a port to BOTH this policy and the worker one below: in distributed
+    # mode the worker does the fetching, so the gateway's copy alone is not enough.
+    #
+    # The gateway's own egress guard (security.allowed_target_ports) is a separate,
+    # narrower control — satisfying one does not satisfy the other.
     - ports:
         - port: 80
           protocol: TCP
@@ -77,7 +87,10 @@ spec:
     - ports:
         - port: 6379
           protocol: TCP
-    # Downstream device APIs
+    # Downstream device APIs. Same allowlist as the gateway policy above, and the same
+    # caveat: extend it for any device on a port not listed here. In distributed mode
+    # THIS is the policy that governs whether a device is reachable at all, because the
+    # worker performs the spec fetch, the health check and every tool call.
     - ports:
         - port: 80
           protocol: TCP

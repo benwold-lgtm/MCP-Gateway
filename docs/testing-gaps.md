@@ -123,13 +123,32 @@ ConfigMap/Secret wiring, probe timing, ordering and ingress admission all exerci
 - **Tool-change governance never ran in distributed mode** — the `spec_hash` baseline was
   never written, so F-41 could not fire for any device (fixed; see the CHANGELOG).
 - The worker egress `NetworkPolicy` allows only 53/6379/80/443/8080/8443, so a device on any
-  other port is unreachable until the policy is edited. **Still open** — the shipped policy
-  should be documented as a list operators must extend.
+  other port is unreachable until the policy is edited. **Documented 2026-08-06** — both
+  policies now say they are an allowlist to extend, and the
+  [runbook](runbook.md#registering-a-device-returns-400-rejected-base_url--spec_url) gives the
+  symptom (a timeout that never names the policy) and a one-liner to confirm it. The
+  behaviour is unchanged and intentional; what was missing was any way to find out.
 - Workers `exit(1)` on the first Redis connection failure at startup instead of retrying;
-  kubelet backoff masks it. **Still open.**
+  kubelet backoff masks it. **Still open** — the only one of these that wants a code change.
 - In-cluster upstreams require `security.allow_private_targets`, which is correct behaviour
   but undocumented for k8s users — and the shipped ConfigMap's `security:` block is commented
-  out, so a naive YAML patch of it silently does nothing. **Still open.**
+  out, so a naive YAML patch of it silently does nothing. **Fixed 2026-08-06** — the block
+  ships live with the key set explicitly, so adding a sibling key works as an operator
+  expects, and the runbook covers the Service-DNS case (including that the *worker* needs the
+  override too, since it does the fetching).
+- The fleet endpoint answers `initialize`/`ping`/`tools/list` inline on the POST body but
+  delivers `tools/call` on the SSE stream — and in embedded mode delivers all four on the
+  stream. Both shapes are legal MCP, but the split cost a debugging round and was written
+  down nowhere. **Documented 2026-08-06** in the [README](../README.md#multiple-devices-in-one-session-fleet).
+- `pod_active: true` can briefly coexist with a 404 on `/sse` while a worker is terminating,
+  because the lease and the flag converge rather than moving together. Self-resolves in
+  seconds. **Documented 2026-08-06** as a [runbook symptom](runbook.md#pod_active-true-but-sse-returns-404-transient-after-a-worker-roll),
+  so it is not mistaken for a broken device.
+- TLS trust is **fleet-global** — one `ca_bundle` per process, so a self-signed device forces
+  that trust set onto every outbound call the process makes. **Still open**, recorded as a
+  residual in [threat-model.md](threat-model.md); the real fix is per-device trust.
+- Unknown tool arguments are silently ignored rather than rejected (generated schemas carry no
+  `additionalProperties: false`), so a hallucinated argument reads as success. **Still open.**
 
 **Harness caveat, not a product finding.** Cilium's `cni.exclusive=true` removes kind's
 chained `portmap` plugin, so `hostPort` ingress does not work on kind. Production uses

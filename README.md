@@ -214,6 +214,27 @@ principal that opened it) — this doesn't grant access to anything a caller cou
 already reach one device at a time. Capped at 25 devices per session by default
 (`registry.fleet_max_devices`).
 
+> **Where the reply arrives differs by method, and by mode.** A conforming MCP client
+> handles this already, because both shapes are legal — but anyone writing a client by
+> hand against `POST /v1/fleet/messages` will hit it, so it is written down here:
+>
+> | Mode | `initialize`, `ping`, `tools/list` | `tools/call` |
+> |---|---|---|
+> | **distributed** | answered **inline** in the POST response body | POST returns `{"status": "accepted"}`; the result arrives on the SSE stream |
+> | **embedded** | on the SSE stream (POST body is an ack) | on the SSE stream (POST body is an ack) |
+>
+> The gateway can answer the first three from shared state in distributed mode, so it
+> does rather than making a round trip through a worker. `tools/call` must reach the
+> worker holding the device, so its result comes back the only way it can — over the
+> stream the session already holds open.
+>
+> **Read the POST body first: if it carries a `result`, that is your answer.** Otherwise
+> match on the SSE stream by JSON-RPC `id`. A client that only ever waits on the stream
+> will hang on `tools/list` in distributed mode; one that only ever reads the POST body
+> will lose every tool result. The per-device endpoint
+> (`POST /v1/devices/{hostname}/messages`) has no such split — it publishes everything to
+> the worker and always answers on the stream.
+
 ### Manual invocation (SSE transport)
 
 The SSE transport uses a two-step protocol. The server assigns a session ID — do not supply your own.
