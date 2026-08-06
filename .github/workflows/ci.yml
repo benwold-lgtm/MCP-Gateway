@@ -5,6 +5,9 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  # Manual trigger. Lets a run be started without pushing a commit — needed when
+  # webhook delivery is degraded and pushes stop scheduling runs on their own.
+  workflow_dispatch:
 
 jobs:
   test:
