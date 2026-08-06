@@ -275,7 +275,23 @@ class SpecTranslator:
         return McpTool(
             name=name,
             description=description or f"{method} {path}",
-            schema={"type": "object", "properties": parameters, "required": required},
+            # `additionalProperties: false` is a statement of fact, not a strictness
+            # preference. `parameters` holds every argument the dispatcher knows how to
+            # place — path, query, header, cookie and flattened body — and anything outside
+            # it is silently dropped on the way to the device, because there is nowhere to
+            # put it. Leaving the schema open meant a hallucinated argument was accepted,
+            # discarded, and reported as success, which reads to a model as confirmation
+            # that the argument exists. Found on a live cluster.
+            #
+            # This applies only to schemas generated here. A proxied MCP upstream supplies
+            # its own inputSchema and owns its own validation; tightening someone else's
+            # contract could reject calls their server would have accepted.
+            schema={
+                "type": "object",
+                "properties": parameters,
+                "required": required,
+                "additionalProperties": False,
+            },
             method=method.upper(),
             path=path,
             tags=tags,

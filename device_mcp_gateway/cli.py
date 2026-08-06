@@ -95,7 +95,7 @@ def worker_main() -> None:
         from device_mcp_gateway import metrics
         from device_mcp_gateway.cfg import load_config, resolve_mode
         from device_mcp_gateway.shared.crypto import CredentialCodec
-        from device_mcp_gateway.shared.redis_client import create_redis
+        from device_mcp_gateway.shared.redis_client import create_redis, wait_for_redis
         from device_mcp_gateway.shared.registry_backend import RedisRegistryBackend
         from device_mcp_gateway.worker.runner import DeviceWorker
         from device_mcp_gateway.logging_setup import setup_logging
@@ -161,6 +161,11 @@ def worker_main() -> None:
 
         async def _run() -> None:
             redis_client = await create_redis(cfg)
+            # A worker is usually the first thing scheduled alongside Redis, so it is the
+            # process most likely to find it not yet listening. Wait instead of exiting —
+            # kubelet backoff recovers from the crash, but only by way of a stack trace and
+            # a restart count that reads as a broken deployment (see wait_for_redis).
+            await wait_for_redis(redis_client, cfg, component=f"worker {args.worker_id}")
             backend = RedisRegistryBackend(redis_client)
             worker = DeviceWorker(
                 worker_id=args.worker_id,
@@ -170,7 +175,14 @@ def worker_main() -> None:
             )
             await worker.run(backend)
 
-        asyncio.run(_run())
+        try:
+            asyncio.run(_run())
+        except RuntimeError as exc:
+            # Redis never came up within redis.startup_timeout. Still a failure and still
+            # a non-zero exit, but reported the way the other startup gates above report
+            # theirs — a stack trace here says "bug", and this is configuration.
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
     except ImportError as exc:
         import sys
 

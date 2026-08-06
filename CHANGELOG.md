@@ -129,6 +129,26 @@ misconfigured deployment will now hit** — read those notes before upgrading.
   spec — a lease held up by the worker serving the device, lapsing once none does — and rebuilt
   from the current spec if it has already gone, instead of waiting for a pod respawn. Found on
   a live cluster four hours into a run; no test had ever let a TTL elapse.
+- **A device's tools accepted arguments it could not send.** Generated tool schemas carried no
+  `additionalProperties`, so a call naming an argument that does not exist validated cleanly,
+  was dropped on the way to the device — there is nowhere to put it — and came back as a
+  success. To a model, a successful call is confirmation that the argument it invented is
+  real, so the failure mode is a hallucination the gateway corroborates rather than a lost
+  value. Generated schemas are now closed, which states a fact: the translator lists every
+  argument the dispatcher can place. **Breaking for any caller that was sending extra
+  arguments** — they were already being discarded, and are now refused with the offending
+  field named. Schemas published by a **proxied MCP upstream are untouched**: that contract
+  belongs to the upstream, and tightening it could refuse calls its server would accept.
+- **Gateway and workers exited on the first Redis connection failure at startup** instead of
+  waiting for it. Start order is not guaranteed on any orchestrator, so the common cause is
+  simply that Redis has not finished starting. Kubelet backoff does recover — which is why
+  this was easy to miss — but it recovers by way of a stack trace and a restart count, the
+  same signals an operator uses to spot a genuinely broken deployment (observed on a live
+  cluster as two restarts per worker). Both now wait for Redis with jittered backoff up to
+  the new `redis.startup_timeout` (default 60 s), then fail hard so a truly dead Redis still
+  reaches probes and alerts. Set `redis.startup_timeout: 0` for the old fail-fast behaviour.
+  This is a separate budget from `redis.retries`, which stays short on purpose: a request
+  caught mid-failover should fail fast rather than block its caller.
 - **An idle MCP session expired under a stream the client still had open.** The session TTL was
   refreshed inside the results-stream reader but *after* the branch handling an elapsed
   `XREAD` block, so it was unreachable on a session carrying no results — i.e. a connected

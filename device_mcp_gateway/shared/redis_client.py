@@ -3,7 +3,10 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """Async Redis connection factory."""
 
+import asyncio
 import os
+import random
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -113,3 +116,58 @@ async def create_redis(cfg: dict[str, Any], max_connections: int | None = None) 
         retry_on_error=[RedisConnectionError, RedisTimeoutError],
         health_check_interval=redis_cfg.get("health_check_interval", 30),
     )
+
+
+async def wait_for_redis(client: aioredis.Redis, cfg: dict[str, Any], *, component: str = "gateway") -> None:
+    """Block until Redis answers a PING, or give up after ``redis.startup_timeout`` seconds.
+
+    The per-command ``retry`` budget configured above is deliberately short (~2.5 s) — it is
+    sized for a failover mid-request, where blocking a caller any longer is worse than failing
+    them. Startup is the opposite situation: nobody is waiting on a response, and the usual
+    reason Redis is unreachable is that it simply has not finished starting yet.
+
+    Without this, the first command a process issued propagated its ``ConnectionError`` out of
+    ``asyncio.run`` as an unhandled traceback and the process exited non-zero. On Kubernetes
+    that is *survivable* — kubelet restarts it and it eventually succeeds — but it is not
+    harmless: it presents as ``CrashLoopBackOff`` with a stack trace, which reads as a broken
+    deployment rather than an ordering wait, and the restart counter it leaves behind is the
+    same signal an operator uses to spot real crashes. Observed on a live cluster as two
+    restarts per worker before anything worked.
+
+    ``redis.startup_timeout: 0`` restores fail-fast, for a deployment that would rather have
+    the process die immediately than wait.
+    """
+    timeout = float(cfg.get("redis", {}).get("startup_timeout", 60))
+    if timeout <= 0:
+        await client.ping()
+        return
+
+    deadline = time.monotonic() + timeout
+    delay = 0.5
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            await client.ping()
+            if attempt > 1:
+                logger.info(f"{component}: Redis reachable after {attempt} attempts")
+            return
+        except (RedisConnectionError, RedisTimeoutError, OSError) as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Deliberately still an exception: a Redis that never appears is a genuine
+                # failure and must reach the exit code, the probe and the alert.
+                raise RuntimeError(
+                    f"{component}: Redis at {redis_url(cfg)} unreachable after {timeout:g}s "
+                    f"({attempt} attempts): {exc}. It may still be starting — raise "
+                    f"redis.startup_timeout if your Redis takes longer to come up."
+                ) from exc
+            # Jittered so a whole deployment restarting together does not reconnect in
+            # lockstep, the same reason the command retry jitters.
+            sleep_for = min(delay * (1 + random.random()), 5.0, remaining)
+            logger.warning(
+                f"{component}: Redis not reachable yet ({exc}); retrying in {sleep_for:.1f}s "
+                f"({remaining:.0f}s left before giving up)"
+            )
+            await asyncio.sleep(sleep_for)
+            delay = min(delay * 2, 5.0)
