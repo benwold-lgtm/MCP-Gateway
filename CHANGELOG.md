@@ -10,9 +10,16 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
-Resolution of an independent third-party review (12 findings, all closed). Two of these are
-**security fixes that change request handling**, and two add **startup gates that a
-misconfigured deployment will now hit** — read those notes before upgrading.
+## [0.2.0] - 2026-08-06
+
+A feature release: the gateway can now federate a **remote MCP server** as a device, not only
+an OpenAPI service. It also carries the resolution of an independent third-party review (12
+findings, all closed) and the defects found by first running the stack on a real Kubernetes
+cluster.
+
+**Read before upgrading.** Two security fixes **change request handling**, two add **startup
+gates a misconfigured deployment will now hit**, and one **tightens tool-argument validation**
+in a way that is breaking for callers passing arguments that do not exist.
 
 ### Security
 
@@ -433,6 +440,9 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.2.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.2.0
+[0.1.4]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.4
+[0.1.3]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.3
 [0.1.2]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.2
 [0.1.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.1
 [0.1.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.0
