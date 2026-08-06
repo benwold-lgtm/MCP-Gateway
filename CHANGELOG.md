@@ -87,6 +87,18 @@ misconfigured deployment will now hit** — read those notes before upgrading.
 
 ### Fixed
 
+- **Tool-change governance never ran in distributed mode.** The worker's health loop compared
+  each spec poll against `spec_hash`, but the only writers of that field lived in the
+  registry-side spec services, which distributed mode does not run — so the field stayed empty,
+  the `if cfg.spec_hash and ...` guard was permanently false, and the branch that would have
+  written the first baseline sat *inside* the branch that could never be entered. The effect
+  was not a stale hash: breaking-change detection, `tools_revision`, `GET /devices/{h}/tools/diff`
+  and the breaking-change alert (F-41) could not fire at all, for either upstream kind. A device
+  could drop a tool, or an MCP upstream rewrite a tool description into a prompt-injection
+  payload, and the gateway would keep serving the old manifest and say nothing. The spawn path
+  now records the fingerprint of the spec it built the manifest from, and a poll that finds no
+  baseline seeds one instead of discarding it. Found on a live cluster; every pre-existing test
+  had constructed its device with `spec_hash` already set.
 - **Embedded `tools/call` was recorded as an error on every success**, inverting both
   `mcp_tool_calls_total` and the audit outcome for the entire embedded-mode dispatch path.
 - **`mcp` was unbounded (`>=1.0.0`)**, so a clean install resolved to 2.0.0, which removed

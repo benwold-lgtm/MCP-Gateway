@@ -250,45 +250,19 @@ def test_an_mcp_upstream_registers_and_persists_its_kind(client, mock_target_url
         client.delete("/v1/devices/uk-mcp-live")
 
 
-def test_an_mcp_upstream_is_refused_in_distributed_mode_until_the_worker_supports_it(tmp_path):
-    """The worker's pod spawner still builds a DevicePod unconditionally. Accepting an MCP
-    upstream in distributed mode would assign it to a worker and serve it with the OpenAPI
-    pod — it would register cleanly, then never serve a tool. Refusing is the honest failure
-    until the worker learns the discriminator.
+def test_validation_does_not_depend_on_the_deployment_mode():
+    """Phase 3 refused ``upstream_kind='mcp'`` in distributed mode because the worker still
+    built a DevicePod unconditionally. Phase 4 taught the worker the discriminator, so the
+    gate is gone and validation is mode-independent again.
 
-    Flips in Phase 4, deliberately: it is the reminder to remove this gate too.
+    Asserted against the validator rather than the route because registering in distributed
+    mode needs a live Redis backend; the worker-side behaviour this unblocks is covered in
+    tests/test_mcp_passthrough_distributed.py.
     """
-    from cryptography.fernet import Fernet
-    from fastapi.testclient import TestClient
+    from device_mcp_gateway.api.devices import _validate_upstream
 
-    from device_mcp_gateway.main import create_app
-
-    app = create_app(
-        override_config={
-            "registry": {"mode": "distributed"},
-            "storage": {"db_path": str(tmp_path / "d.db")},
-            "metrics": {"enabled": False},
-            "redis": {"allow_insecure": True},
-            # Distributed mode refuses to start without a credential-encryption key or
-            # any configured API key — both are startup gates in their own right here.
-            "gateway": {
-                "allow_weak_keys": True,
-                "allow_anonymous": True,
-                "secret_key": Fernet.generate_key().decode(),
-            },
-        }
-    )
-    resp = TestClient(app).post(
-        "/v1/devices",
-        json={
-            "hostname": "uk-dist-mcp",
-            "base_url": "http://192.0.2.99/mcp",
-            "auth_type": "none",
-            "upstream_kind": "mcp",
-        },
-    )
-    assert resp.status_code == 501
-    assert "distributed" in resp.json()["detail"]
+    _validate_upstream("mcp", "http", None, declared={"upstream_kind"})  # must not raise
+    assert "mode" not in _validate_upstream.__code__.co_varnames, "a mode-specific gate has come back"
 
 
 def test_an_ordinary_registration_is_unaffected_and_reports_openapi(client):

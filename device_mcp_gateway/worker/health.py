@@ -34,11 +34,29 @@ from device_mcp_gateway.core.translator import manifest_to_dict
 from device_mcp_gateway.security.url_policy import build_guarded_client
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.shared.keys import KEYS
+from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest, canonical_tools_hash
 
 # One pool + atexit reap for the whole worker process, shared with the spawn
 # path (worker.runner) — see worker/spec_pool.py. Names re-exported so callers
 # that imported them from here keep working.
 from device_mcp_gateway.worker.spec_pool import _spec_executor, _translate_spec_sync  # noqa: F401  (re-exported)
+
+
+def spec_fingerprint(spec: dict[str, Any], *, is_proxy: bool) -> str:
+    """The stored identity of a fetched spec — what a later poll is compared against.
+
+    Defined once and used by both the spawn path (which writes the first one) and the
+    health loop (which writes every one after that), because a baseline written under a
+    different rule than the comparison is worse than no baseline: it reports a change on
+    the next poll and every poll after it.
+
+    Proxied upstreams hash a canonical projection of ``tools/list`` rather than the raw
+    response, since its ordering is server-controlled and ``str(spec)`` would differ
+    between two identical polls.
+    """
+    if is_proxy:
+        return canonical_tools_hash(spec.get("tools", []))
+    return hashlib.sha256(str(spec).encode()).hexdigest()[:16]
 
 
 def _shutdown_spec_executor() -> None:
@@ -70,7 +88,12 @@ class WorkerHealthLoop:
         tls_verify: ssl.SSLContext | bool = True,
         allow_private: bool = False,
         allowed_ports: set[int] | None = None,
+        auth_provider: Any = None,
     ) -> None:
+        # Builds the auth handler for a device config. Only the worker can do this — it
+        # owns the credential codec — and without it an authenticated MCP upstream would
+        # fail `initialize`, be scored unreachable, and have its healthy pod unassigned.
+        self._auth_provider = auth_provider
         self._worker_id = worker_id
         self._backend = backend
         self._r = redis_client
@@ -137,7 +160,7 @@ class WorkerHealthLoop:
                 return
 
             # Reachability check
-            reachable = await self._check_reachability(cfg.base_url)
+            reachable = await self._check_reachability(cfg)
             await self._backend.update_device_fields(hostname, reachable=reachable, last_check=time.time())
 
             if not reachable:
@@ -162,17 +185,37 @@ class WorkerHealthLoop:
             if spec is None:
                 return
 
-            new_hash = hashlib.sha256(str(spec).encode()).hexdigest()[:16]
-            if cfg.spec_hash and new_hash != cfg.spec_hash:
+            is_proxy = getattr(cfg, "upstream_kind", "openapi") == "mcp"
+            new_hash = spec_fingerprint(spec, is_proxy=is_proxy)
+            if new_hash == cfg.spec_hash:
+                return
+            if not cfg.spec_hash:
+                # No baseline stored yet. The spawn path writes one from the spec it built
+                # the manifest with, so this covers the device it could not: one whose pod
+                # was spawned from a cached manifest, and any device registered before that
+                # existed. Seed and stop — a first sighting is not a change, and recording
+                # one would report a device's entire tool set as added on every restart.
+                #
+                # Without this, `cfg.spec_hash` stayed empty forever in distributed mode
+                # (its only other writers live in the registry, which this mode does not
+                # run), so the comparison below could never be reached and F-41 governance
+                # never fired at all. Found on a cluster, not here.
+                await self._backend.update_device_fields(hostname, spec_hash=new_hash)
+                logger.debug(f"Seeded spec baseline for {hostname}: {new_hash}")
+                return
+            if new_hash != cfg.spec_hash:
                 logger.info(f"Spec changed for {hostname}: {cfg.spec_hash} → {new_hash}")
                 # Store new manifest in Redis
                 try:
-                    manifest_obj = await run_translation(
-                        _spec_executor,
-                        partial(_translate_spec_sync, spec, hostname),
-                        timeout=self._spec_translate_timeout,
-                        hostname=hostname,
-                    )
+                    if is_proxy:
+                        manifest_obj = build_proxy_manifest(hostname, spec.get("tools", []))
+                    else:
+                        manifest_obj = await run_translation(
+                            _spec_executor,
+                            partial(_translate_spec_sync, spec, hostname),
+                            timeout=self._spec_translate_timeout,
+                            hostname=hostname,
+                        )
                 except (SpecTooLargeError, ValueError) as exc:
                     logger.warning(f"Spec for {hostname} rejected on update: {exc} (F-09)")
                     return
@@ -197,16 +240,48 @@ class WorkerHealthLoop:
         finally:
             await self._r.delete(lock_key)
 
-    async def _check_reachability(self, base_url: str) -> bool:
+    def _upstream_for(self, cfg: Any) -> Any:
+        """A Streamable HTTP client for an MCP upstream, over the worker's guarded client."""
+        from device_mcp_gateway.upstream.mcp_client import StreamableHttpClient
+
+        return StreamableHttpClient(
+            url=cfg.base_url,
+            get_client=self._client,
+            auth=self._auth_provider(cfg) if self._auth_provider else None,
+            timeout=self._discovery.get("timeout", 10),
+        )
+
+    async def _check_reachability(self, cfg: Any) -> bool:
+        if getattr(cfg, "upstream_kind", "openapi") == "mcp":
+            # An MCP endpoint answers a bare GET with 404/405, so the status check below
+            # would score a dead upstream as healthy. Reachability here is a successful
+            # handshake — and the probe session is closed rather than abandoned.
+            upstream = self._upstream_for(cfg)
+            try:
+                await upstream.initialize()
+                return True
+            except Exception:
+                return False
+            finally:
+                await upstream.close_session()
         try:
             resp = await send_with_retry(
-                lambda: self._client().get(base_url, timeout=5), method="GET", policy=self._retry_policy
+                lambda: self._client().get(cfg.base_url, timeout=5), method="GET", policy=self._retry_policy
             )
             return resp.status_code < 500
         except Exception:
             return False
 
     async def _fetch_spec(self, cfg: Any) -> dict | None:
+        if getattr(cfg, "upstream_kind", "openapi") == "mcp":
+            upstream = self._upstream_for(cfg)
+            try:
+                return {"upstream_kind": "mcp", "tools": await upstream.list_tools()}
+            except Exception as exc:
+                logger.debug(f"MCP discovery failed for {cfg.hostname}: {exc}")
+                return None
+            finally:
+                await upstream.close_session()
         if cfg.spec_url:
             try:
                 resp = await send_with_retry(
