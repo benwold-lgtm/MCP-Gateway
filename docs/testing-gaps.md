@@ -22,6 +22,7 @@ confidence: link the run, the baseline, or the recording that closed it.
 | [TG-3](#tg-3--ha-redis-failover) | HA Redis failover behaviour | A real Sentinel/Cluster deployment able to promote a replica | The retry/health-check settings may not cover a real election window |
 | [TG-4](#tg-4--the-kubernetes-manifests-on-a-real-cluster) | The k8s manifests on a real cluster | Any conformant cluster with an ingress controller | Manifests that build may still not *run*; ordering/permission faults are invisible |
 | [TG-5](#tg-5--the-arm64-image-on-real-arm64-hardware) | arm64 image on real arm64 hardware | A Pi / arm64 host | QEMU-built arm64 layers can pass build and still fail at runtime |
+| [TG-6](#tg-6--hash-reading-redis-paths-in-the-unit-tier) | Hash-reading Redis paths in the unit tier | A fakeredis fix, or moving the test to the real-Redis tier | Unit tests cannot exercise any `hgetall` consumer; a regression there surfaces only in the integration tier |
 
 ---
 
@@ -135,6 +136,39 @@ build cleanly and still fault at runtime on real silicon, typically in a native 
 
 **What would close it.** `docker compose -f docker-compose.lite.yml up` on a Pi or other
 arm64 box, through to a registered device and a successful tool call.
+
+## TG-6 — Hash-reading Redis paths in the unit tier
+
+**What is unvalidated.** Nothing, in the end — but not where you would expect, and the
+detail matters to anyone adding a test.
+
+**The trap.** `fakeredis` 2.36 does **not** honour `decode_responses=True` for `hgetall`,
+while honouring it for `get`, `smembers` and the rest. Hash reads come back with `bytes`
+keys and values:
+
+```
+get        -> 'v'
+smembers   -> {'m'}
+hgetall    -> {b'a': b'1'}
+```
+
+Every `DeviceConfig.from_redis_hash` consumer therefore raises `KeyError: 'hostname'` under
+fakeredis, so `RedisRegistryBackend.get_device` — and anything downstream of it, including
+the worker's `_spawn_pod` config read — **cannot be unit-tested against the fake.** This is
+easy to mistake for a bug in the code under test; it is not.
+
+**What exists instead.** CI runs a real `redis:7-alpine` service and the integration tier
+(`tests/test_integration_redis.py`) exercises these paths for real, so they are covered —
+just not by the unit tier. A test needing a device config from a backend should either use
+`MemoryRegistryBackend` (when the point is the logic, not the serialisation) or the
+`real_redis` fixture (when the point *is* the serialisation).
+
+**What would close it.** A fakeredis release that decodes hash replies, or a small decoding
+wrapper in `conftest.py`. Neither is urgent while CI has a real Redis; the cost of the gap
+is confusion, not missing coverage.
+
+**Risk if the design is wrong.** Low for correctness, real for velocity: the failure mode
+looks like a product bug, and the natural "fix" is to weaken the test.
 
 ---
 

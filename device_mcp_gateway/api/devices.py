@@ -66,9 +66,7 @@ _UPSTREAM_KINDS = ("openapi", "mcp")
 _UPSTREAM_TRANSPORTS = ("http", "sse")
 
 
-def _validate_upstream(
-    kind: str, upstream_transport: str, spec_url: str | None, declared: set[str], mode: str = "embedded"
-) -> None:
+def _validate_upstream(kind: str, upstream_transport: str, spec_url: str | None, declared: set[str]) -> None:
     """Validate the upstream discriminators (ADR-0009).
 
     ``declared`` is the set of upstream keys the caller actually sent, so a value that was
@@ -76,9 +74,9 @@ def _validate_upstream(
     an OpenAPI device is an error.
 
     The value space is fixed here even where the implementation is not, so the field never
-    has to widen later. Two of these refusals are therefore "known but not yet built"
-    rather than "invalid", and they say so: a caller has to be able to tell a typo from a
-    feature that has not landed.
+    has to widen later. One refusal is therefore "known but not yet built" rather than
+    "invalid", and it says so: a caller has to be able to tell a typo from a feature that
+    has not landed.
     """
     if kind not in _UPSTREAM_KINDS:
         raise HTTPException(
@@ -107,18 +105,6 @@ def _validate_upstream(
         raise HTTPException(
             status_code=400,
             detail="upstream_transport 'sse' is not yet supported; use 'http' (Streamable HTTP)",
-        )
-    if kind == "mcp" and mode == "distributed":
-        # The worker's pod spawner still builds a DevicePod unconditionally, so a proxied
-        # upstream registered here would be assigned to a worker and served by the OpenAPI
-        # pod — a device that registers cleanly and never serves a tool. Refuse until the
-        # worker learns the discriminator (Phase 4).
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "upstream_kind 'mcp' is not yet supported in distributed mode; "
-                "MCP passthrough currently runs in embedded mode only"
-            ),
         )
 
 
@@ -253,9 +239,7 @@ async def register_device(request: Request):
     _check_target_url(spec_url, "spec_url", allow_private, allowed_ports)
     rate_limit_rps = _parse_rate_limit(data)
     upstream_kind, upstream_transport = _read_upstream(data)
-    _validate_upstream(
-        upstream_kind, upstream_transport, spec_url, declared=set(data.keys()), mode=request.app.state.mode
-    )
+    _validate_upstream(upstream_kind, upstream_transport, spec_url, declared=set(data.keys()))
     auth = _parse_auth(data, cfg, allow_private, allowed_ports)
 
     existing = await reg.get_device(hostname)
@@ -319,9 +303,7 @@ async def update_device(hostname: str, request: Request):
     _validate_transport(transport)
     rate_limit_rps = _parse_rate_limit(data)
     upstream_kind, upstream_transport = _read_upstream(data, existing.upstream_kind, existing.upstream_transport)
-    _validate_upstream(
-        upstream_kind, upstream_transport, spec_url, declared=set(data.keys()), mode=request.app.state.mode
-    )
+    _validate_upstream(upstream_kind, upstream_transport, spec_url, declared=set(data.keys()))
 
     device_cfg = await reg.replace_device(
         hostname=hostname,

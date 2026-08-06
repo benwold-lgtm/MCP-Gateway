@@ -54,7 +54,10 @@ from device_mcp_gateway.core.spec_limits import (
 )
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.pods.device_pod import DevicePod
+from device_mcp_gateway.pods.mcp_proxy_pod import McpProxyPod
 from device_mcp_gateway.pods.pod_base import BasePod
+from device_mcp_gateway.upstream.mcp_client import StreamableHttpClient
+from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest
 from device_mcp_gateway.security.mtls import build_verify
 from device_mcp_gateway.shared.keys import KEYS
 from device_mcp_gateway.security.url_policy import (
@@ -245,6 +248,11 @@ class DeviceWorker:
             tls_verify=self._tls_verify,
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
+            # Only the worker holds the credential codec, so it supplies the auth handler
+            # the health loop needs to reach an authenticated MCP upstream.
+            auth_provider=lambda cfg: _auth_from_config(
+                cfg.auth_type, self._decrypt_auth(cfg.hostname, cfg.auth_config)
+            ),
         )
         self._health.on_spec_changed = self._replace_pod
         await backend.initialize()
@@ -605,6 +613,7 @@ class DeviceWorker:
             await self._release_claim(hostname)
             return
 
+        is_proxy = cfg.upstream_kind == "mcp"
         # Fetch or build manifest
         manifest_dict = await self._backend.get_manifest(hostname)
         if manifest_dict is None:
@@ -616,12 +625,17 @@ class DeviceWorker:
                 await self._release_claim(hostname)
                 return
             try:
-                manifest_obj = await run_translation(
-                    _spec_executor,
-                    partial(_translate_spec_sync, spec, hostname),
-                    timeout=self._spec_translate_timeout,
-                    hostname=hostname,
-                )
+                if is_proxy:
+                    # Already-discovered tool definitions — nothing to parse, so this does
+                    # not go through the translation pool (see registry/pod_supervisor).
+                    manifest_obj = build_proxy_manifest(hostname, spec.get("tools", []))
+                else:
+                    manifest_obj = await run_translation(
+                        _spec_executor,
+                        partial(_translate_spec_sync, spec, hostname),
+                        timeout=self._spec_translate_timeout,
+                        hostname=hostname,
+                    )
             except (SpecTooLargeError, ValueError) as exc:
                 err = f"Spec for {hostname} rejected: {exc} (F-09)"
                 logger.warning(err)
@@ -637,7 +651,8 @@ class DeviceWorker:
         auth = _auth_from_config(cfg.auth_type, self._decrypt_auth(hostname, cfg.auth_config))
         if auth is not None:
             auth.on_credentials_changed(self._credential_writeback(hostname))
-        pod = DevicePod(
+        pod_cls = McpProxyPod if is_proxy else DevicePod
+        pod = pod_cls(
             hostname=hostname,
             manifest=manifest_obj,
             transport=cfg.transport,
@@ -712,6 +727,11 @@ class DeviceWorker:
         # (spawn path) probes discovery paths CONCURRENTLY on a fresh guarded
         # client so provisioning isn't gated by serial per-path timeouts (F-11);
         # the health loop polls serially through its shared retrying client.
+        #
+        # Because there are two of them, an upstream kind added to one and not the other
+        # fails only on the path that was missed. This one is the *cold* path: a device
+        # registered while no manifest is cached reaches its pod through here, so an MCP
+        # upstream that discovers fine in the health loop would still never spawn.
         discovery = self._config.get("discovery", {})
         # SSRF-guarded client: the worker validates every fetched URL (incl. redirects)
         # against the policy, closing the gap where workers never consulted it (F-02).
@@ -720,6 +740,20 @@ class DeviceWorker:
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
         ) as client:
+            if getattr(cfg, "upstream_kind", "openapi") == "mcp":
+                upstream = StreamableHttpClient(
+                    url=cfg.base_url,
+                    get_client=lambda: client,
+                    auth=_auth_from_config(cfg.auth_type, self._decrypt_auth(cfg.hostname, cfg.auth_config)),
+                    timeout=discovery.get("timeout", 10),
+                )
+                try:
+                    return {"upstream_kind": "mcp", "tools": await upstream.list_tools()}
+                except Exception as exc:
+                    logger.warning(f"MCP discovery failed for {cfg.hostname}: {exc}")
+                    return None
+                finally:
+                    await upstream.close_session()
             if cfg.spec_url:
                 try:
                     resp = await client.get(cfg.spec_url, timeout=10)
@@ -853,6 +887,25 @@ def _dict_to_body_spec(d: dict | None) -> Any:
     )
 
 
+def _dict_to_proxy_spec(d: Any) -> Any:
+    """Rebuild a ``ProxyToolSpec`` from its serialised form.
+
+    Dropping this is the single most expensive thing this round-trip can do to a proxied
+    tool: ``upstream_tool_name`` is the name the worker puts on the wire, and it differs
+    from the LLM-facing name for every tool whose name needed sanitising or deduping. Lose
+    it and the worker calls the upstream with a name it has never heard of.
+    """
+    if not isinstance(d, dict):
+        return None
+    from device_mcp_gateway.core.translator import ProxyToolSpec
+
+    return ProxyToolSpec(
+        upstream_tool_name=d.get("upstream_tool_name", ""),
+        idempotent_hint=bool(d.get("idempotent_hint", False)),
+        read_only_hint=bool(d.get("read_only_hint", False)),
+    )
+
+
 def _dict_to_manifest(d: dict) -> Any:
     """Reconstruct an McpManifest from a plain dict (Redis round-trip)."""
     from device_mcp_gateway.core.translator import McpManifest, McpPrompt, McpResource, McpTool
@@ -866,8 +919,12 @@ def _dict_to_manifest(d: dict) -> Any:
                 name=t["name"],
                 description=t.get("description", ""),
                 schema=t.get("schema", {}),
-                method=t.get("method", "GET"),
-                path=t.get("path", "/"),
+                # A proxied tool has no HTTP shape, so "" is its correct value here — the
+                # old "GET" fallback existed for manifests written before `method` was
+                # always serialised, and applying it to a proxied tool would make an
+                # upstream write look like a safe read to the idempotency guard.
+                method=t.get("method") or ("" if t.get("source") == "proxy" else "GET"),
+                path=t.get("path") or ("" if t.get("source") == "proxy" else "/"),
                 tags=t.get("tags", []),
                 param_locations=t.get("param_locations", {}),
                 # Without these two the cache-hit spawn path (manifest already in
@@ -875,6 +932,9 @@ def _dict_to_manifest(d: dict) -> Any:
                 # so POST/PUT/PATCH tool calls went out malformed in distributed mode.
                 request_body=_dict_to_body_spec(t.get("request_body")),
                 param_wire_names=t.get("param_wire_names", {}),
+                # The discriminator every reader branches on, and the upstream wire name.
+                source=t.get("source", "openapi"),
+                proxy=_dict_to_proxy_spec(t.get("proxy")),
             )
             for t in d.get("tools", [])
         ],

@@ -242,6 +242,17 @@ class CallDispatcher:
         safe. For tools/call, idempotency follows the backing HTTP method. An
         unknown tool name produces a handler-not-found error with no upstream call,
         so it's safe to re-run too.
+
+        A **proxied** tool is always treated as non-idempotent. It has no backing HTTP
+        method, and the gateway has no way to know whether the upstream operation reads or
+        writes — MCP's ``idempotentHint`` is advisory metadata from the upstream itself, so
+        trusting it would let an untrusted server opt its own writes into re-execution.
+        Refusing a redelivery costs one failed call; re-running an upstream write does not.
+
+        This branches on ``source``, deliberately, rather than relying on a proxied tool's
+        empty ``method`` falling outside the idempotent set. That happens to be safe today
+        and is safe by accident: anyone who "tidies" the empty string to a ``GET`` default
+        would silently make every proxied write re-executable, with nothing failing.
         """
         if not isinstance(message, dict) or message.get("method") != "tools/call":
             return True
@@ -249,6 +260,8 @@ class CallDispatcher:
         tool_name = params.get("name")
         for tool in pod.manifest.tools:
             if tool.name == tool_name:
+                if getattr(tool, "source", "openapi") == "proxy":
+                    return False
                 return tool.method.upper() in _runner_mod()._IDEMPOTENT_METHODS
         return True
 
