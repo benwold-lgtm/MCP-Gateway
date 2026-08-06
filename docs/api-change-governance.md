@@ -8,13 +8,19 @@ request/response `paths` the gateway translates (F-46).
 
 ## Tool-set change governance (F-41)
 
-A device's MCP tool set is **generated from its upstream OpenAPI spec**. The
-gateway re-fetches the spec on a schedule (and on registration); when the spec
-hash changes it re-pods the device and regenerates the tool set. That means the
-tools a live MCP client sees can change underneath it — a tool can disappear, a
-parameter can become required, an HTTP method can change. Without governance
+A device's MCP tool set comes from its upstream: **generated from an OpenAPI spec**, or
+**discovered from a remote MCP server's `tools/list`** for a passthrough device
+([ADR-0009](adr/0009-mcp-passthrough.md)). The gateway re-fetches on a schedule (and on
+registration); when the fingerprint changes it re-pods the device and regenerates the tool
+set. That means the tools a live MCP client sees can change underneath it — a tool can
+disappear, a parameter can become required, an HTTP method can change. Without governance
 that mutation is silent: a client keeps calling the old shape and starts
 failing with no signal as to why.
+
+**For a proxied MCP upstream this is a security control, not just an operability one.** An
+OpenAPI document is a static file; a remote MCP server *authors its own contract* and can
+answer the next poll differently — the rug-pull and tool-poisoning threats in
+[threat-model.md](threat-model.md) §B5. The machinery below is the detection for both.
 
 The gateway turns every spec-driven tool-set mutation into a recorded, classified
 signal.
@@ -41,6 +47,27 @@ The change is recorded three ways:
    under live clients — alertable (see [observability.md](observability.md)).
 3. **Log** — a `WARNING` for a breaking change (naming the reasons), `INFO`
    otherwise.
+
+### What "changed" means, per upstream kind
+
+The comparison is against a stored **fingerprint** of the last-seen upstream, and how that
+fingerprint is computed differs by kind — deliberately.
+
+| Kind | Fingerprint | Why |
+|------|-------------|-----|
+| `openapi` | Hash of the parsed document | A static document parses in a fixed order, so this is stable |
+| `mcp` | Hash of a **canonical projection** of `tools/list` — sorted by tool name, sorted keys, over `name` / `description` / `inputSchema` / `annotations` only | `tools/list` ordering is server-controlled. Hashing the raw response would make every poll of every proxied device look like a change: pod replaced each cycle, revision inflated, a breaking-change alert each time |
+
+Both are written by one function so the baseline and the comparison cannot diverge. A
+baseline computed under a different rule than the comparison is worse than no baseline —
+it reports a change on the next poll, and every poll after it.
+
+**The baseline is written when the manifest is built.** A device whose pod spawns from a
+freshly fetched spec records the fingerprint at that moment; a poll that finds no baseline
+seeds one and reports nothing, because a first sighting is not a change. (Recording one
+would report a device's entire tool set as `added` on every worker restart.) This was a real
+defect in distributed mode — the baseline was never written at all, so **no** change could
+ever be detected; see the CHANGELOG.
 
 ### The client-facing signal: `tools_revision`
 
@@ -87,6 +114,13 @@ would land.
 - Pin a flaky upstream by registering it against a **versioned spec URL**
   (e.g. `/v3/openapi.json`) so a vendor's `/openapi.json` rev doesn't silently
   re-pod it.
+- **For a proxied MCP upstream, treat a breaking change as a security signal.** There is no
+  spec-URL equivalent to pin against — the server *is* the contract, and it can change it.
+  Review `GET /v1/devices/{hostname}/tools/diff` and the post-sanitisation descriptions in
+  `GET /v1/devices/{hostname}/tools` before letting clients resume against it.
+- Detection latency is one `registry.spec_poll_interval` (default 300s). Shortening it
+  narrows the window in which a changed upstream is served unreviewed, at the cost of one
+  discovery round trip per device per interval.
 
 ---
 

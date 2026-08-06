@@ -263,6 +263,10 @@ transport:
     keep_alive_interval: 15
 
 discovery:
+  # How the gateway finds a device's tool set. For upstream_kind "openapi" that means
+  # fetching a spec (spec_url, or these paths tried in order); for upstream_kind "mcp"
+  # there is nothing to discover — the tool set comes from the upstream's tools/list —
+  # so only `timeout` applies there, bounding the handshake and the list call.
   # Common OpenAPI spec paths to try when auto-discovering
   spec_paths:
     - "/openapi.json"

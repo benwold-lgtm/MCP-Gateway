@@ -112,3 +112,29 @@ future extension, not a current capability. The intended seam is the existing
 `authenticate() → Principal{subject, scopes}` boundary: a `tenant` claim on the
 principal plus tenant-scoped registry keys and authorization would layer on without
 re-architecting the routes. Until that exists, **run one stack per tenant.**
+
+### What the cost of that retrofit currently is
+
+The expensive part is not the authorization seam — it is the **flat `hostname` namespace**:
+the identity that Redis keys, the SQLite primary key, the `/v1/devices/{hostname}` route
+family, client-visible `device://{hostname}` URIs, the consumer-group name and every
+per-device metric label are all built from. [ADR-0009](adr/0009-mcp-passthrough.md) carries
+the itemised register, kept current as features land, so the price is known rather than
+rediscovered.
+
+Two things have already been done to keep it from growing:
+
+- **`shared/keys.py`.** Every Redis key shape and the `device://` URI come from one
+  `KeyBuilder` whose `prefix` is `""` today. Adding a tenant prefix is one change instead of
+  roughly twenty, each of which could otherwise orphan live control-plane data. The prefix is
+  an explicit constructor argument — no ambient or request-scoped scoping, because implicit
+  scoping is the part that is hard to audit.
+- **MCP passthrough reuses the device entity** rather than adding a second flat-keyed one.
+  A remote MCP server is a `DeviceConfig` with a discriminator field, so a future tenant
+  dimension threads through one set of keys, routes and metrics rather than two.
+
+Outbound credentials are also, deliberately, not a tenancy problem: the gateway calls an
+upstream with **its own stored per-server credential** and `AbstractAuth.apply()` takes no
+arguments, so no caller token is propagated. Forwarding one would be actively unsafe here —
+in distributed mode the *worker* makes the outbound call, so a forwarded token would have to
+travel through a Redis stream every worker reads.

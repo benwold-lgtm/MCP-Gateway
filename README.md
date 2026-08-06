@@ -312,8 +312,41 @@ Prometheus metrics are exposed separately on a **dedicated metrics port** (`metr
 | `auth_type` | No | `"api_key"`, `"oauth2"`, or `"none"` |
 | `auth` | Conditional | Required when `auth_type` is `api_key` or `oauth2` |
 | `rate_limit_rps` | No | Max requests/second to the downstream device API |
+| `upstream_kind` | No | `"openapi"` (default) or `"mcp"` — what the upstream **speaks** |
+| `upstream_transport` | No | `"http"` (default, Streamable HTTP) — how we **talk to** an MCP upstream. `"sse"` is reserved and refused today |
 
 `PUT` treats all fields except `hostname` as optional — omitted fields keep their existing values.
+
+#### Registering a remote MCP server (passthrough)
+
+Set `upstream_kind: "mcp"` and point `base_url` at the server's MCP endpoint. There is no
+spec to fetch — the tool set comes from the upstream's `tools/list` — so `spec_url` must be
+omitted:
+
+```json
+{
+  "hostname": "vendor-mcp",
+  "base_url": "https://mcp.vendor.example/mcp",
+  "upstream_kind": "mcp",
+  "auth_type": "api_key",
+  "auth": { "api_key": "supersecret", "name": "Authorization", "value_prefix": "Bearer " }
+}
+```
+
+Its tools are then served, namespaced and governed exactly like a translated device's: same
+RBAC, rate limiting, argument validation, breaker, audit and fleet sessions. The gateway
+holds one credential **per server** and calls it on the caller's behalf; a caller's own token
+is never forwarded to an upstream.
+
+Two things worth knowing before you register one:
+
+- **The upstream authors its own tool contract and can change it.** Alert on
+  `mcp_device_tools_changed_total{breaking="true"}` and review
+  `GET /v1/devices/{hostname}/tools/diff` — see
+  [api-change-governance.md](docs/api-change-governance.md) and
+  [threat-model.md](docs/threat-model.md) §B5.
+- **v1 proxies tools only** — not resources, prompts, or stdio servers. Rationale in
+  [ADR-0009](docs/adr/0009-mcp-passthrough.md).
 
 ### Response shapes
 
