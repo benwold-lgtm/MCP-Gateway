@@ -69,7 +69,7 @@ from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.shared.session_router import SessionRouter
 from device_mcp_gateway.worker.dispatch import CallDispatcher, _decode_fields  # noqa: F401  (re-exported)
-from device_mcp_gateway.worker.health import WorkerHealthLoop, _manifest_to_dict
+from device_mcp_gateway.worker.health import WorkerHealthLoop, _manifest_to_dict, spec_fingerprint
 from device_mcp_gateway.worker.rebalance import Rebalancer
 from device_mcp_gateway.worker.reconcile import Reconciler
 from device_mcp_gateway.worker.spec_pool import _spec_executor, _translate_spec_sync  # noqa: F401  (re-exported)
@@ -616,6 +616,10 @@ class DeviceWorker:
         is_proxy = cfg.upstream_kind == "mcp"
         # Fetch or build manifest
         manifest_dict = await self._backend.get_manifest(hostname)
+        # The governance baseline (F-41), written below only when we actually fetched a
+        # spec. On the cache-hit path we never saw one, so we have nothing honest to
+        # record and the health loop seeds it on its first poll instead.
+        spec_hash: str | None = None
         if manifest_dict is None:
             spec = await self._fetch_spec(cfg)
             if spec is None:
@@ -643,6 +647,7 @@ class DeviceWorker:
                 await self._release_claim(hostname)
                 return
             manifest_dict = _manifest_to_dict(manifest_obj)
+            spec_hash = spec_fingerprint(spec, is_proxy=is_proxy)
             ttl = self._config.get("registry", {}).get("spec_cache_ttl", 3600)
             await self._backend.set_manifest(hostname, manifest_dict, ttl=ttl)
         else:
@@ -668,7 +673,10 @@ class DeviceWorker:
         await pod.start(with_sse=False)  # distributed mode: no in-process SSE transport
         self._pods[hostname] = pod
         self._assigned.add(hostname)
-        await self._backend.update_device_fields(hostname, pod_active=True, worker_id=self._id, spawn_error=None)
+        spawn_fields: dict[str, Any] = {"pod_active": True, "worker_id": self._id, "spawn_error": None}
+        if spec_hash is not None:
+            spawn_fields["spec_hash"] = spec_hash
+        await self._backend.update_device_fields(hostname, **spawn_fields)
         await self._r.sadd(KEYS.worker_devices(self._id), hostname)
 
         # Start call consumer task for this device

@@ -42,6 +42,23 @@ from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest, cano
 from device_mcp_gateway.worker.spec_pool import _spec_executor, _translate_spec_sync  # noqa: F401  (re-exported)
 
 
+def spec_fingerprint(spec: dict[str, Any], *, is_proxy: bool) -> str:
+    """The stored identity of a fetched spec — what a later poll is compared against.
+
+    Defined once and used by both the spawn path (which writes the first one) and the
+    health loop (which writes every one after that), because a baseline written under a
+    different rule than the comparison is worse than no baseline: it reports a change on
+    the next poll and every poll after it.
+
+    Proxied upstreams hash a canonical projection of ``tools/list`` rather than the raw
+    response, since its ordering is server-controlled and ``str(spec)`` would differ
+    between two identical polls.
+    """
+    if is_proxy:
+        return canonical_tools_hash(spec.get("tools", []))
+    return hashlib.sha256(str(spec).encode()).hexdigest()[:16]
+
+
 def _shutdown_spec_executor() -> None:
     """Reap the spec-translation worker processes at interpreter exit (RC-5).
 
@@ -169,14 +186,24 @@ class WorkerHealthLoop:
                 return
 
             is_proxy = getattr(cfg, "upstream_kind", "openapi") == "mcp"
-            if is_proxy:
-                # tools/list ordering is server-controlled, so str(spec) would differ
-                # between two identical polls — replacing the pod every cycle, inflating
-                # tools_revision, and recording a breaking change each time.
-                new_hash = canonical_tools_hash(spec.get("tools", []))
-            else:
-                new_hash = hashlib.sha256(str(spec).encode()).hexdigest()[:16]
-            if cfg.spec_hash and new_hash != cfg.spec_hash:
+            new_hash = spec_fingerprint(spec, is_proxy=is_proxy)
+            if new_hash == cfg.spec_hash:
+                return
+            if not cfg.spec_hash:
+                # No baseline stored yet. The spawn path writes one from the spec it built
+                # the manifest with, so this covers the device it could not: one whose pod
+                # was spawned from a cached manifest, and any device registered before that
+                # existed. Seed and stop — a first sighting is not a change, and recording
+                # one would report a device's entire tool set as added on every restart.
+                #
+                # Without this, `cfg.spec_hash` stayed empty forever in distributed mode
+                # (its only other writers live in the registry, which this mode does not
+                # run), so the comparison below could never be reached and F-41 governance
+                # never fired at all. Found on a cluster, not here.
+                await self._backend.update_device_fields(hostname, spec_hash=new_hash)
+                logger.debug(f"Seeded spec baseline for {hostname}: {new_hash}")
+                return
+            if new_hash != cfg.spec_hash:
                 logger.info(f"Spec changed for {hostname}: {cfg.spec_hash} → {new_hash}")
                 # Store new manifest in Redis
                 try:
