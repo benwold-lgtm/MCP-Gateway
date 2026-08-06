@@ -51,6 +51,36 @@ misconfigured deployment will now hit** — read those notes before upgrading.
 
 ### Added
 
+- **MCP passthrough — federate a remote MCP server as a device.** Registering with
+  `upstream_kind: "mcp"` points the gateway at a server that already speaks MCP; its tools are
+  discovered from `tools/list` and proxied rather than translated from an OpenAPI document.
+  A remote server is a **device**, not a second entity type — it reuses `DeviceConfig`,
+  `base_url` (already SSRF-validated), and the `hostname` namespace, so RBAC, rate limiting,
+  admission control, the circuit breaker, dead-lettering, audit, fleet sessions and tool-change
+  governance all apply with no new code. Rationale, the alternatives rejected, and the itemised
+  cost register for a future tenancy retrofit are in
+  [ADR-0009](docs/adr/0009-mcp-passthrough.md).
+
+  Three things are worth knowing before pointing it at someone else's server:
+
+  - **The upstream authors its own tool contract and can change it after review** — the
+    rug-pull and tool-poisoning threats, now [threat-model.md](docs/threat-model.md) §B5.
+    Detection is the change-governance machinery: every poll diffs and classifies the tool set,
+    and a removed tool or a newly-required parameter is **breaking** and alertable. Structural
+    sanitisation (F-26) strips control characters and bidi overrides from upstream names and
+    descriptions; prose survives by design, because a proxy cannot adjudicate meaning.
+  - **Protections that live in the translator had to be re-applied**, since a proxied tool
+    never passes through it: text sanitisation (F-26) and the tool-count/payload caps (F-09).
+    Argument validation (F-28), header-injection resistance (F-25) and the guarded client's
+    SSRF policy apply unchanged.
+  - **v1 proxies tools only** — no resources, no prompts, no stdio upstreams; and
+    `upstream_transport: "sse"` is accepted by the schema but refused at registration.
+
+  Implements MCP revision `2025-06-18` in both directions. Current is `2026-07-28`, which is
+  **not** backwards compatible — it removes the `initialize` handshake, `Mcp-Session-Id` and
+  SSE resumability in favour of a stateless per-request protocol. Interop across the two eras
+  exists only where an implementation deliberately supports both. Tracked as its own piece of
+  work; the passthrough seam is where it lands.
 - **`mcp_oidc_validation_failures_total{reason}`.** OIDC validation failures fell through to
   static keys at `debug` log level, so an IdP or JWKS outage silently degraded the whole
   deployment to break-glass-keys-only with no operator signal, and forged-JWT probing

@@ -20,7 +20,7 @@ confidence: link the run, the baseline, or the recording that closed it.
 | [TG-1](#tg-1--chaos--fault-injection-f-63) | Chaos / fault injection (E1–E10) | A live multi-node platform + fault injector | Documented failure-mode mitigations may not behave as written under real faults |
 | [TG-2](#tg-2--scale-and-performance-baseline) | Scale + performance baseline | Multi-node cluster, a realistic upstream, sustained load capacity | No capacity model; HPA thresholds and pool sizes are educated guesses |
 | [TG-3](#tg-3--ha-redis-failover) | HA Redis failover behaviour | A real Sentinel/Cluster deployment able to promote a replica | The retry/health-check settings may not cover a real election window |
-| [TG-4](#tg-4--the-kubernetes-manifests-on-a-real-cluster) | The k8s manifests on a real cluster | Any conformant cluster with an ingress controller | Manifests that build may still not *run*; ordering/permission faults are invisible |
+| ~~[TG-4](#tg-4--the-kubernetes-manifests-on-a-real-cluster)~~ | ~~The k8s manifests on a real cluster~~ | **CLOSED 2026-08-06** — see below | — |
 | [TG-5](#tg-5--the-arm64-image-on-real-arm64-hardware) | arm64 image on real arm64 hardware | A Pi / arm64 host | QEMU-built arm64 layers can pass build and still fail at runtime |
 | [TG-6](#tg-6--hash-reading-redis-paths-in-the-unit-tier) | Hash-reading Redis paths in the unit tier | A fakeredis fix, or moving the test to the real-Redis tier | Unit tests cannot exercise any `hgetall` consumer; a regression there surfaces only in the integration tier |
 
@@ -104,24 +104,40 @@ load, and record: error count and duration during the window, reconnect latency 
 across replicas, and whether a retried command ever double-executed (the idempotency guard
 should absorb it — confirm that it does).
 
-## TG-4 — The Kubernetes manifests on a real cluster
+## TG-4 — The Kubernetes manifests on a real cluster ✅ CLOSED
 
-**What is unvalidated.** That `deploy/kubernetes/` actually *runs*. `kubectl kustomize`
-builds it and the manifest invariants are unit-tested, but building is not deploying:
-ordering, RBAC/permissions, PVC binding, probe timing, ingress admission and the
-NetworkPolicy rules are all invisible to a local build.
+**Closed 2026-08-06.** Deployed on a 3-node kind cluster (k8s 1.36) with **Cilium 1.19.5**
+as the CNI — chosen because kind's default CNI silently ignores `NetworkPolicy`, which would
+have made every policy result vacuous. Enforcement was verified *first* (HTTP 200 before a
+deny-all, connection timeout after) so the rest of the run means something.
 
-**Why we cannot test it here.** No cluster available.
+**What ran:** 2 gateway replicas, 2 workers, Redis, and both device kinds — a translated
+OpenAPI device against a real vendor API over TLS, and a proxied MCP upstream — through to
+healthy pods, passing probes, and successful tool calls via the ingress. NetworkPolicy,
+ConfigMap/Secret wiring, probe timing, ordering and ingress admission all exercised.
 
-**What exists instead.** `kubectl kustomize` build verification, and
-`tests/test_deploy_manifests.py` asserting image-pinning invariants. Both are static.
+**What it found**, none of which static checks could:
 
-**Note.** This gap has already produced a real defect: the docs instructed users to pin an
-image tag that returns 404, which a single `kubectl apply` would have caught immediately.
-Static checks did not, because the tag was syntactically fine.
+- A cold-path spec-fetch branch that left an MCP device registered, reachable, and without a
+  pod (fixed, with a regression test that seeds nothing).
+- **Tool-change governance never ran in distributed mode** — the `spec_hash` baseline was
+  never written, so F-41 could not fire for any device (fixed; see the CHANGELOG).
+- The worker egress `NetworkPolicy` allows only 53/6379/80/443/8080/8443, so a device on any
+  other port is unreachable until the policy is edited. **Still open** — the shipped policy
+  should be documented as a list operators must extend.
+- Workers `exit(1)` on the first Redis connection failure at startup instead of retrying;
+  kubelet backoff masks it. **Still open.**
+- In-cluster upstreams require `security.allow_private_targets`, which is correct behaviour
+  but undocumented for k8s users — and the shipped ConfigMap's `security:` block is commented
+  out, so a naive YAML patch of it silently does nothing. **Still open.**
 
-**What would close it.** `kubectl apply -k deploy/kubernetes` on any conformant cluster,
-through to healthy pods, a passing `/readyz`, and one successful tool call via the ingress.
+**Harness caveat, not a product finding.** Cilium's `cni.exclusive=true` removes kind's
+chained `portmap` plugin, so `hostPort` ingress does not work on kind. Production uses
+LoadBalancer/NodePort; the ingress routing itself (Host matching, TLS redirect, backend
+selection, and a wrong Host correctly 404ing) was verified through a port-forward.
+
+**Not closed by this:** [TG-3](#tg-3--ha-redis-failover). Redis here was a single StatefulSet,
+not Sentinel, so nothing about failover was exercised.
 
 ## TG-5 — The arm64 image on real arm64 hardware
 
