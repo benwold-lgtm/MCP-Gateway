@@ -31,6 +31,8 @@ import time
 from typing import Any, AsyncGenerator
 
 from loguru import logger
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 from device_mcp_gateway.shared.keys import KEYS
 
 _SESSION_TTL = 86_400  # 24 h — refreshed periodically while the stream is active
@@ -42,6 +44,44 @@ _RESULTS_MAXLEN = 1000
 # disconnect (task cancellation) and shutdown are observed promptly; long enough
 # to avoid a busy spin. sse-starlette sends its own keep-alive pings meanwhile.
 _XREAD_BLOCK_MS = 5_000
+# The block window must expire strictly BEFORE the connection's socket read deadline.
+# XREAD BLOCK holds the connection with the server silent until the window elapses, so
+# when socket_timeout <= block the client always gives up first — deterministically, on
+# every idle poll, not as a race. redis-py's retry then re-issues the command, so the
+# symptom is not a fast failure but the caller's own deadline being silently replaced by
+# (retries x socket_timeout) and then a raised TimeoutError. The shipped defaults were
+# block=5000ms against socket_timeout=5s, i.e. exactly equal: 6/6 idle reads raised.
+_BLOCK_HEADROOM_MS = 1_000
+
+
+def _safe_block_ms(client: Any, ceiling: int | None = None) -> int:
+    """A blocking-read window guaranteed to elapse before ``client``'s socket deadline.
+
+    Read off the pool rather than off config so it stays correct however the client was
+    built — including a ``redis.socket_timeout`` override that would otherwise silently
+    reintroduce the overlap.
+
+    ``ceiling`` defaults to the module constant *at call time*, not as a default argument:
+    binding it at definition time would freeze the value and silently ignore a test that
+    shortens ``_XREAD_BLOCK_MS`` to make the loop spin.
+    """
+    if ceiling is None:
+        ceiling = _XREAD_BLOCK_MS
+    try:
+        socket_timeout = client.connection_pool.connection_kwargs.get("socket_timeout")
+    except Exception:  # a fake/stub client in tests exposes no pool
+        return ceiling
+    if not socket_timeout:
+        return ceiling  # no read deadline to collide with
+    deadline_ms = int(socket_timeout * 1000)
+    window = deadline_ms - _BLOCK_HEADROOM_MS
+    if window < 250:
+        # A deadline at or under the headroom itself: subtracting it would leave nothing (or
+        # a negative). Take half the deadline instead — still strictly inside it, which is
+        # the only property that matters, and never clamped up to a floor that would exceed
+        # it. A fixed floor here would reintroduce the exact overlap this guards against.
+        window = max(1, deadline_ms // 2)
+    return min(ceiling, window)
 
 
 def _results_key(session_id: str) -> str:
@@ -193,8 +233,17 @@ class SessionRouter:
         throttle = _RefreshThrottle(_REFRESH_THROTTLE)
         logger.debug(f"Reading results stream {key}")
         try:
+            block_ms = _safe_block_ms(self._ps)
             while True:
-                resp = await self._ps.xread({key: last_id}, count=10, block=_XREAD_BLOCK_MS)
+                try:
+                    resp = await self._ps.xread({key: last_id}, count=10, block=block_ms)
+                except RedisTimeoutError:
+                    # An idle window that outran the socket deadline. Nothing is wrong with
+                    # the session, so treat it as "no new entries" — raising here would tear
+                    # down a stream the client still holds open, which looks to them like a
+                    # random disconnect. _safe_block_ms should prevent it; this keeps a
+                    # misconfigured or unusually slow link from killing the stream anyway.
+                    resp = None
                 # Throttle TTL refreshes so a busy stream doesn't issue one EXPIRE
                 # per message (RC-3). This runs BEFORE the empty-response check: the
                 # session's lease should track how long the client has held the stream
@@ -257,14 +306,23 @@ class SessionRouter:
         key = _results_key(session_id)
         last_id = cursor
         deadline = time.monotonic() + timeout
+        ceiling = _safe_block_ms(self._ps)
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
-            block_ms = max(1, min(int(remaining * 1000), _XREAD_BLOCK_MS))
-            resp = await self._ps.xread({key: last_id}, count=10, block=block_ms)
-            if not resp:
+            block_ms = max(1, min(int(remaining * 1000), ceiling))
+            try:
+                resp = await self._ps.xread({key: last_id}, count=10, block=block_ms)
+            except RedisTimeoutError:
+                # Not an answer and not a failure — just a window that elapsed. Looping
+                # keeps ``timeout`` the single authority on how long this call waits, which
+                # is the contract the caller maps to 504. Letting it propagate instead
+                # surfaced as a 500 on the genuine no-worker path, because the deadline was
+                # never reconsulted.
                 continue
+            if not resp:
+                continue  # window elapsed with nothing new — re-check the deadline
             for _stream, entries in resp:
                 for entry_id, fields in entries:
                     last_id = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
