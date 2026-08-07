@@ -149,6 +149,23 @@ ConfigMap/Secret wiring, probe timing, ordering and ingress admission all exerci
 - TLS trust is **fleet-global** — one `ca_bundle` per process, so a self-signed device forces
   that trust set onto every outbound call the process makes. **Still open**, recorded as a
   residual in [threat-model.md](threat-model.md); the real fix is per-device trust.
+
+  **Constraint on how per-device trust gets built.** Today every trust decision is an
+  `ssl.SSLContext` from `security/mtls.py` — `ssl.create_default_context(cafile=…)` — so
+  chain building and name-constraint checking happen in **OpenSSL via the stdlib**, and
+  `cryptography` is used only for Fernet. That is what keeps three standing `cryptography`
+  advisories unreachable, two of which are exactly this surface: `PYSEC-2026-3553`
+  (path-building DoS on duplicated self-signed intermediates) and `PYSEC-2026-3554` (a
+  wildcard SAN escaping `permittedSubtrees`). Both are in `cryptography`'s
+  `x509.verification` API.
+
+  So per-device trust should stay on `ssl.SSLContext` — one context per device rather than one
+  per process. Building it on `x509.verification` instead (`PolicyBuilder`, `Store`, the
+  verifiers) would make both advisories **reachable on the device-facing path**, and a
+  name-constraint escape is precisely the failure a per-device trust feature exists to
+  prevent. If that route is ever taken deliberately, `cryptography>=49` becomes a
+  prerequisite, not an optional bump — see
+  [dependency-advisories.md](dependency-advisories.md#standing-triage--2026-08-06).
 - Unknown tool arguments are silently ignored rather than rejected (generated schemas carry no
   `additionalProperties: false`), so a hallucinated argument reads as success. **Fixed
   2026-08-06** — generated schemas are closed, which is a statement of fact rather than a

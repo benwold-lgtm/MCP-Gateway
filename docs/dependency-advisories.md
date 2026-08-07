@@ -96,6 +96,59 @@ The remaining three need `cryptography>=49`, which the **deliberate** major cap 
 something a clean install picks up; since all three are unreachable, there is no reason to
 force it. Revisit when `cryptography` is bumped on purpose.
 
+## Re-verification — 2026-08-07 (the three `cryptography` findings)
+
+CI still reports `PYSEC-2026-3552/3553/3554` against `cryptography==48.0.1`. **The verdict is
+unchanged: none reachable.** Re-checked rather than re-read, because one input had moved.
+
+What changed since the triage: the gateway gained mTLS `ca_bundle` trust configuration and is
+now running against a real self-signed CA in the lab. Both `-3553` and `-3554` are certificate
+**verification** bugs, so if trust decisions had migrated into `cryptography`, they would have
+become live. They have not — `security/mtls.py` builds `ssl.create_default_context(cafile=…)`,
+so chain building and name-constraint checking are **OpenSSL through the stdlib**.
+`cryptography` is still reached only for Fernet (and PyJWT signature verification), and the
+codebase contains no PKCS#7/S-MIME/CMS and no `x509.verification` usage at all.
+
+> Grep note: searching for the verifier API on `Store` matches `SqliteDeviceStore`. That is the
+> same class of near-miss as the `request.url` trap above — confirm the import, not the name.
+
+**This is now coupled to a roadmap item.** Per-device TLS trust (the open TG-4 residual) is the
+one planned change that could make `-3553`/`-3554` reachable, if it were built on
+`x509.verification` instead of per-device `SSLContext`s. That constraint is recorded at the
+finding itself in [testing-gaps.md](testing-gaps.md#tg-4--the-kubernetes-manifests-on-a-real-cluster),
+because it needs to be read when the feature is designed, not when the scanner next goes red.
+
+### Choosing the version, when the cap is lifted on purpose
+
+Judge a candidate by **release age**, not by distance from latest — a just-released version is
+an unpaid debt, and this project has already paid for that once (FastAPI 0.137 changed
+`include_router` behaviour under a patch-looking bump). Measured 2026-08-07:
+
+| Version | Released | Age | Clears |
+|---|---|---|---|
+| 48.0.1 (current pin) | 2026-06-09 | 59 days | — |
+| **49.0.0** | 2026-06-12 | **56 days** | `-3553`, `-3554` |
+| 50.0.0 (latest) | 2026-07-31 | 7 days | all three |
+
+`49.0.0` is as seasoned as the pin it would replace, so adopting it carries no recency risk and
+clears the two advisories on the surface per-device trust will touch. `50.0.0` adds only the
+PKCS#7 fix — for code this project does not contain — and is a week old; it should season
+first. Neither is urgent while nothing is reachable.
+
+Whichever is chosen, the bump is a **tested change across the whole dependency set**, not a
+single-line edit: `cryptography` is bounded alongside `mcp`, `fastapi`, `starlette`, `pydantic`
+and `redis`, all of which have to remain mutually compatible. Resolve in a **clean**
+virtualenv (see *When you do upgrade* below) and then make the working environment match the
+resulting pins exactly — testing against a venv that has drifted from `requirements.txt` is how
+a version-dependent defect gets missed, which is exactly what happened on 2026-08-07 when a
+stale local venv (22 of 48 pins adrift) made a real FastAPI behaviour change look like a
+CI-only anomaly:
+
+```bash
+pip install -e ".[dev]" && pip install -r requirements.txt   # -r last, so exact pins win
+pip freeze | sort   # then diff against requirements.txt; normalise _ vs - in names
+```
+
 ## When you do upgrade
 
 `mcp` and `starlette` are upper-bounded for reasons written into `pyproject.toml`, and both
