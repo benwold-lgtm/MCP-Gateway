@@ -191,11 +191,20 @@ def _route_scopes(router, path, method):
     Asserting that *a* dependency is attached passes just as happily when the wrong one is
     attached, so this reads the scope out of the `require_scope` closure instead.
 
-    Takes the **router module's** object rather than a built app. Both earlier versions of
-    this went through an app — the import-time global, then a freshly built one — and both
-    failed in CI with "no route for POST /v1/devices/{hostname}/messages" while passing
-    locally. The declaration being asserted lives on the router, which exists as soon as the
-    module imports and depends on no configuration, so that is what to ask.
+    Takes the **router module's** object rather than a built app, because ``app.routes`` is
+    not a reliable place to look for an included route. FastAPI 0.137 stopped flattening
+    ``include_router`` into the parent's route list and now keeps an ``_IncludedRouter``
+    there instead: on 0.137.2 this app reports six routes — the four docs routes and two
+    nameless ``_IncludedRouter`` objects — and none of the ``/v1`` paths. Two earlier
+    versions of this test walked an app and failed for exactly that reason.
+
+    (The failure looked CI-specific and was originally mis-diagnosed as import-time global
+    state; it was a version skew. ``requirements.txt`` pins 0.137.2 and CI resolves the same
+    from the pyproject range, so CI and the shipped image agreed — only a stale local venv
+    on 0.136.3 still flattened, which is what made it look environmental.)
+
+    Routing itself is unaffected; only introspection moved. A router's own ``.routes`` holds
+    the declaration being asserted and is stable across both versions.
     """
     for route in router.routes:
         if getattr(route, "path", "") == path and method in getattr(route, "methods", set()):
