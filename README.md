@@ -326,8 +326,9 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /v1/
 | `GET` | `/v1/devices/{hostname}/tools` | List a device's MCP tools |
 | `GET` | `/v1/devices/{hostname}/tools/diff` | The device's most recent tool-set change — added/removed/changed tools + breaking flag (`devices:read`) |
 | `GET` | `/v1/devices/{hostname}/diagnostics` | "Why is my device down?" — status, last check + age, spec/manifest state, spawn error, circuit breaker (`devices:read`) |
-| `GET` | `/v1/devices/{hostname}/sse` | Open SSE stream (MCP transport) |
+| `GET` | `/v1/devices/{hostname}/sse` | Open SSE stream (MCP transport — **deprecated**, see below) |
 | `POST` | `/v1/devices/{hostname}/messages` | Send a JSON-RPC 2.0 message via SSE |
+| `POST` | `/v1/devices/{hostname}/mcp` | Streamable HTTP transport — the JSON-RPC response returns on **this** request, in both modes (`tools:call`) |
 | `GET` | `/v1/fleet/sse?devices=a,b,…` | Open one MCP session spanning several devices — tool names namespaced by hostname (`tools:call`) |
 | `POST` | `/v1/fleet/messages` | Send a JSON-RPC 2.0 message on a fleet session (`tools:call`) |
 | `GET` | `/v1/devices/{hostname}/deadletter` | Inspect dead-lettered tool calls (distributed mode; `devices:read`) |

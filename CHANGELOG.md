@@ -10,6 +10,58 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **Streamable HTTP inbound transport (`POST /v1/devices/{hostname}/mcp`)** — the JSON-RPC
+  response comes back on the request that carried it, instead of being acknowledged and
+  delivered later on a stream the client holds open. Semantics are unchanged: this is still
+  revision `2025-06-18`, only the transport is new.
+
+  **Both modes.** In embedded mode the pod is in-process and answering is a call. In
+  distributed mode the POST may land on any gateway replica while the device is owned by one
+  worker, so the replica waits on `session:{id}:results` and correlates by JSON-RPC id. The
+  stream cursor is captured *before* the call is dispatched — the reverse ordering looks more
+  natural and silently loses every result from a worker fast enough to answer in the gap.
+  Admission control, the reserved scope, rate-limit budgets and the F-37 session binding are
+  the same as on the SSE route: a second transport must not become a way around any of them.
+
+  This exists because our only inbound transport, HTTP+SSE, is formally deprecated with a
+  removal clock and has no fallback — so it is owed regardless of adopting revision
+  `2026-07-28`. It is a **separate path** rather than content negotiation on `/messages`, so
+  that retiring HTTP+SSE one minor release after this completes is a deletion rather than an
+  unpicking. See [ADR-0010](docs/adr/0010-tool-derived-request-headers.md) and
+  [the Phase 6 scope](docs/roadmap-protocol-2026-07-28.md) for the decisions behind it.
+
+### Fixed
+
+Both of these are **pre-existing** defects, found by running the new transport on the lab
+cluster rather than by the unit suite. Neither was introduced by the transport work.
+
+- **A blocking Redis read could outlive its own connection deadline.** `XREAD BLOCK` holds
+  the connection with the server silent until the window elapses, so a socket read timeout
+  less than or equal to the block window always fires first — deterministically, on every
+  idle poll, not as a race. The shipped defaults were exactly equal (`block=5000ms` against
+  `socket_timeout=5`), and redis-py's retry then re-issued the command, so the caller's own
+  deadline was silently replaced by (retries × socket_timeout) before a `TimeoutError`
+  escaped. On the Streamable HTTP path this surfaced as a **500 after 32s** where the code
+  intends a 504 — telling a client the gateway is broken rather than that the device did not
+  answer. On the older SSE path the same error tore down an open results stream, reaching the
+  client as an unexplained disconnect on a session they still held. The block window is now
+  derived from the connection's actual socket deadline, and a timeout raised anyway is
+  treated as an elapsed window so the caller's timeout stays the single authority.
+
+- **A lapsed device claim was never re-acquired.** `EXPIRE` on a missing key returns 0 and
+  creates nothing, so once `claim:{hostname}` expired — a worker paused past the TTL, a
+  stalled node, a failover that dropped the key — the heartbeat renewed a lease that no
+  longer existed. The worker went on serving the device, pods running and upstreams polled,
+  while every gateway reported it inactive and the reconciler saw it orphaned indefinitely;
+  only a worker restart recovered it. The F-62 lease-flap hysteresis is written expecting
+  exactly this to self-heal "on the owner's next heartbeat", so renewing nothing quietly
+  defeated that design too. Claims are now re-acquired when lapsed, and — since `EXPIRE`
+  succeeds on *any* live key — ownership is checked rather than mere existence, so a worker
+  whose device was reassigned no longer extends the new owner's lease. If another worker has
+  taken the device, this one releases it: single ownership (ADR-0003) outranks continuity.
+
 ## [0.2.0] - 2026-08-06
 
 A feature release: the gateway can now federate a **remote MCP server** as a device, not only

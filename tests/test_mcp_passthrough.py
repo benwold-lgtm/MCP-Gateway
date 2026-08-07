@@ -465,13 +465,23 @@ async def test_discovery_handshakes_before_listing_tools():
     assert log[0][0] == "initialize"
 
 
-# --- F-25: outbound headers come only from auth + protocol --------------------
+# --- F-25 / ADR-0010: outbound headers come only from auth + protocol ---------
 
 
 async def test_tool_arguments_cannot_reach_the_wire_as_headers():
-    """The OpenAPI path has to sanitise header params because an operation can declare
-    them. The proxy path must never build headers from arguments at all — this pins that
-    it does not, so the F-25 class of bug cannot reappear here."""
+    """The executable statement of ADR-0010. Do not weaken without superseding it.
+
+    The OpenAPI path *does* derive headers from tool parameters — an operation can declare
+    `in: header`, and F-25 constrains that with a reserved-header denylist and CRLF
+    rejection. The proxy path builds headers from arguments **at all**, and must not start:
+    under SEP-2243 a proxied upstream would choose the header *name* as well as the model
+    choosing the value, on a request that carries the device's credentials.
+
+    That exclusion is a permanent design constraint rather than a gap awaiting the feature
+    (ADR-0010 records what superseding it would require), so this test is the thing that
+    keeps it true. A future change adding `x-mcp-header` support to `McpProxyPod` should
+    fail here first.
+    """
     seen: dict = {}
 
     async def handler(request):

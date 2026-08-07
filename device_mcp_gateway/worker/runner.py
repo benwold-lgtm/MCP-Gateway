@@ -554,9 +554,41 @@ class DeviceWorker:
             await self._r.delete(key)
 
     async def _refresh_claims(self) -> None:
-        """Extend the lease on every owned device claim (called per heartbeat)."""
+        """Extend the lease on every owned device claim (called per heartbeat).
+
+        EXPIRE on a key that no longer exists is a no-op returning 0 — it cannot resurrect
+        a lapsed claim. So a claim that has already expired (this worker paused past the
+        TTL by a long GC pause, a stalled node, or a Redis failover that dropped the key)
+        would never come back, while this worker went on serving the device: pods running
+        and upstreams polled, but ``claim:{h}`` absent, so every gateway reports the device
+        inactive and the reconciler sees it orphaned forever. The F-62 lease-flap hysteresis
+        is written expecting exactly this to self-heal "on the owner's next heartbeat", so
+        renewing nothing quietly defeated that design too.
+
+        Re-acquiring can legitimately fail — another worker may have taken the device while
+        the claim was unheld. Single-owner (ADR-0003) then outranks continuity, so stop
+        serving it here rather than run a second pod against the same device.
+
+        Ownership is checked rather than mere existence, because EXPIRE succeeds on *any*
+        live key: renewing unconditionally meant a worker whose device had been reassigned
+        kept extending the new owner's lease while still serving the device itself.
+        """
         for hostname in list(self._assigned):
-            await self._r.expire(KEYS.claim(hostname), self._claim_ttl)
+            owner = await self._r.get(KEYS.claim(hostname))
+            if owner == self._id:
+                await self._r.expire(KEYS.claim(hostname), self._claim_ttl)
+                continue
+            if owner is None and await self._acquire_claim(hostname):
+                logger.warning(
+                    f"Claim lease on {hostname} had lapsed; re-acquired by worker {self._id}. "
+                    f"Check for a pause or Redis stall longer than the claim TTL ({self._claim_ttl}s)."
+                )
+                continue
+            logger.warning(
+                f"Claim on {hostname} is held by {owner or 'another worker'}; worker {self._id} "
+                "is releasing the device to preserve single ownership."
+            )
+            await self._kill_pod(hostname)
 
     def _decrypt_auth(self, hostname: str, auth_config_str: str | None) -> str | None:
         """Decrypt a stored credential blob from Redis (distributed mode).
