@@ -60,8 +60,21 @@ done in the prep PR. They are a second, small PR.
 
 ## Verify
 
+The CLI has **no `--version` flag** — the version is single-sourced from installed package
+metadata, so read it from there:
+
 ```bash
-docker run --rm ghcr.io/benwold-lgtm/device-mcp-gateway:<version> device-mcp --version
+docker run --rm --entrypoint python \
+  ghcr.io/benwold-lgtm/device-mcp-gateway:<version> \
+  -c "from device_mcp_gateway import __version__; print(__version__)"
+```
+
+Confirm the GHCR package is pullable without credentials, which is the failure an operator
+would otherwise hit as an unhelpful authentication error:
+
+```bash
+docker logout ghcr.io
+docker manifest inspect ghcr.io/benwold-lgtm/device-mcp-gateway:<version>
 ```
 
 Then confirm `/health` reports the new version from a deployment running the new digest — that
