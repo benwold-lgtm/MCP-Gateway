@@ -36,6 +36,7 @@ from device_mcp_gateway.api import devices as api_devices
 from device_mcp_gateway.api import fleet as api_fleet
 from device_mcp_gateway.api import probes as api_probes
 from device_mcp_gateway.api import sse as api_sse
+from device_mcp_gateway.api import streamable as api_streamable
 
 # Re-exported for tests and internal callers: these lived here before the router
 # split and their dotted paths are part of the de-facto internal API.
@@ -434,6 +435,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     protected.include_router(api_devices.router)
     protected.include_router(api_deadletter.router)
     protected.include_router(api_sse.router)
+    protected.include_router(api_streamable.router)
     protected.include_router(api_fleet.router)
     protected.include_router(api_admin.router)
 

@@ -10,6 +10,26 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **Streamable HTTP inbound transport (`POST /v1/devices/{hostname}/mcp`)** — the JSON-RPC
+  response comes back on the request that carried it, instead of being acknowledged and
+  delivered later on a stream the client holds open. Semantics are unchanged: this is still
+  revision `2025-06-18`, only the transport is new.
+
+  ⚠️ **Incomplete — embedded mode only.** Distributed mode answers `501` with a message
+  saying so. It requires a POST landing on any gateway replica to await a result produced by
+  a worker and published to Redis, which is the next piece of work; the seam it will plug
+  into (`api/exchange.py`) is in place. **Do not treat Streamable HTTP as supported until
+  that lands.**
+
+  This exists because our only inbound transport, HTTP+SSE, is formally deprecated with a
+  removal clock and has no fallback — so it is owed regardless of adopting revision
+  `2026-07-28`. It is a **separate path** rather than content negotiation on `/messages`, so
+  that retiring HTTP+SSE one minor release after this completes is a deletion rather than an
+  unpicking. See [ADR-0010](docs/adr/0010-tool-derived-request-headers.md) and
+  [the Phase 6 scope](docs/roadmap-protocol-2026-07-28.md) for the decisions behind it.
+
 ## [0.2.0] - 2026-08-06
 
 A feature release: the gateway can now federate a **remote MCP server** as a device, not only
