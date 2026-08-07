@@ -1,0 +1,111 @@
+# Triaging a dependency advisory
+
+CI runs `pip-audit -r requirements.txt` as an **advisory** step (`continue-on-error: true`) —
+a new upstream CVE should not block an unrelated PR. So a red step here is a prompt to look,
+not a broken build. `bandit`, which scans our own code, *is* blocking.
+
+This document is about how to answer "is it real?", and records the standing answers so the
+next person does not redo the work. It is deliberately organised around **what this project
+uses from each dependency**, because that is what dates slowly. The version table at the
+bottom dates quickly and is only evidence.
+
+## The method
+
+A version match is not exposure. For each finding, establish three things:
+
+1. **Which API is vulnerable**, from the advisory text — not the summary line. `pip-audit
+   --desc --format json` gives you the full write-up; most advisories name the exact function.
+2. **Whether we call it.** Grep for it. Beware near-misses: `request.url` in this codebase is
+   almost always an **`httpx.Request`** (outbound, in `security/url_policy.py`), not a
+   Starlette one. A grep that does not distinguish those will mislead you.
+3. **Whether the precondition holds in our deployment.** Several advisories require a specific
+   server or configuration. Where that is cheap to test, *test it* rather than reasoning about
+   it — see the worked example below.
+
+Record the answer here either way. "Not exposed, because X" is worth as much as a fix, and it
+is the part that gets lost.
+
+## What this project actually uses
+
+The load-bearing facts, in rough order of how often they settle a question:
+
+| Dependency | What we use it for | What we do **not** use |
+|---|---|---|
+| `cryptography` | Fernet (AES-128-CBC + HMAC-SHA256) for credential encryption; PyJWT's RS256/ES256/PS256 **signature verification** for OIDC | PKCS#7 / S-MIME / CMS, and the entire `x509.verification` API (`PolicyBuilder`, `Store`, the verifiers) |
+| `starlette` | JSON request bodies, routing, and `scope`-level routing internals in `metrics.route_template` | `request.form()` — this is a JSON API, it parses no forms. `request.url` is used once, for `.path` in an access log |
+| `python-multipart` | Nothing directly. Multipart in this codebase is **outbound** body *encoding* to devices (`core/adapter.py`), via httpx | `parse_form()`, which is what advisories usually target |
+| `mcp` | `mcp.server.fastmcp` for a server name and instructions string; our own JSON-RPC router does the work | The stdio and **WebSocket** transports |
+| `pydantic-settings` | Nothing directly — transitive via `mcp` and the OpenAPI validators | `BaseSettings`, `secrets_dir`, `NestedSecretsSettingsSource` |
+| `redis` | The whole distributed control plane | — |
+
+Two blind spots worth knowing:
+
+- **`pip-audit` does not see the base image.** Outbound TLS (device certificates, mTLS) goes
+  through CPython's `ssl` module against the **`python:3.12-slim` OpenSSL**, not the copy
+  statically linked into `cryptography`'s wheel. An OpenSSL CVE in the TLS handshake path is a
+  base-image rebuild, and no requirements scan will tell you about it.
+- **`cryptography`'s bundled OpenSSL** is used only for `cryptography`'s own operations, which
+  for us means Fernet and JWT signature verification. Advisories about its bundled OpenSSL
+  have to be read against *that* list, not against TLS.
+
+## Worked example — verify the precondition
+
+`CVE-2026-54282` (starlette): a request path not beginning with `/` corrupts
+`request.url.hostname`, so code making host-based security decisions can be misled. The
+advisory states its own precondition: *"requires an ASGI server that forwards a request-target
+lacking a leading `/` into `scope['path']`"*.
+
+That is directly testable, and worth testing because the answer is binary:
+
+```bash
+printf 'GET @google.com HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' \
+  | nc 127.0.0.1 8000
+```
+
+Uvicorn answers `400 Bad Request` — the request-target never reaches the ASGI scope, on both
+0.48.x and 0.52.x. The precondition does not hold here.
+
+Note also *why* the gateway was not exposed even if it had: client identity comes from
+`request.client.host` walked back through `X-Forwarded-For` against `trusted_proxy_cidrs`
+(`ratelimit.py`), which is exactly what the advisory recommends **instead of** `request.url`.
+That is not luck — it came out of the third-party review's XFF finding.
+
+## Standing triage — 2026-08-06
+
+Against `requirements.txt` before the 0.2.0 refresh: 10 findings across 5 packages, **none
+reachable**.
+
+| Advisory | Package | Vulnerable path | Verdict |
+|---|---|---|---|
+| PYSEC-2026-3552 | cryptography | `pkcs7_decrypt_*` Bleichenbacher oracle | Not exposed — no PKCS#7 usage |
+| PYSEC-2026-3553 | cryptography | `x509.verification` chain-build DoS | Not exposed — API never called |
+| PYSEC-2026-3554 | cryptography | `x509.verification` name-constraint escape | Not exposed — API never called |
+| GHSA-537c-gmf6-5ccf | cryptography | bundled OpenSSL (June 2026 advisory, 18 CVEs) | Not exposed — all in PKCS#7/CMS, OCSP, QUIC, CRMF/CMP, FFC-DH, AES-OCB/SIV or huge-input ASN.1; none in AES-CBC+HMAC or RSA/ECDSA verification |
+| PYSEC-2026-3483 | mcp | deprecated WebSocket transport, no Origin check | Not exposed — transport not used |
+| GHSA-4xgf-cpjx-pc3j | pydantic-settings | `secrets_dir` symlink escape | Not exposed — never imported directly |
+| PYSEC-2026-3040 | python-multipart | `parse_form()` negative `Content-Length` | Not exposed — the advisory itself notes FastAPI/Starlette do not call it |
+| PYSEC-2026-248 | starlette | `request.url` host confusion | Not exposed — see worked example above |
+| PYSEC-2026-249 | starlette | form limits ignored for urlencoded | Not exposed — `request.form()` never called |
+
+**Acted on anyway.** A plain `pip-compile --upgrade`, with no constraint changes, cleared 7 of
+the 10. Free is a good price for a smaller attack surface on a release artifact, even when
+nothing is reachable.
+
+The remaining three need `cryptography>=49`, which the **deliberate** major cap in
+`pyproject.toml` blocks. That cap exists so a major bump is a tested change rather than
+something a clean install picks up; since all three are unreachable, there is no reason to
+force it. Revisit when `cryptography` is bumped on purpose.
+
+## When you do upgrade
+
+`mcp` and `starlette` are upper-bounded for reasons written into `pyproject.toml`, and both
+have a guard test. After any refresh that moves them, confirm:
+
+```bash
+python -c "from mcp.server.fastmcp import FastMCP"   # mcp<2 bound
+pytest tests/test_metrics.py::test_parametrised_route_uses_template_not_concrete_path
+pytest tests/test_requirements.py                    # the major-cap assertions
+```
+
+Run the refresh in a **clean** virtualenv, not the working one — the failure mode these bounds
+exist to catch is precisely what a fresh resolve does differently from an incremental install.

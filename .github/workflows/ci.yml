@@ -75,7 +75,10 @@ jobs:
       - name: Install scanners
         run: pip install pip-audit bandit
 
-      # Advisory: new upstream CVEs shouldn't block unrelated PRs.
+      # Advisory: new upstream CVEs shouldn't block unrelated PRs. A red step here is a
+      # prompt to look, not a broken build — docs/dependency-advisories.md explains how to
+      # decide whether a finding is reachable, and carries the standing triage so the same
+      # advisory isn't investigated twice.
       - name: Dependency vulnerability scan (pip-audit, advisory)
         continue-on-error: true
         run: pip-audit -r requirements.txt

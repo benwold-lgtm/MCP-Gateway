@@ -10,12 +10,28 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
-Resolution of an independent third-party review (12 findings, all closed). Two of these are
-**security fixes that change request handling**, and two add **startup gates that a
-misconfigured deployment will now hit** — read those notes before upgrading.
+## [0.2.0] - 2026-08-06
+
+A feature release: the gateway can now federate a **remote MCP server** as a device, not only
+an OpenAPI service. It also carries the resolution of an independent third-party review (12
+findings, all closed) and the defects found by first running the stack on a real Kubernetes
+cluster.
+
+**Read before upgrading.** Two security fixes **change request handling**, two add **startup
+gates a misconfigured deployment will now hit**, and one **tightens tool-argument validation**
+in a way that is breaking for callers passing arguments that do not exist.
 
 ### Security
 
+- **Dependency refresh**, clearing 7 of the 10 advisories `pip-audit` reported against the
+  previous pins — notably `starlette` 1.2.1 → 1.3.1, `cryptography` 48.0.0 → 48.0.1, `mcp`
+  1.27.2 → 1.29.0 and `uvicorn` 0.48.0 → 0.52.1. No constraint changes were needed.
+  **None of the 10 were reachable from this codebase** — the refresh was taken because it was
+  free, not because anything was exploitable. The reachability analysis, and the method for
+  redoing it next time, are in the new
+  [dependency-advisories.md](docs/dependency-advisories.md). The three that remain need
+  `cryptography>=49`, which the deliberate major cap blocks; they target PKCS#7 decryption and
+  the `x509.verification` API, neither of which this project calls.
 - **`X-Forwarded-For` was attacker-controlled, so any client could choose its own rate-limit
   bucket.** The rate limiter keyed on the *left-most* XFF entry when `trust_proxy_headers`
   was on. nginx, traefik and the k8s ingresses **append** to that header rather than replace
@@ -433,6 +449,9 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.2.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.2.0
+[0.1.4]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.4
+[0.1.3]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.3
 [0.1.2]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.2
 [0.1.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.1
 [0.1.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.0

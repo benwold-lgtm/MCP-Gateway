@@ -854,6 +854,8 @@ Phase-0 / governance artifacts for reviewers and operators:
 | [docs/multitenancy.md](docs/multitenancy.md) | Single-tenant-per-stack deployment model (D-1) |
 | [docs/runbook.md](docs/runbook.md) | On-call runbook — per-alert playbooks, symptom troubleshooting, standard procedures |
 | [docs/upgrade.md](docs/upgrade.md) | Upgrade guide — versioning/compat policy, rolling procedure, breaking gates, rollback |
+| [docs/releasing.md](docs/releasing.md) | Maintainer release checklist — what happens before the tag, and the digest re-pinning that can only happen after it |
+| [docs/dependency-advisories.md](docs/dependency-advisories.md) | How to triage a `pip-audit` finding here — what this project actually uses from each dependency, plus the standing triage |
 | [docs/compliance.md](docs/compliance.md) | Compliance mapping — SOC 2 TSC / HIPAA / FedRAMP-FIPS + shared-responsibility lines |
 
 ## Running Tests
