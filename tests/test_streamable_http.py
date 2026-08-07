@@ -185,36 +185,6 @@ def test_an_unknown_device_is_404_before_any_session_work(client):
 # --- the same operation, so the same limits -----------------------------------
 
 
-# --- the mode gate, which the embedded suite cannot reach through HTTP ---------
-
-
-def test_distributed_mode_refuses_with_501_and_says_not_yet():
-    """A1 is embedded-only, and the refusal has to be honest about *why*.
-
-    501, not the dead-letter queue's 400: the caller has made no mistake. And the text must
-    say "not yet" rather than "not here" — unlike the DLQ's gate, this one is a construction
-    stage that A2 deletes, and a reader who cannot tell the two apart will treat a temporary
-    limitation as architecture.
-    """
-    import pytest
-    from fastapi import HTTPException
-
-    from device_mcp_gateway.api.streamable import _require_embedded
-
-    class _Req:
-        def __init__(self, mode):
-            self.app = type("A", (), {"state": type("S", (), {"mode": mode})()})()
-
-    _require_embedded(_Req("embedded"))  # allowed, returns None
-
-    with pytest.raises(HTTPException) as exc:
-        _require_embedded(_Req("distributed"))
-    assert exc.value.status_code == 501
-    detail = exc.value.detail.lower()
-    assert "not yet" in detail, "the refusal must read as temporary, not architectural"
-    assert "sse" in detail, "it should name the transport that does work today"
-
-
 def _route_scopes(app, path, method):
     """The scope strings a route's dependencies actually close over.
 
@@ -238,8 +208,16 @@ def test_the_new_transport_enforces_the_same_scope_as_the_old_one():
 
     Compared against the SSE message route rather than hard-coded, so that if the scope for
     tool calls is ever changed, the two move together or this fails.
+
+    Builds its own app rather than importing the module-level one. That global is constructed
+    at import time from whatever environment happened to be in place, which made this test
+    order-dependent: it passed locally and failed in CI with "no route for POST
+    /v1/devices/{hostname}/messages". A route table is a property of the app factory, so the
+    factory is what this should ask.
     """
-    from device_mcp_gateway.main import app
+    from device_mcp_gateway.main import create_app
+
+    app = create_app(override_config={"registry": {"mode": "embedded"}})
 
     legacy = _route_scopes(app, "/v1/devices/{hostname}/messages", "POST")
     assert "tools:call" in legacy, legacy

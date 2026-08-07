@@ -15,11 +15,11 @@ Deliberately a **separate path** (`/mcp`) rather than content negotiation on `/m
 HTTP+SSE is scheduled for removal one minor release after this ships, and a separate path
 makes that a deletion rather than an unpicking.
 
-⚠️ **Embedded mode only, and only until Workstream A2.** Distributed mode needs a POST
-landing on any replica to await a result produced by a worker and published to Redis —
-see ``api/exchange.py``. Until that exists this endpoint answers 501 rather than pretending,
-and the refusal says *not yet* rather than *not here*, because unlike the dead-letter queue's
-mode gate this one is a construction stage rather than an architectural property.
+**Both modes are supported.** The mode difference is confined to one function,
+``_exchange_for``: in embedded mode the pod is in-process and answering is a call, while in
+distributed mode the POST may land on any replica and the answer is produced by a worker and
+published to Redis, so the replica waits on ``session:{id}:results`` and correlates by
+JSON-RPC id. Everything else in this module is transport, and transport does not care.
 """
 
 from __future__ import annotations
@@ -33,7 +33,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from loguru import logger
 
 from device_mcp_gateway import metrics
+from device_mcp_gateway.api.dispatch import _GATEWAY_ID
 from device_mcp_gateway.api.exchange import (
+    DistributedResultExchange,
     EmbeddedResultExchange,
     ExchangeTimeout,
     ExchangeUnavailable,
@@ -52,32 +54,19 @@ SESSION_HEADER = "Mcp-Session-Id"
 PROTOCOL_HEADER = "MCP-Protocol-Version"
 
 
-def _require_embedded(request: Request) -> None:
-    """Refuse in distributed mode — Workstream A2 has not landed yet.
-
-    501 rather than the dead-letter queue's 400: the caller has not made a mistake, and this
-    is not a permanent property of the deployment. 501 is "the server does not support the
-    functionality required to fulfil the request", which is the true statement, and it turns
-    into a normal response in A2 without having promised a contract in the meantime.
-    """
-    if request.app.state.mode != "distributed":
-        return
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "Streamable HTTP inbound is not yet available in distributed mode — it is "
-            "implemented for embedded mode only in this release. Use the SSE transport "
-            "(GET /v1/devices/{hostname}/sse) until distributed support ships."
-        ),
-    )
-
-
 def _exchange_for(request: Request) -> ResultExchange:
-    """The exchange implementation for this deployment.
+    """The exchange implementation for this deployment — the only mode branch in this module.
 
-    Only the embedded one exists today; A2 adds the distributed sibling and this is the one
-    place that has to learn about it.
+    Everything else here is transport, and transport does not care which mode it is in. That
+    was the point of defining the seam before the distributed implementation existed.
     """
+    if request.app.state.mode == "distributed":
+        return DistributedResultExchange(
+            request.app.state.registry._backend,
+            request.app.state.session_router,
+            _GATEWAY_ID,
+            request.app.state.config,
+        )
     return EmbeddedResultExchange(request.app.state.registry)
 
 
@@ -112,9 +101,32 @@ async def _read_payload(request: Request) -> dict[str, Any]:
     return payload
 
 
-def _session_state(request: Request) -> dict[str, str]:
-    """Embedded session→owner map, shared with the SSE path so F-37 holds across transports."""
-    return request.app.state.session_owners
+async def _session_owner(request: Request, session_id: str) -> str | None:
+    """The principal that opened ``session_id``, or None if there is no such session.
+
+    Distributed mode keeps this on the Redis session hash so it survives across replicas —
+    a Streamable HTTP request may well land somewhere other than the one that initialized.
+    Embedded mode uses the same in-process map as the SSE path, so F-37 holds whichever
+    transport opened the session.
+    """
+    if request.app.state.mode == "distributed":
+        session = await request.app.state.session_router.get(session_id)
+        return session.get("owner") if session else None
+    return request.app.state.session_owners.get(session_id)
+
+
+async def _session_create(request: Request, hostname: str, session_id: str, subject: str) -> None:
+    if request.app.state.mode == "distributed":
+        await request.app.state.session_router.register(session_id, hostname, _GATEWAY_ID, owner=subject)
+    else:
+        request.app.state.session_owners[session_id] = subject
+
+
+async def _session_delete(request: Request, session_id: str) -> None:
+    if request.app.state.mode == "distributed":
+        await request.app.state.session_router.delete(session_id)
+    else:
+        request.app.state.session_owners.pop(session_id, None)
 
 
 @router.post(
@@ -129,7 +141,6 @@ def _session_state(request: Request) -> dict[str, str]:
 )
 async def device_streamable_post(hostname: str, request: Request, response: Response):
     """Accept one JSON-RPC message and answer it on this response."""
-    _require_embedded(request)
     _check_accept(request)
 
     reg: Registry = request.app.state.registry
@@ -144,22 +155,30 @@ async def device_streamable_post(hostname: str, request: Request, response: Resp
     _subject = _principal.subject if _principal else "unknown"
     _rid = getattr(request.state, "request_id", "-")
 
-    sessions = _session_state(request)
     session_id = request.headers.get(SESSION_HEADER)
 
     if method == "initialize":
         # The server mints the id, as on the SSE path — a client-supplied one would let a
         # caller graft themselves onto another principal's session.
         session_id = str(uuid.uuid4())
-        sessions[session_id] = _subject  # F-37: bind the session to its opener
+        await _session_create(request, hostname, session_id, _subject)  # F-37
         response.headers[SESSION_HEADER] = session_id
     elif session_id is not None:
-        owner = sessions.get(session_id)
+        owner = await _session_owner(request, session_id)
         if owner is None:
             # Spec: an unknown/expired session id must be rejected so the client re-initializes.
             raise HTTPException(status_code=404, detail="Unknown or expired session")
         if owner != _subject:
             raise HTTPException(status_code=403, detail="Session is bound to a different principal")
+    elif msg_id is not None:
+        # No session and not initializing. Refusing is not pedantry: in distributed mode the
+        # session id names the Redis stream a worker publishes the result to, so an empty one
+        # would put every sessionless caller's results in a single shared bucket — both a
+        # correctness bug (results delivered to the wrong request) and a disclosure one.
+        raise HTTPException(
+            status_code=400,
+            detail=f"{SESSION_HEADER} is required; send an initialize request first",
+        )
 
     _t = time.perf_counter()
     try:
@@ -215,24 +234,21 @@ async def device_streamable_get(hostname: str, request: Request):
     (`listChanged: false`, no sampling, no roots), so there is nothing to push. Answering
     405 is the honest reading, and it is what tells a conforming client to stop asking.
     """
-    _require_embedded(request)
     raise HTTPException(status_code=405, detail="This endpoint offers no server-initiated stream")
 
 
 @router.delete("/devices/{hostname}/mcp", dependencies=[Depends(require_scope(SCOPE_TOOLS_CALL))])
 async def device_streamable_delete(hostname: str, request: Request):
     """Explicit session termination by the client."""
-    _require_embedded(request)
     session_id = request.headers.get(SESSION_HEADER)
     if not session_id:
         raise HTTPException(status_code=400, detail=f"{SESSION_HEADER} is required to terminate a session")
     _principal = getattr(request.state, "principal", None)
     _subject = _principal.subject if _principal else "unknown"
-    sessions = _session_state(request)
-    owner = sessions.get(session_id)
+    owner = await _session_owner(request, session_id)
     if owner is None:
         raise HTTPException(status_code=404, detail="Unknown or expired session")
     if owner != _subject:
         raise HTTPException(status_code=403, detail="Session is bound to a different principal")
-    sessions.pop(session_id, None)
+    await _session_delete(request, session_id)
     return Response(status_code=204)

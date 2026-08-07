@@ -17,11 +17,13 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   delivered later on a stream the client holds open. Semantics are unchanged: this is still
   revision `2025-06-18`, only the transport is new.
 
-  ⚠️ **Incomplete — embedded mode only.** Distributed mode answers `501` with a message
-  saying so. It requires a POST landing on any gateway replica to await a result produced by
-  a worker and published to Redis, which is the next piece of work; the seam it will plug
-  into (`api/exchange.py`) is in place. **Do not treat Streamable HTTP as supported until
-  that lands.**
+  **Both modes.** In embedded mode the pod is in-process and answering is a call. In
+  distributed mode the POST may land on any gateway replica while the device is owned by one
+  worker, so the replica waits on `session:{id}:results` and correlates by JSON-RPC id. The
+  stream cursor is captured *before* the call is dispatched — the reverse ordering looks more
+  natural and silently loses every result from a worker fast enough to answer in the gap.
+  Admission control, the reserved scope, rate-limit budgets and the F-37 session binding are
+  the same as on the SSE route: a second transport must not become a way around any of them.
 
   This exists because our only inbound transport, HTTP+SSE, is formally deprecated with a
   removal clock and has no fallback — so it is owed regardless of adopting revision

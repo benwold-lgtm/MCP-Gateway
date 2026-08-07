@@ -220,6 +220,67 @@ class SessionRouter:
         finally:
             logger.debug(f"Stopped reading results stream {key}")
 
+    async def results_cursor(self, session_id: str) -> str:
+        """The id of the last entry currently on a session's results stream.
+
+        Taken **before** dispatching so the wait below reads only what arrives afterwards.
+        Reading from ``0`` instead would be wrong rather than merely wasteful: JSON-RPC ids
+        are chosen by the client and may repeat across requests within one session, so an
+        earlier result carrying the same id would be matched as this request's answer.
+        """
+        entries = await self._ps.xrevrange(_results_key(session_id), count=1)
+        if not entries:
+            return "0-0"
+        entry_id = entries[0][0]
+        return entry_id.decode() if isinstance(entry_id, bytes) else entry_id
+
+    async def await_result(
+        self,
+        session_id: str,
+        msg_id: Any,
+        *,
+        cursor: str,
+        timeout: float,
+    ) -> dict | None:
+        """Wait for the result carrying ``msg_id``, or None if the deadline passes.
+
+        This is what lets a Streamable HTTP POST answer on its own response in distributed
+        mode: the replica handling the request is not the one that produces the result — a
+        worker does, and publishes it here — so the replica has to wait on the stream and
+        correlate by JSON-RPC id.
+
+        Reads on the pub/sub pool, not the command pool. Each waiting request holds a
+        connection for the duration of the call, the same shape as an open SSE stream, and
+        the command pool (20 by default) would be exhausted by a handful of concurrent
+        requests.
+        """
+        key = _results_key(session_id)
+        last_id = cursor
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            block_ms = max(1, min(int(remaining * 1000), _XREAD_BLOCK_MS))
+            resp = await self._ps.xread({key: last_id}, count=10, block=block_ms)
+            if not resp:
+                continue
+            for _stream, entries in resp:
+                for entry_id, fields in entries:
+                    last_id = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
+                    raw = _field(fields, "data")
+                    if raw is None:
+                        continue
+                    try:
+                        message = json.loads(raw)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Non-JSON entry on {key}: {raw!r}")
+                        continue
+                    if isinstance(message, dict) and message.get("id") == msg_id:
+                        return message
+                    # Another in-flight request on this session owns that one; leave it on
+                    # the stream for whoever is waiting, and keep reading.
+
     async def publish_result(self, session_id: str, result: dict) -> None:
         """Append a JSON-RPC result to the session's durable results stream.
 

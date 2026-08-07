@@ -99,3 +99,80 @@ class EmbeddedResultExchange(ResultExchange):
         if not profile or not profile.pod:
             raise ExchangeUnavailable(f"Device '{hostname}' has no active pod", status_code=404)
         return await profile.pod.call_tool(payload)
+
+
+class DistributedResultExchange(ResultExchange):
+    """Cross-replica: publish to the worker, then wait here for the answer.
+
+    The POST can land on any gateway replica; the device is owned by exactly one worker,
+    which publishes its result to ``session:{id}:results`` in Redis. So this replica has to
+    wait on a result it does not produce and correlate it by JSON-RPC id.
+
+    Ordering matters and is the whole of the correctness argument: the stream cursor is
+    taken **before** publishing, so a worker fast enough to answer between the two cannot
+    have its result missed. Waiting first and publishing second would be the obvious
+    arrangement and would lose exactly those calls.
+    """
+
+    def __init__(self, backend: Any, session_router: Any, gateway_id: str, config: dict[str, Any]) -> None:
+        self._backend = backend
+        self._sessions = session_router
+        self._gateway_id = gateway_id
+        self._config = config or {}
+
+    async def exchange(
+        self,
+        hostname: str,
+        payload: dict[str, Any],
+        *,
+        session_id: str,
+        subject: str,
+        rid: str,
+        timeout: float = DEFAULT_EXCHANGE_TIMEOUT,
+    ) -> dict[str, Any] | None:
+        import uuid
+
+        from device_mcp_gateway import metrics
+        from device_mcp_gateway.observability import tracing
+
+        # Admission control (F-06), same watermark as the SSE path: if the worker is not
+        # draining the device's stream, a new call queues behind work that gets trimmed at
+        # MAXLEN and surfaces only as a timeout. Fail fast and visibly instead.
+        backlog_limit = self._config.get("registry", {}).get("call_backlog_limit", 1000)
+        if backlog_limit > 0 and await self._backend.call_backlog(hostname) >= backlog_limit:
+            metrics.calls_rejected_overload_total.labels(hostname=hostname).inc()
+            raise ExchangeUnavailable(f"Device '{hostname}' is overloaded; retry shortly", status_code=429)
+
+        msg_id = payload.get("id")
+        request_id = str(uuid.uuid4())
+
+        # Cursor first — see the class docstring. A notification skips this entirely.
+        cursor = "0-0" if msg_id is None else await self._sessions.results_cursor(session_id)
+
+        with tracing.start_span(
+            "mcp.tool_dispatch",
+            attributes={"mcp.hostname": hostname, "mcp.method": payload.get("method", "?"), "mcp.rid": rid},
+        ):
+            carrier = tracing.inject_carrier()
+            await self._backend.publish_tool_call(
+                hostname=hostname,
+                request_id=request_id,
+                session_id=session_id,
+                gateway_id=self._gateway_id,
+                message=payload,
+                rid=rid,
+                traceparent=carrier.get("traceparent", ""),
+                subject=subject,
+            )
+
+        if msg_id is None:
+            return None  # a notification has no answer to wait for
+
+        result = await self._sessions.await_result(session_id, msg_id, cursor=cursor, timeout=timeout)
+        if result is None:
+            metrics.tool_call_timeouts_total.labels(hostname=hostname).inc()
+            raise ExchangeTimeout(
+                f"No worker answered within {timeout:g}s (request_id={request_id}) — the call may "
+                f"still be running; retry only if the operation is idempotent"
+            )
+        return result
