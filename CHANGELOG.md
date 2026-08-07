@@ -23,6 +23,15 @@ in a way that is breaking for callers passing arguments that do not exist.
 
 ### Security
 
+- **Dependency refresh**, clearing 7 of the 10 advisories `pip-audit` reported against the
+  previous pins — notably `starlette` 1.2.1 → 1.3.1, `cryptography` 48.0.0 → 48.0.1, `mcp`
+  1.27.2 → 1.29.0 and `uvicorn` 0.48.0 → 0.52.1. No constraint changes were needed.
+  **None of the 10 were reachable from this codebase** — the refresh was taken because it was
+  free, not because anything was exploitable. The reachability analysis, and the method for
+  redoing it next time, are in the new
+  [dependency-advisories.md](docs/dependency-advisories.md). The three that remain need
+  `cryptography>=49`, which the deliberate major cap blocks; they target PKCS#7 decryption and
+  the `x509.verification` API, neither of which this project calls.
 - **`X-Forwarded-For` was attacker-controlled, so any client could choose its own rate-limit
   bucket.** The rate limiter keyed on the *left-most* XFF entry when `trust_proxy_headers`
   was on. nginx, traefik and the k8s ingresses **append** to that header rather than replace

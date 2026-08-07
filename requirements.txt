@@ -6,11 +6,11 @@
 #
 aiosqlite==0.22.1
     # via device-mcp-gateway (pyproject.toml)
-annotated-doc==0.0.4
+annotated-doc==0.0.5
     # via fastapi
-annotated-types==0.7.0
+annotated-types==0.8.0
     # via pydantic
-anyio==4.13.0
+anyio==4.14.2
     # via
     #   device-mcp-gateway (pyproject.toml)
     #   httpx
@@ -23,19 +23,19 @@ attrs==26.1.0
     #   jsonschema
     #   jsonschema-path
     #   referencing
-certifi==2026.5.20
+certifi==2026.7.22
     # via
     #   httpcore
     #   httpx
-cffi==2.0.0
+cffi==2.1.1
     # via cryptography
-click==8.4.1
+click==8.4.2
     # via uvicorn
-cryptography==48.0.0
+cryptography==48.0.1
     # via
     #   device-mcp-gateway (pyproject.toml)
     #   pyjwt
-fastapi==0.136.3
+fastapi==0.137.2
     # via device-mcp-gateway (pyproject.toml)
 h11==0.16.0
     # via
@@ -57,6 +57,7 @@ idna==3.18
     #   httpx
 jsonschema==4.26.0
     # via
+    #   device-mcp-gateway (pyproject.toml)
     #   mcp
     #   openapi-schema-validator
     #   openapi-spec-validator
@@ -70,7 +71,7 @@ lazy-object-proxy==1.12.0
     # via openapi-spec-validator
 loguru==0.7.3
     # via device-mcp-gateway (pyproject.toml)
-mcp==1.27.2
+mcp==1.29.0
     # via device-mcp-gateway (pyproject.toml)
 openapi-schema-validator==0.9.0
     # via openapi-spec-validator
@@ -78,7 +79,7 @@ openapi-spec-validator==0.9.0
     # via device-mcp-gateway (pyproject.toml)
 pathable==0.6.0
     # via jsonschema-path
-prometheus-client==0.25.0
+prometheus-client==0.26.0
     # via device-mcp-gateway (pyproject.toml)
 pybreaker==1.4.1
     # via device-mcp-gateway (pyproject.toml)
@@ -94,7 +95,7 @@ pydantic==2.13.4
     #   pydantic-settings
 pydantic-core==2.46.4
     # via pydantic
-pydantic-settings==2.14.1
+pydantic-settings==2.14.2
     # via
     #   mcp
     #   openapi-schema-validator
@@ -108,14 +109,14 @@ python-dotenv==1.2.2
     #   device-mcp-gateway (pyproject.toml)
     #   pydantic-settings
     #   uvicorn
-python-multipart==0.0.30
+python-multipart==0.0.32
     # via mcp
 pyyaml==6.0.3
     # via
     #   device-mcp-gateway (pyproject.toml)
     #   jsonschema-path
     #   uvicorn
-redis[asyncio]==8.0.0
+redis[asyncio]==8.1.0
     # via device-mcp-gateway (pyproject.toml)
 referencing==0.37.0
     # via
@@ -125,22 +126,23 @@ referencing==0.37.0
     #   openapi-schema-validator
 rfc3339-validator==0.1.4
     # via openapi-schema-validator
-rpds-py==2026.5.1
+rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
 six==1.17.0
     # via rfc3339-validator
-sse-starlette==3.4.4
+sse-starlette==3.4.8
     # via
     #   device-mcp-gateway (pyproject.toml)
     #   mcp
-starlette==1.2.1
+starlette==1.3.1
     # via
+    #   device-mcp-gateway (pyproject.toml)
     #   fastapi
     #   mcp
     #   sse-starlette
-typing-extensions==4.15.0
+typing-extensions==4.16.0
     # via
     #   anyio
     #   fastapi
@@ -156,7 +158,7 @@ typing-inspection==0.4.2
     #   mcp
     #   pydantic
     #   pydantic-settings
-uvicorn[standard]==0.48.0
+uvicorn[standard]==0.52.1
     # via
     #   device-mcp-gateway (pyproject.toml)
     #   mcp
@@ -164,5 +166,5 @@ uvloop==0.22.1
     # via uvicorn
 watchfiles==1.2.0
     # via uvicorn
-websockets==16.0
+websockets==17.0.1
     # via uvicorn
