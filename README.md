@@ -1,6 +1,35 @@
 # Device MCP Gateway
 
-A universal bridge that converts any OpenAPI-documented device or service into an [MCP](https://modelcontextprotocol.io/) tool server. Register a device by URL, the gateway auto-discovers its OpenAPI spec, translates every operation into an MCP tool, and serves it over SSE — ready for LLM clients (Claude Desktop, Cursor, custom agents) to invoke.
+**One governed [MCP](https://modelcontextprotocol.io/) endpoint for a whole fleet — whatever the upstream speaks.**
+
+Point the gateway at a REST service and it auto-discovers the OpenAPI spec and translates every
+operation into an MCP tool. Point it at a server that **already speaks MCP** and it federates
+that server's tools instead. Either way an LLM client (Claude Desktop, Cursor, a custom agent)
+connects to one endpoint over SSE, and the same control plane applies: authentication, RBAC
+scopes, per-device rate limiting, health checking, circuit breaking, tool-change governance and
+a tamper-evident audit trail.
+
+### Two kinds of upstream, one device model
+
+| `upstream_kind` | What the upstream is | What the gateway does |
+|---|---|---|
+| `openapi` *(default)* | a REST/OpenAPI service — a device, an appliance, an internal API | **translates**: discovers the spec, turns every operation into an MCP tool |
+| `mcp` | a server that already speaks MCP | **proxies**: federates its `tools/list` and `tools/call` through |
+
+Both register the same way, and a proxied MCP server is a **device** rather than a second
+entity type — so RBAC, rate limiting, admission control, the circuit breaker, dead-lettering,
+audit, fleet sessions and tool-change governance apply identically, with no parallel code path
+([ADR-0009](docs/adr/0009-mcp-passthrough.md)).
+
+That matters most for the case the gateway was built for: a **mixed fleet**. A
+[fleet session](#multiple-devices-in-one-session-fleet) can span translated REST devices and
+proxied MCP servers at once, presenting them to the client as a single namespaced tool set.
+
+> ⚠️ **A proxied MCP server is an untrusted upstream.** It authors its own tool contract and
+> can change it after you have reviewed it. The gateway detects that — every poll diffs the
+> tool set and flags a removed tool or a newly-required parameter as breaking — but detection
+> is not prevention. Read [threat-model.md §B5](docs/threat-model.md) before pointing it at a
+> server you do not control.
 
 ## Architecture
 
@@ -28,7 +57,8 @@ LLM clients
 └──────────────────┬────────────────────────────────┘
                    │ httpx  (+ circuit breaker)
                    ▼
-             Device APIs
+   OpenAPI services  ·  remote MCP servers
+   (translated)         (proxied)
 ```
 
 Gateway instances are stateless — they read from Redis and relay SSE events via Redis pub/sub. Workers own the DevicePods and execute tool calls. All three components scale independently.
@@ -36,7 +66,8 @@ Gateway instances are stateless — they read from Redis and relay SSE events vi
 ### Embedded mode (local development)
 
 ```
-LLM client → FastAPI → Registry → DevicePod → Device API
+LLM client → FastAPI → Registry → DevicePod → upstream
+                                │             (OpenAPI service or MCP server)
                                 └── SQLite (device registrations)
 ```
 
