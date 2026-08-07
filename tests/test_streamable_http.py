@@ -185,13 +185,19 @@ def test_an_unknown_device_is_404_before_any_session_work(client):
 # --- the same operation, so the same limits -----------------------------------
 
 
-def _route_scopes(app, path, method):
+def _route_scopes(router, path, method):
     """The scope strings a route's dependencies actually close over.
 
     Asserting that *a* dependency is attached passes just as happily when the wrong one is
     attached, so this reads the scope out of the `require_scope` closure instead.
+
+    Takes the **router module's** object rather than a built app. Both earlier versions of
+    this went through an app — the import-time global, then a freshly built one — and both
+    failed in CI with "no route for POST /v1/devices/{hostname}/messages" while passing
+    locally. The declaration being asserted lives on the router, which exists as soon as the
+    module imports and depends on no configuration, so that is what to ask.
     """
-    for route in app.routes:
+    for route in router.routes:
         if getattr(route, "path", "") == path and method in getattr(route, "methods", set()):
             found = []
             for dep in route.dependant.dependencies:
@@ -200,7 +206,8 @@ def _route_scopes(app, path, method):
                     if isinstance(value, str) and ":" in value:
                         found.append(value)
             return found
-    raise AssertionError(f"no route for {method} {path}")
+    known = [(sorted(r.methods), r.path) for r in router.routes]
+    raise AssertionError(f"no route for {method} {path}; router has {known}")
 
 
 def test_the_new_transport_enforces_the_same_scope_as_the_old_one():
@@ -209,19 +216,14 @@ def test_the_new_transport_enforces_the_same_scope_as_the_old_one():
     Compared against the SSE message route rather than hard-coded, so that if the scope for
     tool calls is ever changed, the two move together or this fails.
 
-    Builds its own app rather than importing the module-level one. That global is constructed
-    at import time from whatever environment happened to be in place, which made this test
-    order-dependent: it passed locally and failed in CI with "no route for POST
-    /v1/devices/{hostname}/messages". A route table is a property of the app factory, so the
-    factory is what this should ask.
+    Reads the routers directly — see `_route_scopes` for why not an app.
     """
-    from device_mcp_gateway.main import create_app
+    from device_mcp_gateway.api import sse as sse_routes
+    from device_mcp_gateway.api import streamable as streamable_routes
 
-    app = create_app(override_config={"registry": {"mode": "embedded"}})
-
-    legacy = _route_scopes(app, "/v1/devices/{hostname}/messages", "POST")
+    legacy = _route_scopes(sse_routes.router, "/devices/{hostname}/messages", "POST")
     assert "tools:call" in legacy, legacy
 
     for method in ("POST", "GET", "DELETE"):
-        new = _route_scopes(app, "/v1/devices/{hostname}/mcp", method)
+        new = _route_scopes(streamable_routes.router, "/devices/{hostname}/mcp", method)
         assert set(legacy) <= set(new), f"{method} /mcp requires {new}, weaker than /messages {legacy}"
