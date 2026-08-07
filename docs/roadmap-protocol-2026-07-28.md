@@ -1,6 +1,7 @@
 # Phase 6 scope — Streamable HTTP inbound, then MCP `2026-07-28`
 
-**Status:** scoped, not started. Written 2026-08-06, against spec revision `2026-07-28`.
+**Status:** decisions taken 2026-08-07, implementation not started. Written 2026-08-06 against
+spec revision `2026-07-28`.
 
 ## Why this is not optional
 
@@ -91,23 +92,38 @@ The SDK is not an obstacle: `FastMCP` appears exactly once, for a server name an
 instructions string. Our own JSON-RPC router does the work, so the `mcp` 1.x → 2.x pin is
 close to free.
 
-## Decisions needed before starting
+## Decisions — taken 2026-08-07
 
-1. **`x-mcp-header` (SEP-2243).** The spec now blesses deriving HTTP headers from tool
-   parameters — precisely what F-25 forbids and what we have a test asserting is impossible.
-   Options: don't implement it (spec-incomplete, safest); implement with a strict allowlist and
-   reserved headers unreachable (recommended); implement as specified (rejected — it hands an
-   LLM-controlled string a header slot on an authenticated outbound call).
-2. **How long HTTP+SSE inbound stays.** Dual-era makes keeping it cheap; keeping it forever
-   makes the deletion column above hypothetical. Suggest: one minor release after Streamable
-   HTTP inbound ships, announced in the CHANGELOG.
-3. **The supported-version set we advertise**, which is what `server/discover` and
-   `UnsupportedProtocolVersionError` report. Suggest `2026-07-28` + `2025-06-18`, dropping the
-   two older revisions we currently list but have never tested against.
-4. **Whether passthrough gains `subscriptions/listen`.** We advertise
-   `tools.listChanged: false` honestly today and poll instead. Staying with polling is
-   defensible — governance is a *diff*, not a notification — but a modern upstream may expect
-   the option.
+1. **`x-mcp-header` (SEP-2243): adopt for OpenAPI, exclude passthrough permanently.**
+   Recorded as [ADR-0010](adr/0010-tool-derived-request-headers.md).
+
+   The framing in the first draft of this document was wrong and is corrected there. F-25 does
+   not forbid deriving headers from tool parameters — the OpenAPI path already does it, via a
+   reserved-header denylist and CRLF rejection. What has no header derivation at all is the
+   **proxy** path, and `test_tool_arguments_cannot_reach_the_wire_as_headers` pins that
+   specifically.
+
+   So the question was never "do we cross a line we drew", but "do we give the *less* trusted
+   upstream kind a header channel it does not have". The answer is no, **permanently** rather
+   than pending review: on a proxied server the upstream chooses the header *name* as well as
+   the model choosing the value, on a request that carries the device's credentials. ADR-0010
+   records what superseding it would require.
+
+2. **HTTP+SSE inbound stays for one minor release** after Streamable HTTP inbound ships,
+   announced in the CHANGELOG when it lands and removed in the following minor. This is what
+   makes the deletion column above real rather than hypothetical.
+
+3. **Advertise three revisions: `2026-07-28`, `2025-11-25`, `2025-06-18`.** Drop `2025-03-26`
+   and `2024-11-05`, which are currently listed but have never been tested against —
+   advertising an untested version is a claim we cannot back. `2025-11-25` is included because
+   the installed SDK reports it as `LATEST_PROTOCOL_VERSION`, so an SDK-default client
+   negotiates it without a fallback round trip. It costs a row in the verification matrix.
+
+4. **Passthrough keeps polling; `subscriptions/listen` is not adopted.** Governance is a diff,
+   not a notification — classifying a breaking change needs the before and the after
+   regardless, so a notification would trigger work polling already does. Polling also cannot
+   be silenced by an upstream that simply stops sending notifications, which matters for a
+   source we do not trust. `tools.listChanged: false` stays honest.
 
 ## Traps, from what this codebase has already taught us
 
