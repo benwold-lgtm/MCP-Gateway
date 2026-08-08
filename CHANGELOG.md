@@ -10,6 +10,28 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-08
+
+The gateway gains a **second inbound transport**. Nothing in this release removes or changes an
+existing endpoint — every 0.2.0 client keeps working untouched — but two things are worth
+reading before you upgrade.
+
+### Read this before upgrading
+
+- **HTTP+SSE inbound is now deprecated, and this release starts its clock.** `GET /v1/devices/
+  {hostname}/sse`, `POST /v1/devices/{hostname}/messages`, `GET /v1/fleet/sse` and
+  `POST /v1/fleet/messages` still work and are unchanged. They are scheduled for **removal one
+  minor release from now (0.4.0)**. Move clients to `POST /v1/devices/{hostname}/mcp` and
+  `POST /v1/fleet/mcp` when convenient; the README now leads with those. This is not our
+  deprecation to reverse — HTTP+SSE is deprecated upstream in the MCP specification.
+- **An unanswered tool call now returns `504`, where it previously returned `500`.** If any
+  client or alert keys on `500` to mean "the device did not answer", it needs updating. The old
+  behaviour was a bug (see *Fixed* below), and `504` is the accurate answer: the call may still
+  be running upstream, so it is the client's choice whether retrying is safe.
+
+Note on the version number: this is a **minor** bump, not a patch, because it adds endpoints.
+`0.2.0` remains published with a known-issues notice pointing here.
+
 ### Added
 
 - **Streamable HTTP inbound transport (`POST /v1/devices/{hostname}/mcp`)** — the JSON-RPC
@@ -522,6 +544,7 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.3.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.0
 [0.2.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.2.0
 [0.1.4]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.4
 [0.1.3]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.3
