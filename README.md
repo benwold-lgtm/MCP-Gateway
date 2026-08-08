@@ -245,6 +245,12 @@ principal that opened it) — this doesn't grant access to anything a caller cou
 already reach one device at a time. Capped at 25 devices per session by default
 (`registry.fleet_max_devices`).
 
+> **Or avoid the split entirely:** `POST /v1/fleet/mcp?devices=a,b,…` is the same fleet
+> session over Streamable HTTP, where every method — `tools/call` included — answers on the
+> request that asked, identically in both modes. `devices` is read on `initialize` only; the
+> session carries the fleet afterwards. The table below describes the **deprecated** SSE fleet
+> route, kept accurate for as long as it exists.
+
 > **Where the reply arrives differs by method, and by mode.** A conforming MCP client
 > handles this already, because both shapes are legal — but anyone writing a client by
 > hand against `POST /v1/fleet/messages` will hit it, so it is written down here:
@@ -331,6 +337,7 @@ Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /v1/
 | `POST` | `/v1/devices/{hostname}/mcp` | Streamable HTTP transport — the JSON-RPC response returns on **this** request, in both modes (`tools:call`) |
 | `GET` | `/v1/fleet/sse?devices=a,b,…` | Open one MCP session spanning several devices — tool names namespaced by hostname (`tools:call`) |
 | `POST` | `/v1/fleet/messages` | Send a JSON-RPC 2.0 message on a fleet session (`tools:call`) |
+| `POST` | `/v1/fleet/mcp?devices=a,b,…` | Fleet session over Streamable HTTP — `devices` on `initialize` only; every method, `tools/call` included, answers on **this** request in both modes (`tools:call`) |
 | `GET` | `/v1/devices/{hostname}/deadletter` | Inspect dead-lettered tool calls (distributed mode; `devices:read`) |
 | `POST` | `/v1/devices/{hostname}/deadletter/replay` | Re-publish dead-lettered calls onto the call stream; optional `{"ids":[...]}` (`devices:write`) |
 | `DELETE` | `/v1/devices/{hostname}/deadletter` | Drain the dead-letter queue; optional `{"ids":[...]}` (`devices:write`) |
