@@ -32,6 +32,27 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   unpicking. See [ADR-0010](docs/adr/0010-tool-derived-request-headers.md) and
   [the Phase 6 scope](docs/roadmap-protocol-2026-07-28.md) for the decisions behind it.
 
+- **Fleet sessions over Streamable HTTP (`POST /v1/fleet/mcp?devices=a,b,…`)** — one MCP
+  session spanning several devices (ADR-0008) on the new transport. `devices` is read on
+  `initialize` only, so a later request cannot quietly widen the session's reach; the session
+  carries the fleet afterwards.
+
+  **This removes the inline-vs-stream split.** On the SSE fleet route, distributed mode answers
+  `initialize`/`ping`/`tools/list` inline but returns `{"status": "accepted"}` for `tools/call`
+  and delivers the result on the stream, while embedded mode puts all four on the stream. Both
+  are legal MCP, but the asymmetry cost a debugging round. Here there is no stream, so every
+  method answers on the POST that asked, identically in both modes.
+
+  `tools/list` is rebuilt per request rather than frozen at open, so a device that was down
+  when the session started joins once it recovers. `tools/call` reuses the same `ResultExchange`
+  as the per-device transport, so cross-replica correlation, admission control and the timeout
+  contract are shared rather than reimplemented. A session opened here stays usable on the SSE
+  fleet route while that transport is being retired.
+
+  A per-device session id is refused on the fleet surface (and vice versa): the two have
+  different tool namespaces and different dispatch, so sharing one session store must not let
+  them be used interchangeably.
+
 ### Fixed
 
 Both of these are **pre-existing** defects, found by running the new transport on the lab

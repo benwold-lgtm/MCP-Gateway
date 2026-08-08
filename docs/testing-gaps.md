@@ -142,6 +142,11 @@ ConfigMap/Secret wiring, probe timing, ordering and ingress admission all exerci
   delivers `tools/call` on the SSE stream — and in embedded mode delivers all four on the
   stream. Both shapes are legal MCP, but the split cost a debugging round and was written
   down nowhere. **Documented 2026-08-06** in the [README](../README.md#multiple-devices-in-one-session-fleet).
+  **Resolved for the new transport 2026-08-08**: `POST /v1/fleet/mcp` (Streamable HTTP) has no
+  stream to defer anything onto, so every method — `tools/call` included — answers on the POST
+  that asked, identically in both modes. The split remains on the SSE fleet route, which is
+  deprecated and scheduled for removal one minor release after Streamable HTTP completes; it is
+  not worth changing a deprecated surface's wire behaviour under existing clients.
 - `pod_active: true` can briefly coexist with a 404 on `/sse` while a worker is terminating,
   because the lease and the flag converge rather than moving together. Self-resolves in
   seconds. **Documented 2026-08-06** as a [runbook symptom](runbook.md#pod_active-true-but-sse-returns-404-transient-after-a-worker-roll),

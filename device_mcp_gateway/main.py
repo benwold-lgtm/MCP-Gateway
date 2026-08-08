@@ -37,6 +37,7 @@ from device_mcp_gateway.api import fleet as api_fleet
 from device_mcp_gateway.api import probes as api_probes
 from device_mcp_gateway.api import sse as api_sse
 from device_mcp_gateway.api import streamable as api_streamable
+from device_mcp_gateway.api import streamable_fleet as api_streamable_fleet
 
 # Re-exported for tests and internal callers: these lived here before the router
 # split and their dotted paths are part of the de-facto internal API.
@@ -252,6 +253,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # Embedded-mode fleet sessions: session_id -> SseTransport. Distributed mode
     # persists fleet session state in Redis instead of this in-process dict.
     _app.state.fleet_transports = {}
+    # Embedded-mode Streamable HTTP fleet sessions: session_id -> [hostname, ...]. Separate
+    # from fleet_transports because this transport has no stream and so needs no transport
+    # object — only the device list the session was opened over, to rebuild its manifest.
+    _app.state.fleet_hosts = {}
     # Short-TTL cache for the UI read aggregate (SRE O4) so a polling dashboard
     # doesn't trigger a fresh list_devices() on every request. Per-replica; ETag is
     # a content hash so it's stable across replicas.
@@ -437,6 +442,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     protected.include_router(api_sse.router)
     protected.include_router(api_streamable.router)
     protected.include_router(api_fleet.router)
+    protected.include_router(api_streamable_fleet.router)
     protected.include_router(api_admin.router)
 
     # Version the entire management API under /v1 (e.g. /v1/devices). Probes

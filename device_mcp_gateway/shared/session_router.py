@@ -148,16 +148,24 @@ class SessionRouter:
         gateway_id: str,
         ttl: int = _SESSION_TTL,
         owner: str | None = None,
+        extra: dict[str, str] | None = None,
     ) -> None:
         """Record that session_id is held by this gateway instance.
 
         ``owner`` is the principal subject that opened the session; it binds the
         session to that principal so another caller can't post to it (F-37).
+
+        ``extra`` carries fields a particular session kind needs — a fleet session stores
+        the device list it was opened over. It is a separate argument rather than an
+        overload of ``hostname`` because that field is singular everywhere else, and a
+        comma-joined list hiding in it would read as one very oddly named device.
         """
         key = KEYS.session(session_id)
         mapping = {"hostname": hostname, "gateway_id": gateway_id}
         if owner is not None:
             mapping["owner"] = owner
+        if extra:
+            mapping.update(extra)
         # Pipeline hset + expire so the hash never lands without a TTL — a drop
         # between two separate round-trips would otherwise leak the session key.
         pipe = self._r.pipeline()
