@@ -39,11 +39,12 @@ The gateway supports two modes selected by `registry.mode` in `config.yaml`.
 
 ```
 LLM clients
-    │  SSE (GET /v1/devices/{hostname}/sse)
+    │  Streamable HTTP (POST /v1/devices/{hostname}/mcp)   ← recommended
+    │  HTTP+SSE        (GET  /v1/devices/{hostname}/sse)   ← deprecated
     ▼
 ┌───────────────────────────────────────────────────┐
 │  Gateway (stateless, scale N replicas)            │
-│  FastAPI  •  rate limiter  •  SSE pub/sub relay   │
+│  FastAPI  •  rate limiter  •  result relay        │
 └──────────────────┬────────────────────────────────┘
                    │ Redis Streams / pub/sub
 ┌──────────────────▼────────────────────────────────┐
@@ -97,12 +98,27 @@ device-mcp
 # device-mcp --host 0.0.0.0 --port 8000 --config /path/to/config.yaml
 
 # 4. Register a device
+#    ("transport" names the device pod's own transport and is currently always "sse";
+#     it does NOT choose how your client connects — see the note below.)
 curl -X POST http://localhost:8000/v1/devices \
   -H "Content-Type: application/json" \
   -d '{"hostname": "my-sensor", "base_url": "http://192.168.1.42", "transport": "sse"}'
 
-# 5. Connect an MCP client (see MCP Client Integration below)
+# 5. Talk to it over Streamable HTTP — the response comes back on this request
+curl -X POST http://localhost:8000/v1/devices/my-sensor/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
+#    -> 200, with an Mcp-Session-Id response header. Send that header on subsequent calls:
+#    {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+
+# 6. Connect an MCP client (see MCP Client Integration below)
 ```
+
+> **`transport` on a device is not your client's transport.** It describes the transport the
+> device's pod runs internally, and `"sse"` is the only value the API accepts today —
+> anything else returns `400`. How a *client* reaches that device is a separate choice made
+> per request: **`POST /v1/devices/{hostname}/mcp`** (Streamable HTTP, recommended) or the
+> deprecated `GET /v1/devices/{hostname}/sse`. Both work against any active device.
 
 > **Registering a device on a private/LAN address?** By default the gateway refuses
 > targets that resolve to private, loopback, or link-local addresses (the Tier-0 SSRF
@@ -136,6 +152,14 @@ curl -X POST http://localhost:8000/v1/devices \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"hostname": "my-sensor", "base_url": "http://192.168.1.42", "transport": "sse"}'
+
+# 4. Talk to it over Streamable HTTP — send this to ANY gateway replica.
+#    The device is owned by one worker, but whichever replica takes the POST waits for
+#    that worker's result and returns it on this response.
+curl -X POST http://localhost:8000/v1/devices/my-sensor/mcp \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
 ```
 
 ---
@@ -159,6 +183,17 @@ source, first-run credentials, connecting an MCP client, and securing it beyond 
 
 ## MCP Client Integration
 
+> **Which endpoint should a client use?**
+>
+> | | Endpoint | Status |
+> |---|---|---|
+> | **Streamable HTTP** | `POST /v1/devices/{hostname}/mcp` | **Recommended.** The JSON-RPC response returns on the request that carried it. |
+> | HTTP+SSE | `GET /v1/devices/{hostname}/sse` + `POST …/messages` | **Deprecated** upstream, with a removal clock. Kept for clients that do not speak Streamable HTTP yet; scheduled for removal one minor release after the new transport completes. |
+>
+> Both reach the same device with the same tools, scopes and rate limits — the choice is
+> per client, not per device. Prefer `/mcp` for anything new. The examples below give the
+> Streamable HTTP form first and the SSE form as a fallback.
+
 ### Claude Desktop
 
 Claude Desktop's native server config **cannot attach an `Authorization` header**, and
@@ -179,7 +214,7 @@ Config file locations:
       "command": "npx",
       "args": [
         "-y", "mcp-remote@latest",
-        "http://localhost:8000/v1/devices/my-sensor/sse",
+        "http://localhost:8000/v1/devices/my-sensor/mcp",
         "--allow-http",
         "--header", "Authorization:${GATEWAY_TOKEN}"
       ],
@@ -190,6 +225,10 @@ Config file locations:
   }
 }
 ```
+
+If your `mcp-remote` build predates Streamable HTTP support, swap the URL back to
+`http://localhost:8000/v1/devices/my-sensor/sse` — everything else is identical, and the
+deprecated route still works.
 
 Two details that matter:
 
@@ -208,6 +247,25 @@ Clients that can attach request headers connect directly — no bridge process:
 {
   "mcpServers": {
     "my-sensor": {
+      "type": "http",
+      "url": "http://localhost:8000/v1/devices/my-sensor/mcp",
+      "headers": { "Authorization": "Bearer <gateway-api-key>" }
+    }
+  }
+}
+```
+
+The key naming the transport is the client's, not the gateway's — some call it `"http"`,
+others `"streamable-http"`; check your client's docs. What the gateway requires is only the
+URL and the header.
+
+<details>
+<summary>The deprecated SSE form, for clients that need it</summary>
+
+```json
+{
+  "mcpServers": {
+    "my-sensor": {
       "type": "sse",
       "url": "http://localhost:8000/v1/devices/my-sensor/sse",
       "headers": { "Authorization": "Bearer <gateway-api-key>" }
@@ -215,15 +273,37 @@ Clients that can attach request headers connect directly — no bridge process:
   }
 }
 ```
+</details>
 
 ### Multiple devices in one session (fleet)
 
-Registering more than a couple of devices? `GET /v1/devices/{hostname}/sse` is one session
-per device — fine for one or two, but an AI client needs a separate config entry (and,
-where header-based auth is required, a separate bridge process) per device. The **fleet**
-endpoint aggregates several devices' tools into a single MCP session instead, with tool
-names namespaced by hostname (`my-sensor_get_readings`, `my-fan_get_readings`, ...) so
-there's no collision even when two devices expose the same operation:
+Registering more than a couple of devices? A per-device endpoint is one session per device —
+fine for one or two, but an AI client needs a separate config entry (and, where header-based
+auth is required, a separate bridge process) per device. The **fleet** endpoint aggregates
+several devices' tools into a single MCP session instead, with tool names namespaced by
+hostname (`my-sensor_get_readings`, `my-fan_get_readings`, ...) so there's no collision even
+when two devices expose the same operation:
+
+```json
+{
+  "mcpServers": {
+    "my-fleet": {
+      "type": "http",
+      "url": "http://localhost:8000/v1/fleet/mcp?devices=my-sensor,my-fan,my-thermostat",
+      "headers": { "Authorization": "Bearer <gateway-api-key>" }
+    }
+  }
+}
+```
+
+`devices` is read when the session opens and ignored afterwards, so the fleet cannot be
+widened by a later request.
+
+(For Claude Desktop, use the same `mcp-remote` config as above with this fleet URL in
+place of the per-device one.)
+
+<details>
+<summary>The deprecated SSE fleet form</summary>
 
 ```json
 {
@@ -236,24 +316,22 @@ there's no collision even when two devices expose the same operation:
   }
 }
 ```
-
-(For Claude Desktop, use the same `mcp-remote` config as above with this fleet URL in
-place of the per-device one.)
+</details>
 
 Same auth model as the per-device endpoint (`tools:call` scope, session bound to the
 principal that opened it) — this doesn't grant access to anything a caller couldn't
 already reach one device at a time. Capped at 25 devices per session by default
 (`registry.fleet_max_devices`).
 
-> **Or avoid the split entirely:** `POST /v1/fleet/mcp?devices=a,b,…` is the same fleet
-> session over Streamable HTTP, where every method — `tools/call` included — answers on the
-> request that asked, identically in both modes. `devices` is read on `initialize` only; the
-> session carries the fleet afterwards. The table below describes the **deprecated** SSE fleet
-> route, kept accurate for as long as it exists.
+> **The rest of this section is about the deprecated SSE fleet route only.** On
+> `POST /v1/fleet/mcp` there is no split to describe: every method, `tools/call` included,
+> answers on the request that asked, identically in both modes. If you are using the
+> recommended endpoint you can skip to the next section.
 
-> **Where the reply arrives differs by method, and by mode.** A conforming MCP client
-> handles this already, because both shapes are legal — but anyone writing a client by
-> hand against `POST /v1/fleet/messages` will hit it, so it is written down here:
+> **On the SSE fleet route, where the reply arrives differs by method, and by mode.** A
+> conforming MCP client handles this already, because both shapes are legal — but anyone
+> writing a client by hand against `POST /v1/fleet/messages` will hit it, so it is written
+> down here:
 >
 > | Mode | `initialize`, `ping`, `tools/list` | `tools/call` |
 > |---|---|---|
@@ -272,7 +350,30 @@ already reach one device at a time. Capped at 25 devices per session by default
 > (`POST /v1/devices/{hostname}/messages`) has no such split — it publishes everything to
 > the worker and always answers on the stream.
 
-### Manual invocation (SSE transport)
+### Manual invocation (Streamable HTTP)
+
+One POST per message, and the reply is the response body. The server mints the session id on
+`initialize` and returns it in the `Mcp-Session-Id` header — do not supply your own.
+
+```bash
+# initialize — note the -D- to capture the session header
+curl -sD- -X POST -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" \
+  http://localhost:8000/v1/devices/my-sensor/mcp \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
+
+# then send the returned id back on every subsequent message
+curl -s -X POST -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: <id-from-above>" \
+  http://localhost:8000/v1/devices/my-sensor/mcp \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# end the session when done
+curl -s -X DELETE -H "Authorization: Bearer <api-key>" \
+  -H "Mcp-Session-Id: <id-from-above>" \
+  http://localhost:8000/v1/devices/my-sensor/mcp
+```
+
+### Manual invocation (SSE transport — deprecated)
 
 The SSE transport uses a two-step protocol. The server assigns a session ID — do not supply your own.
 
@@ -600,7 +701,7 @@ All settings live in `config.yaml`. Override the file location with `MCP_CONFIG`
 | `registry.spec_poll_interval` | `300` | Seconds between spec refresh checks |
 | `registry.spec_cache_ttl` | `3600` | Spec cache lifetime in seconds |
 | `registry.max_concurrent_pods` | `50` | Max simultaneous device pods (embedded mode only) |
-| `registry.fleet_max_devices` | `25` | Max devices one fleet session (`/v1/fleet/sse`) may span |
+| `registry.fleet_max_devices` | `25` | Max devices one fleet session (`/v1/fleet/mcp` or `/v1/fleet/sse`) may span |
 | `redis.url` | `"redis://localhost:6379/0"` | Redis connection URL. Override with `MCP_REDIS_URL` |
 | `redis.socket_timeout` | `5` | Redis socket timeout in seconds |
 | `redis.max_connections` | `20` | Redis connection pool size per gateway instance |

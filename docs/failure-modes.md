@@ -27,6 +27,7 @@ Severity: 🔴 outage / data-affecting · 🟠 degraded · 🟡 localized.
 | R2 | Redis auth/TLS misconfigured | 🔴 | Startup **refuses to boot** (F-24) | Process won't start (fail-closed) | Hard gate on unauthenticated Redis (F-24) | Fix `redis-url`/password secret |
 | R3 | Call-stream backlog nears MAXLEN (10k) | 🟠 | `mcp_worker_undelivered_calls` → `MCPUndeliveredBacklogNearMaxlen` | Oldest undelivered calls will be trimmed | Admission 429 (F-06) sheds before MAXLEN; alert fires at 8k | Scale workers; find the stuck consumer |
 | R4 | Thundering herd after a Redis flap | 🟠 | Redis CPU/conn spike on recovery | Reconvergence load spike | ±20% jitter on every periodic loop/election/reconnect (F-61) | Usually self-heals; check jitter config |
+| R5 | Blocking read outlives its own socket deadline | 🟠 | `redis.exceptions.TimeoutError` in gateway logs; a `500` where a `504` is expected; idle SSE streams dropping ~30s in | Unanswered tool calls report as gateway failure rather than device timeout; open SSE streams torn down mid-session | Block window derived from the connection's socket deadline, and a raised timeout treated as an elapsed window so the caller's own timeout stays authoritative (2026-08-07) | None routine; if it recurs, compare `redis.socket_timeout` against the XREAD block window — they must not be equal |
 
 ## 3. Workers
 
@@ -39,6 +40,7 @@ Severity: 🔴 outage / data-affecting · 🟠 degraded · 🟡 localized.
 | W5 | Load skew after scale-out (sticky claims) | 🟡 | `mcp_worker_pods` per-worker skew | Hot workers, idle new ones | Decentralized rebalance on scale-out (F-07) | Verify `rebalance_enabled`; inspect skew |
 | W6 | Reclaimed call double-executes a write | 🟠 | `mcp_duplicate_calls_suppressed_total` | Duplicate suppressed, client told | At-most-once guard on non-idempotent methods (F-08) | None; confirm suppression metric |
 | W7 | Within-worker noisy neighbor saturates the loop | 🟡 | `mcp_worker_calls_throttled_total` | Co-located devices slowed | Per-worker aggregate in-flight cap (F-13) | Raise cap or shard the hot device to its own stack |
+| W8 | Claim lease lapses and is never re-acquired (pause/stall > TTL) | 🟠 | Device reports `pod_active: false` while its worker is healthy and still polling the upstream; `claim:{hostname}` absent in Redis; reconciler logs the same device orphaned every sweep | Device unreachable through the API (404) though the worker is still serving it — **does not self-heal**; before the fix only a worker restart recovered it | Heartbeat re-acquires a lapsed claim instead of renewing a key that no longer exists, and checks ownership before renewing so a reassigned device's lease is not extended by its former owner (2026-08-07). This is the self-heal W3's F-62 hysteresis is written to depend on | None routine; the warning names the device, the worker and the claim TTL — investigate a GC pause or Redis stall longer than that TTL |
 
 ## 4. Upstream device path
 
