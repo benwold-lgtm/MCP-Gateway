@@ -10,6 +10,42 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-device outbound TLS trust** (`security.mtls.devices.<hostname>`), closing the last TG-4
+  residual. Any of the five mTLS keys — `ca_bundle`, `client_cert`, `client_key`,
+  `client_key_password`, `verify` — can now be overridden for a single device, inheriting the
+  rest from the fleet block. Devices the block does not name are unaffected.
+
+  Trust was previously **fleet-global**: setting `ca_bundle` for one self-signed device made
+  that CA a trust anchor for *every* outbound call the gateway and workers made, so any
+  certificate it had signed would be accepted for any device. `verify: false` was worse,
+  disabling verification fleet-wide to accommodate one appliance. Heterogeneous device PKIs
+  previously required separate deployments; they no longer do.
+
+  Precedence is most-specific-first: a device block beats `MCP_MTLS_VERIFY`, which beats the
+  fleet config. `MCP_TLS_CLIENT_KEY_PASSWORD` is the exception — it unlocks the *fleet* client
+  key and is not applied to a device that brings its own. See
+  [docs/security-mtls.md](docs/security-mtls.md#per-device-trust).
+
+- `GET /devices/{hostname}/diagnostics` gained a **`tls`** field reporting the profile that
+  device resolved to (`source: fleet|device`, `verify`, the CA basename, whether a client cert
+  is presented), so the trust a device actually gets is answerable without reading config on
+  the pod. Resolved live rather than stored, so it cannot drift from the running config.
+
+### Changed
+
+- The spec fetcher and the worker health loop now keep **one HTTP client per TLS profile**
+  instead of one per service. A single shared client would have put every device back on one
+  trust set, which is the limitation this release removes.
+- Both processes **refuse to start** on a bad per-device TLS profile — every declared profile is
+  built at startup rather than on first contact with the device. An unreadable CA names the
+  device in the error, and an **unknown key** inside a device block is a hard error rather than
+  a warning: an ignored key there would silently leave that device on the fleet trust set.
+- Setting `security.mtls.verify: false` at the fleet level now warns that a per-device opt-out is
+  the narrower alternative, and per-device opt-outs are named individually in the startup
+  warnings so they cannot be forgotten in a config nobody has opened in a year.
+
 ## [0.3.0] - 2026-08-08
 
 The gateway gains a **second inbound transport**. Nothing in this release removes or changes an

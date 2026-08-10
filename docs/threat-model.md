@@ -137,7 +137,7 @@ writes its own contract**.
 | **D**enial of service | An upstream returns 10,000 tools, or a single enormous `tools/list` | Tool-count cap and payload-byte cap re-applied on the proxy path (F-09) — the translator's caps do not cover it, because no translation happens |
 | **D**enial of service | A tool-level error storm trips the breaker and takes the device out | The breaker trips on transport failure (connection, timeout, 5xx) only. A JSON-RPC `error` in the result is the upstream's *tool-level* failure — analogous to a 4xx, which does not trip today. Decided explicitly and tested |
 | **E**levation via redelivery | A redelivered stream message re-executes a proxied write | `is_idempotent_call` returns `False` for `source="proxy"` rather than reading a backing HTTP method that does not exist (F-08) |
-| **S**poofing (server identity) | The worker talks to an impostor MCP server | Outbound mTLS / private CA per the mTLS config (F-31). **Limitation: TLS trust is fleet-global** — a `ca_bundle` set for one device replaces the public trust set for every outbound call in that process |
+| **S**poofing (server identity) | The worker talks to an impostor MCP server | Outbound mTLS / private CA per the mTLS config (F-31), resolved **per device** — a `ca_bundle` set for one upstream is not a trust anchor for the others (TG-4 residual, closed 2026-08-10) |
 
 **Operator guidance specific to passthrough.** A proxied upstream is code you do not control
 that is describing itself to your model. Treat `mcp_device_tools_changed_total{breaking="true"}`
@@ -166,10 +166,10 @@ see, post-sanitisation — that is the review surface for tool poisoning.
 | Semantic prompt injection via device data | **Residual** — structurally sanitized; semantic intent is a client-model concern |
 | Tool poisoning in a proxied upstream's descriptions | **Residual** — structurally sanitized (F-26); the control for prose is the change-governance signal (F-41), not filtering. A proxy cannot adjudicate meaning |
 | A proxied upstream changes its contract between polls | **Detected, not prevented** — classified, recorded and alertable within one `spec_poll_interval`. There is no pre-approval gate: a change is visible after the fact, not blocked before it |
-| TLS trust for outbound device calls is fleet-global | **Documented limitation** — one `ca_bundle` per process, so a self-signed device forces that trust set on every other outbound call. Heterogeneous per-device trust → separate deployment (as with F-31) |
+| TLS trust for outbound device calls is fleet-global | **Closed 2026-08-10** — `security.mtls.devices.<hostname>` scopes a CA, a client identity or a `verify: false` to one device; unnamed devices keep the fleet profile. A bad profile fails at startup. Proven by a two-server handshake with a positive control ([security-mtls.md](security-mtls.md#per-device-trust)) |
 | Fernet is not FIPS-validated | **Tracked (F-60)** — matters only for FedRAMP; see [compliance-mapping.md](compliance-mapping.md) when added |
 | SSE is replica-pinned (soft gateway statefulness) | **Accepted (F-20)** — documented; affects availability not confidentiality |
-| Single global mTLS identity for all devices | **Documented limitation (F-31)** — heterogeneous per-device PKI → separate deployment |
+| Single global mTLS identity for all devices | **Closed 2026-08-10** — a device block may carry its own `client_cert`/`client_key`, so heterogeneous device PKIs no longer need separate deployments. The profile *set* still comes from config, not the API: `client_key` is secret material and belongs in a mounted Secret |
 
 ## 7. Maintenance
 

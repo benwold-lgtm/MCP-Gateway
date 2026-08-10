@@ -356,14 +356,31 @@ security:
   # device — tool calls, reachability probes, spec fetches, health checks — presents
   # this client certificate and/or verifies the device's server certificate against
   # the given CA. Omit the whole block for default behaviour (anonymous client, public
-  # CA verification via certifi). One global config applies to all devices; see
-  # docs/security-mtls.md for per-device PKI (planned).
+  # CA verification via certifi). The keys below are the FLEET default; the `devices`
+  # sub-block overrides them for one device. See docs/security-mtls.md.
   # mtls:
   #   client_cert: /etc/mcp/tls/client.crt      # PEM client cert (may also contain the key)
   #   client_key: /etc/mcp/tls/client.key       # PEM private key (omit if combined into client_cert)
   #   client_key_password: ""                   # prefer env MCP_TLS_CLIENT_KEY_PASSWORD over config
   #   ca_bundle: /etc/mcp/tls/device-ca.pem     # verify device server certs against THIS CA (replaces public set)
   #   verify: true                              # set false ONLY on a trusted closed test network — disables verification
+  #
+  #   # Per-device overrides, keyed by the hostname the device is registered under.
+  #   # A device with no block here inherits everything above, so adding this section
+  #   # changes nothing for the devices it does not name. Use it instead of setting
+  #   # `verify: false` at the fleet level — that turns verification off for EVERY
+  #   # device, including the ones whose certificates are fine.
+  #   devices:
+  #     unifi.example.internal:
+  #       verify: false                         # this device only; the rest keep verifying
+  #     switch-a.example.internal:
+  #       ca_bundle: /etc/mcp/tls/vendor-a-ca.pem       # a different vendor PKI
+  #       client_cert: /etc/mcp/tls/vendor-a-client.crt # ...and a different identity to it
+  #       client_key: /etc/mcp/tls/vendor-a-client.key
+  #
+  #   # Both processes REFUSE TO START on a bad profile here: an unreadable file, or an
+  #   # unknown key inside a device block (a misspelt `ca-bundle` would silently leave
+  #   # that device on the fleet trust set, which looks exactly like success).
 
 metrics:
   # Prometheus exposition is served on a DEDICATED port, separate from the API

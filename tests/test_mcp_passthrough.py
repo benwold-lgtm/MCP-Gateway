@@ -40,6 +40,7 @@ import pytest
 from device_mcp_gateway.core.translator import McpManifest, McpTool, ProxyToolSpec
 from device_mcp_gateway.pods.mcp_proxy_pod import McpProxyPod
 from device_mcp_gateway.upstream.mcp_client import McpUpstreamError, StreamableHttpClient
+from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.upstream.mcp_discovery import (
     build_proxy_manifest,
     canonical_tools_hash,
@@ -705,7 +706,7 @@ def _supervisor(profiles):
     return PodSupervisor(
         backend=MemoryRegistryBackend(),
         config={"max_concurrent_pods": 50},
-        tls_verify=True,
+        tls_profiles=TlsProfiles(None),
         retry_policy=RetryPolicy(),
         spec_service=_NeverFetches(),
         profiles=profiles,
@@ -759,7 +760,7 @@ async def test_a_405_from_an_mcp_endpoint_is_not_scored_as_reachable():
         return httpx.Response(405, text="method not allowed")
 
     stub = httpx.AsyncClient(transport=httpx.MockTransport(_405))
-    reg._mcp_discovery._client_factory = lambda: stub
+    reg._mcp_discovery._client_factory = lambda _hostname: stub
 
     assert await reg.check_reachability(profile) is False
 
@@ -774,7 +775,7 @@ async def test_a_working_initialize_is_scored_as_reachable():
         return httpx.Response(200, json=_rpc_result({"serverInfo": {"name": "remote", "version": "1"}}))
 
     stub = httpx.AsyncClient(transport=httpx.MockTransport(_ok))
-    reg._mcp_discovery._client_factory = lambda: stub
+    reg._mcp_discovery._client_factory = lambda _hostname: stub
 
     assert await reg.check_reachability(profile) is True
 

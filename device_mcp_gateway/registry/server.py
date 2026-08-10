@@ -32,7 +32,7 @@ from device_mcp_gateway.core.manifest_diff import record_tool_change
 from device_mcp_gateway.registry.models import DeviceProfile
 from device_mcp_gateway.registry.pod_supervisor import PodSupervisor
 from device_mcp_gateway.registry.spec_service import SpecService
-from device_mcp_gateway.security.mtls import build_verify
+from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
     AbstractRegistryBackend,
@@ -86,9 +86,16 @@ class Registry:
         self._provision_tasks: dict[str, asyncio.Task] = {}
         # Outbound mutual-TLS for device calls (F-31): reachability/discovery GETs
         # (here, via the SpecService client), and tool calls in the pods we spawn,
-        # both present this client cert / honour this CA. True when nothing is
-        # configured (default httpx behaviour).
-        self._tls_verify = build_verify(config.get("security", {}).get("mtls"))
+        # both present the resolved client cert / honour the resolved CA. Resolution
+        # is per device — a `security.mtls.devices.<hostname>` block overrides the
+        # fleet default for that device only, so one self-signed device no longer
+        # forces its trust set onto every other outbound call (TG-4 residual).
+        self._tls = TlsProfiles.from_config(config)
+        # Fail at startup, not on first contact with the device: build every declared
+        # profile now so an unreadable CA or a misspelt key stops the process here.
+        overridden = self._tls.preflight()
+        if overridden:
+            logger.info(f"Per-device TLS profiles configured for {len(overridden)} device(s): {', '.join(overridden)}")
         self._health_semaphore = asyncio.Semaphore(config.get("max_concurrent_health_checks", 10))
         # Bounded jittered retries for idempotent outbound GETs — reachability, spec
         # fetch, discovery (F-05). Shared by spawned pods for their tool calls too.
@@ -96,7 +103,7 @@ class Registry:
         # F-12 decomposition: spec acquisition and pod lifecycle live in dedicated
         # collaborators. The Registry orchestrates them (CRUD, provisioning, health).
         self._spec_service = SpecService(
-            backend=self._backend, config=config, tls_verify=self._tls_verify, retry_policy=self._retry_policy
+            backend=self._backend, config=config, tls_profiles=self._tls, retry_policy=self._retry_policy
         )
         # The proxy-side counterpart, for devices whose upstream is an MCP server rather
         # than an OpenAPI document. It reuses the SpecService's guarded client rather than
@@ -107,7 +114,7 @@ class Registry:
         self._pod_supervisor = PodSupervisor(
             backend=self._backend,
             config=config,
-            tls_verify=self._tls_verify,
+            tls_profiles=self._tls,
             retry_policy=self._retry_policy,
             spec_service=self._spec_service,
             profiles=self._profiles,
@@ -442,6 +449,15 @@ class Registry:
             await self._backend.set_device(record["hostname"], cfg)
             await self._provision_device(profile)
 
+    def tls_profile_for(self, hostname: str) -> dict[str, Any]:
+        """The outbound TLS posture this gateway resolves for ``hostname`` (F-52 read).
+
+        Resolved live from config through the same code path the spec fetcher and the
+        pod use, rather than recorded on the device — a stored copy would drift from
+        the config the process is actually running.
+        """
+        return self._tls.describe(hostname)
+
     def _discovery_for(self, profile: DeviceProfile) -> Any:
         """The discovery implementation for this device's upstream kind (ADR-0009).
 
@@ -461,7 +477,7 @@ class Registry:
         else:
             try:
                 resp = await send_with_retry(
-                    lambda: self._spec_service.client().get(profile.base_url, timeout=5),
+                    lambda: self._spec_service.client(profile.hostname).get(profile.base_url, timeout=5),
                     method="GET",
                     policy=self._retry_policy,
                 )

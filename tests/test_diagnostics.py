@@ -65,6 +65,9 @@ class _StubRegistry:
     def get_profile(self, hostname):
         return self._profile
 
+    def tls_profile_for(self, hostname):
+        return {"source": "fleet", "verify": True, "ca_bundle": None, "client_cert": False}
+
 
 def _app(mode, registry, monkeypatch):
     cfg = copy.deepcopy(yaml.safe_load(open("config.yaml")))

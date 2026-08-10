@@ -112,11 +112,20 @@ codebase contains no PKCS#7/S-MIME/CMS and no `x509.verification` usage at all.
 > Grep note: searching for the verifier API on `Store` matches `SqliteDeviceStore`. That is the
 > same class of near-miss as the `request.url` trap above — confirm the import, not the name.
 
-**This is now coupled to a roadmap item.** Per-device TLS trust (the open TG-4 residual) is the
-one planned change that could make `-3553`/`-3554` reachable, if it were built on
-`x509.verification` instead of per-device `SSLContext`s. That constraint is recorded at the
-finding itself in [testing-gaps.md](testing-gaps.md#tg-4--the-kubernetes-manifests-on-a-real-cluster),
-because it needs to be read when the feature is designed, not when the scanner next goes red.
+**This was coupled to a roadmap item, and that item has now shipped.** Per-device TLS trust
+was the one planned change that could have made `-3553`/`-3554` reachable, had it been built
+on `x509.verification` instead of per-device `SSLContext`s.
+
+**Built 2026-08-10 on `SSLContext`, as the constraint required.** `security.mtls.devices.<hostname>`
+resolves to one `ssl.create_default_context(cafile=…)` per distinct profile, so chain building
+and name-constraint checking are still OpenSSL through the stdlib and `cryptography` is still
+reached only for Fernet and PyJWT signature verification. **The verdict on all three findings is
+unchanged: none reachable**, and `cryptography>=49` stays an optional bump rather than becoming a
+prerequisite. The codebase still contains no PKCS#7/S-MIME/CMS and no `x509.verification` usage.
+
+If that API is ever adopted deliberately — for per-device trust or anything else — this coupling
+comes back, and `>=49` becomes a hard prerequisite. The reasoning lives at the finding itself in
+[testing-gaps.md](testing-gaps.md#tg-4--the-kubernetes-manifests-on-a-real-cluster).
 
 ### Choosing the version, when the cap is lifted on purpose
 

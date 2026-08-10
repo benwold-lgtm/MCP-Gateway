@@ -34,6 +34,7 @@ from device_mcp_gateway.core.spec_limits import (
     fetched_spec_or_none,
 )
 from device_mcp_gateway.registry.models import DeviceProfile
+from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.security.url_policy import (
     build_guarded_client,
     resolve_allow_private,
@@ -99,40 +100,55 @@ class SpecService:
         *,
         backend: AbstractRegistryBackend,
         config: dict[str, Any],
-        tls_verify: Any,
+        tls_profiles: TlsProfiles,
         retry_policy: RetryPolicy,
     ) -> None:
         self._backend = backend
         self._config = config
-        self._tls_verify = tls_verify
+        self._tls = tls_profiles
         self._retry_policy = retry_policy
         self._spec_max_bytes = config.get("spec_max_bytes", DEFAULT_MAX_SPEC_BYTES)
         self._spec_poll_interval = config.get("spec_poll_interval", 300)
         self._cache = SpecCache(ttl=config.get("spec_cache_ttl", 3600), max_entries=200)
         self._allow_private = resolve_allow_private(config)
         self._allowed_ports = resolve_allowed_ports(config)
-        self._http_client: httpx.AsyncClient | None = None
+        self._http_clients: dict[tuple, httpx.AsyncClient] = {}
 
-    def client(self) -> httpx.AsyncClient:
-        """The shared outbound client (also used by Registry reachability probes).
+    def client(self, hostname: str | None) -> httpx.AsyncClient:
+        """The outbound client for one device (also used by Registry reachability probes).
 
-        One client per registry instance keeps connections/TLS warm across the
-        reachability and spec-fetch GETs to the same device.
+        Pooled **per resolved TLS profile**, not per registry: one client for the whole
+        service would put every device back on a single trust set, which is exactly the
+        fleet-global limitation per-device trust removes. Devices that resolve to the
+        same profile — normally all of them — still share one client, so connections and
+        TLS sessions stay warm across the reachability and spec-fetch GETs to a device.
+
+        ``hostname=None`` selects the fleet profile, for calls not attributable to a
+        device. It is a required argument so a new call site has to make that choice
+        rather than silently inheriting fleet trust.
         """
-        if self._http_client is None or self._http_client.is_closed:
-            # SSRF-guarded: every hop (incl. redirects) is re-checked against the URL
-            # policy, so a device can't 302 a spec fetch to an internal address (F-02).
-            self._http_client = build_guarded_client(
-                verify=self._tls_verify, allow_private=self._allow_private, allowed_ports=self._allowed_ports
-            )
-        return self._http_client
+        key = self._tls.key_for(hostname)
+        existing = self._http_clients.get(key)
+        if existing is not None and not existing.is_closed:
+            return existing
+        # SSRF-guarded: every hop (incl. redirects) is re-checked against the URL
+        # policy, so a device can't 302 a spec fetch to an internal address (F-02).
+        client = build_guarded_client(
+            verify=self._tls.for_device(hostname),
+            allow_private=self._allow_private,
+            allowed_ports=self._allowed_ports,
+        )
+        self._http_clients[key] = client
+        return client
 
     def invalidate(self, base_url: str) -> None:
         self._cache.invalidate(base_url)
 
     async def aclose(self) -> None:
-        if self._http_client and not self._http_client.is_closed:
-            await self._http_client.aclose()
+        for client in list(self._http_clients.values()):
+            if not client.is_closed:
+                await client.aclose()
+        self._http_clients.clear()
 
     async def fetch_spec(self, profile: DeviceProfile) -> bool:
         """Fetch + cache the device's spec, recording it on ``profile``.
@@ -149,9 +165,9 @@ class SpecService:
             return False
 
         if profile.spec_url:
-            fetched = await self._http_get(profile.spec_url)
+            fetched = await self._http_get(profile.spec_url, profile.hostname)
         else:
-            fetched = await self._discover_spec(profile.base_url)
+            fetched = await self._discover_spec(profile.base_url, profile.hostname)
 
         if not fetched:
             return False
@@ -171,13 +187,13 @@ class SpecService:
             logger.debug(f"Spec fetched for {profile.hostname}: hash={h}")
         return changed
 
-    async def _discover_spec(self, base_url: str) -> dict[str, Any] | None:
+    async def _discover_spec(self, base_url: str, hostname: str) -> dict[str, Any] | None:
         paths = self._config.get("discovery", {}).get(
             "spec_paths",
             ["/openapi.json", "/swagger.json", "/api-docs"],
         )
         timeout = self._config.get("discovery", {}).get("timeout", 10)
-        client = self.client()
+        client = self.client(hostname)
 
         async def _probe(path: str) -> dict[str, Any] | None:
             url = base_url.rstrip("/") + path
@@ -211,10 +227,10 @@ class SpecService:
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _http_get(self, url: str) -> dict[str, Any] | None:
+    async def _http_get(self, url: str, hostname: str) -> dict[str, Any] | None:
         try:
             resp = await send_with_retry(
-                lambda: self.client().get(url, timeout=10), method="GET", policy=self._retry_policy
+                lambda: self.client(hostname).get(url, timeout=10), method="GET", policy=self._retry_policy
             )
             return fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
         except SpecTooLargeError as exc:
