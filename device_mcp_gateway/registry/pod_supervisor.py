@@ -37,6 +37,7 @@ from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest
 from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
 from device_mcp_gateway.registry.models import DeviceProfile
 from device_mcp_gateway.registry.spec_service import SpecService
+from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 
 # Process-global translation pool, shared across Registry instances. Registered
@@ -65,7 +66,7 @@ class PodSupervisor:
         *,
         backend: AbstractRegistryBackend,
         config: dict[str, Any],
-        tls_verify: Any,
+        tls_profiles: TlsProfiles,
         retry_policy: Any,
         spec_service: SpecService,
         profiles: dict[str, DeviceProfile],
@@ -73,7 +74,7 @@ class PodSupervisor:
     ) -> None:
         self._backend = backend
         self._config = config
-        self._tls_verify = tls_verify
+        self._tls = tls_profiles
         self._retry_policy = retry_policy
         self._spec_service = spec_service
         # Builds the per-device hook that re-persists credentials an auth handler rotated
@@ -133,7 +134,7 @@ class PodSupervisor:
             rate_limit_rps=profile.rate_limit_rps,
             keep_alive_interval=keep_alive,
             retry_policy=self._retry_policy,
-            tls_verify=self._tls_verify,
+            tls_verify=self._tls.for_device(profile.hostname),
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
         )

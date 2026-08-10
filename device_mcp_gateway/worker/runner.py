@@ -58,7 +58,7 @@ from device_mcp_gateway.pods.mcp_proxy_pod import McpProxyPod
 from device_mcp_gateway.pods.pod_base import BasePod
 from device_mcp_gateway.upstream.mcp_client import StreamableHttpClient
 from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest
-from device_mcp_gateway.security.mtls import build_verify
+from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.shared.keys import KEYS
 from device_mcp_gateway.security.url_policy import (
     build_guarded_client,
@@ -131,11 +131,18 @@ class DeviceWorker:
         self._stop_event = asyncio.Event()
 
         self._keep_alive = config.get("transport", {}).get("sse", {}).get("keep_alive_interval", 30)
-        # Outbound mutual-TLS for device calls (F-31): shared by this worker's pods
-        # (tool calls), spec fetches, and the health loop's reachability/spec GETs,
-        # so an mTLS-protected device is reachable on every path. True (httpx default
-        # certifi verification) when no security.mtls block is configured.
-        self._tls_verify = build_verify(config.get("security", {}).get("mtls"))
+        # Outbound mutual-TLS for device calls (F-31), resolved PER DEVICE (TG-4
+        # residual): this worker's pods (tool calls), its cold-path spec fetches, and
+        # the health loop's reachability/spec GETs all resolve the same profile for a
+        # given device, so an mTLS-protected device is reachable on every path — and a
+        # device with its own CA does not lend that trust to the others this worker owns.
+        # Falls back to httpx default certifi verification when no security.mtls block
+        # is configured. Preflight builds every declared profile now, so a bad cert path
+        # kills the worker at startup rather than one device at first contact.
+        self._tls = TlsProfiles.from_config(config)
+        _overridden = self._tls.preflight()
+        if _overridden:
+            logger.info(f"Per-device TLS profiles configured for {len(_overridden)} device(s)")
         # Device-claim lease TTL (RC-6). Outlives the heartbeat interval so a
         # claim refreshed each heartbeat never lapses while the pod runs, but
         # expires soon after a worker dies so another worker can take over.
@@ -245,7 +252,7 @@ class DeviceWorker:
             retry_policy=self._retry_policy,
             spec_max_bytes=self._spec_max_bytes,
             spec_translate_timeout=self._spec_translate_timeout,
-            tls_verify=self._tls_verify,
+            tls_profiles=self._tls,
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
             # Only the worker holds the credential codec, so it supplies the auth handler
@@ -698,7 +705,7 @@ class DeviceWorker:
             rate_limit_rps=cfg.rate_limit_rps,
             keep_alive_interval=self._keep_alive,
             retry_policy=self._retry_policy,
-            tls_verify=self._tls_verify,
+            tls_verify=self._tls.for_device(hostname),
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
         )
@@ -776,7 +783,7 @@ class DeviceWorker:
         # SSRF-guarded client: the worker validates every fetched URL (incl. redirects)
         # against the policy, closing the gap where workers never consulted it (F-02).
         async with build_guarded_client(
-            verify=self._tls_verify,
+            verify=self._tls.for_device(cfg.hostname),
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
         ) as client:

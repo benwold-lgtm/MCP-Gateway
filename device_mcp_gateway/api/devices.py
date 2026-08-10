@@ -27,6 +27,7 @@ from device_mcp_gateway.schemas import (
     BreakerState,
     DeviceDetail,
     DeviceDiagnostics,
+    TlsProfileInfo,
     DeviceListResponse,
     DeviceMutationResult,
     DeviceSummary,
@@ -454,4 +455,8 @@ async def device_diagnostics(hostname: str, request: Request):
         tools_revision=device.tools_revision,
         spawn_error=device.spawn_error,
         breaker=breaker,
+        # Resolved from config, not from the device record — the same resolution the
+        # spec fetcher and the pod use, so this reports what the gateway would actually
+        # present/trust rather than a separate description of it that can drift.
+        tls=TlsProfileInfo(**reg.tls_profile_for(hostname)),
     )

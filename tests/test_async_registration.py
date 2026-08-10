@@ -121,7 +121,7 @@ async def test_discover_spec_parallel_first_valid_wins():
     spec = {"openapi": "3.0.0", "info": {"title": "x", "version": "1"}, "paths": {}}
     registry = Registry(config={"discovery": {"timeout": 5}})
     # The preferred path is slow + has no spec; a later path answers fast with one.
-    registry._spec_service._http_client = _FakeClient(
+    registry._spec_service._http_clients[registry._tls.key_for(None)] = _FakeClient(
         {
             "/openapi.json": (0.6, None),
             "/swagger.json": (0.05, spec),
@@ -130,7 +130,7 @@ async def test_discover_spec_parallel_first_valid_wins():
     )
 
     t0 = time.monotonic()
-    result = await registry._spec_service._discover_spec("http://x.local")
+    result = await registry._spec_service._discover_spec("http://x.local", "x")
     elapsed = time.monotonic() - t0
 
     assert result == spec
@@ -142,8 +142,8 @@ async def test_discover_spec_parallel_first_valid_wins():
 @pytest.mark.asyncio
 async def test_discover_spec_returns_none_when_no_path_has_spec():
     registry = Registry(config={"discovery": {"timeout": 5}})
-    registry._spec_service._http_client = _FakeClient(
+    registry._spec_service._http_clients[registry._tls.key_for(None)] = _FakeClient(
         {"/openapi.json": (0.02, None), "/swagger.json": (0.02, None), "/api-docs": (0.02, None)}
     )
-    assert await registry._spec_service._discover_spec("http://x.local") is None
+    assert await registry._spec_service._discover_spec("http://x.local", "x") is None
     await registry.shutdown()

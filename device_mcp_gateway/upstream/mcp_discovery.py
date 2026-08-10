@@ -156,8 +156,10 @@ class McpDiscoveryService:
     ) -> None:
         self._backend = backend
         self._config = config
-        # Returns the guarded httpx client to use for a given profile. Injected so the
-        # Registry's shared client is reused rather than a second egress path appearing.
+        # ``client_factory(hostname)`` returns the guarded httpx client for that device.
+        # Injected so the Registry's pooled clients are reused rather than a second
+        # egress path appearing — and taking the hostname so a proxied MCP upstream gets
+        # the same per-device TLS profile an OpenAPI device would.
         self._client_factory = client_factory
         self._max_tools = config.get("max_upstream_tools", DEFAULT_MAX_OPERATIONS)
         self._timeout = config.get("discovery", {}).get("timeout", 10)
@@ -165,7 +167,7 @@ class McpDiscoveryService:
     def client_for(self, profile: DeviceProfile) -> StreamableHttpClient:
         return StreamableHttpClient(
             url=profile.base_url,
-            get_client=self._client_factory,
+            get_client=lambda: self._client_factory(profile.hostname),
             auth=profile.auth,
             timeout=self._timeout,
         )

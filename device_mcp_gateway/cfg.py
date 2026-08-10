@@ -14,6 +14,21 @@ CONFIG_PATH = os.getenv("MCP_CONFIG", "config.yaml")
 # Numeric leaf — accept int or float, but not bool (bool is a subclass of int).
 _NUM = (int, float)
 
+
+class _MapOf:
+    """A section whose keys are operator-chosen (hostnames, ...), values a fixed shape.
+
+    The schema below matches keys literally, which is the whole point of F-50 — but a
+    few sections are legitimately open-ended. Wrapping the value shape says "recurse
+    into each value with this schema, and don't treat the key itself as a typo".
+    """
+
+    __slots__ = ("schema",)
+
+    def __init__(self, schema: dict[str, Any]) -> None:
+        self.schema = schema
+
+
 # Declared config schema (F-50): the set of known sections/keys and their expected
 # value types. A leaf is a Python type (or tuple of types); a nested dict is a
 # sub-section that is recursed into. This is the source of truth used to catch the
@@ -93,6 +108,19 @@ _CONFIG_SCHEMA: dict[str, Any] = {
             "client_key_password": str,
             "ca_bundle": str,
             "verify": bool,
+            # Per-device overrides, keyed by hostname. Same five keys; anything the
+            # device omits it inherits from the fleet block above. A stricter check
+            # runs at startup (mtls.preflight), which *refuses to boot* on an unknown
+            # key here rather than warning — see security/mtls.py.
+            "devices": _MapOf(
+                {
+                    "client_cert": str,
+                    "client_key": str,
+                    "client_key_password": str,
+                    "ca_bundle": str,
+                    "verify": bool,
+                }
+            ),
         },
     },
     "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM, "auth_token": str},
@@ -166,6 +194,18 @@ def _validate_section(data: dict, schema: dict, prefix: str, problems: list[str]
             problems.append(f"unknown config key '{dotted}' — ignored (typo? wrong section?)")
             continue
         expected = schema[key]
+        if isinstance(expected, _MapOf):
+            if isinstance(value, dict):
+                for entry_key, entry in value.items():
+                    if isinstance(entry, dict):
+                        _validate_section(entry, expected.schema, f"{dotted}.{entry_key}.", problems)
+                    else:
+                        problems.append(
+                            f"config key '{dotted}.{entry_key}' should be a mapping, got {type(entry).__name__}"
+                        )
+            else:
+                problems.append(f"config key '{dotted}' should be a mapping, got {type(value).__name__}")
+            continue
         if isinstance(expected, dict):
             if isinstance(value, dict):
                 _validate_section(value, expected, f"{dotted}.", problems)
@@ -221,10 +261,23 @@ def warn_unsafe_settings(cfg: dict[str, Any], mode: str, auth_enabled: bool) -> 
     mtls = cfg.get("security", {}).get("mtls")
     if isinstance(mtls, dict) and mtls.get("verify") is False:
         warnings.append(
-            "security.mtls.verify is false — outbound TLS certificate verification is DISABLED, so "
-            "device server certs are not checked (man-in-the-middle exposure). Set it true except on a "
-            "trusted closed test network."
+            "security.mtls.verify is false — outbound TLS certificate verification is DISABLED for EVERY "
+            "device, so no device server cert is checked (man-in-the-middle exposure). Set it true and "
+            "disable verification per-device (security.mtls.devices.<hostname>.verify) if one device needs it."
         )
+    # A per-device opt-out is the supported narrow escape hatch, but it is still an
+    # unverified TLS channel — name the devices so it can't be forgotten in a config
+    # nobody has read in a year. The fleet warning above already covers the broad case.
+    if isinstance(mtls, dict) and isinstance(mtls.get("devices"), dict):
+        unverified = sorted(
+            h for h, blk in mtls["devices"].items() if isinstance(blk, dict) and blk.get("verify") is False
+        )
+        if unverified and mtls.get("verify") is not False:
+            warnings.append(
+                "outbound TLS certificate verification is DISABLED for "
+                f"{len(unverified)} device(s): {', '.join(unverified)} — those channels are not "
+                "authenticated (man-in-the-middle exposure). Prefer a ca_bundle for the device's own CA."
+            )
     for w in warnings:
         logger.warning(f"Unsafe configuration ({mode} mode): {w}")
     return warnings

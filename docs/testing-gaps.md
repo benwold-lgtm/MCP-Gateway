@@ -151,11 +151,14 @@ ConfigMap/Secret wiring, probe timing, ordering and ingress admission all exerci
   because the lease and the flag converge rather than moving together. Self-resolves in
   seconds. **Documented 2026-08-06** as a [runbook symptom](runbook.md#pod_active-true-but-sse-returns-404-transient-after-a-worker-roll),
   so it is not mistaken for a broken device.
-- TLS trust is **fleet-global** — one `ca_bundle` per process, so a self-signed device forces
-  that trust set onto every outbound call the process makes. **Still open**, recorded as a
-  residual in [threat-model.md](threat-model.md); the real fix is per-device trust.
+- TLS trust was **fleet-global** — one `ca_bundle` per process, so a self-signed device forced
+  that trust set onto every outbound call the process made. **Fixed 2026-08-10**:
+  `security.mtls.devices.<hostname>` overrides any of the five mTLS keys for one device,
+  inheriting the rest; devices it does not name are unaffected. Every declared profile is built
+  at startup, so an unreadable CA or a misspelt key stops the process instead of surfacing hours
+  later as one device failing. See [security-mtls.md](security-mtls.md#per-device-trust).
 
-  **Constraint on how per-device trust gets built.** Today every trust decision is an
+  **The constraint this was built under, and kept.** Every trust decision is an
   `ssl.SSLContext` from `security/mtls.py` — `ssl.create_default_context(cafile=…)` — so
   chain building and name-constraint checking happen in **OpenSSL via the stdlib**, and
   `cryptography` is used only for Fernet. That is what keeps three standing `cryptography`
@@ -164,13 +167,19 @@ ConfigMap/Secret wiring, probe timing, ordering and ingress admission all exerci
   wildcard SAN escaping `permittedSubtrees`). Both are in `cryptography`'s
   `x509.verification` API.
 
-  So per-device trust should stay on `ssl.SSLContext` — one context per device rather than one
-  per process. Building it on `x509.verification` instead (`PolicyBuilder`, `Store`, the
-  verifiers) would make both advisories **reachable on the device-facing path**, and a
-  name-constraint escape is precisely the failure a per-device trust feature exists to
-  prevent. If that route is ever taken deliberately, `cryptography>=49` becomes a
-  prerequisite, not an optional bump — see
+  Per-device trust is therefore **one `SSLContext` per profile**, not a migration to
+  `x509.verification` (`PolicyBuilder`, `Store`, the verifiers) — which would have made both
+  advisories reachable on the device-facing path, and a name-constraint escape is precisely
+  the failure a per-device trust feature exists to prevent. The advisories stay unreachable
+  and `cryptography>=49` remains an optional bump rather than a prerequisite; see
   [dependency-advisories.md](dependency-advisories.md#standing-triage--2026-08-06).
+
+  **How it was proven.** A two-server handshake against certificates signed by the same
+  private CA: the named device verifies and connects, the unnamed one does not. The test
+  carries a positive control asserting that the *same* call succeeds under the old
+  fleet-global configuration — without it, a broken TLS harness would pass the test for the
+  wrong reason. Three mutations (drop the overlay, drop the eager preflight build, pool one
+  client for all profiles) were each confirmed to fail the suite.
 - Unknown tool arguments are silently ignored rather than rejected (generated schemas carry no
   `additionalProperties: false`), so a hallucinated argument reads as success. **Fixed
   2026-08-06** — generated schemas are closed, which is a statement of fact rather than a

@@ -126,6 +126,15 @@ class BreakerState(BaseModel):
     note: str | None = None
 
 
+class TlsProfileInfo(BaseModel):
+    """The resolved outbound TLS posture for one device (no secrets, no full paths)."""
+
+    source: str  # "fleet" | "device"
+    verify: bool
+    ca_bundle: str | None = None  # basename only — see security.mtls.describe
+    client_cert: bool = False
+
+
 class DeviceDiagnostics(BaseModel):
     """ "Why is my device down?" — a single read combining registry status, the
     last check, spec/manifest state, the spawn error, and the circuit breaker
@@ -150,6 +159,12 @@ class DeviceDiagnostics(BaseModel):
     tools_revision: int = 0
     spawn_error: str | None = None
     breaker: BreakerState
+    # Which outbound TLS profile this device resolved to. "fleet" means it inherited
+    # security.mtls; "device" means a security.mtls.devices.<hostname> block applies.
+    # Present so "why does this one device fail TLS?" is answerable from the same read
+    # as everything else — and so a per-device verify:false is visible rather than
+    # buried in a config nobody has opened since it was written.
+    tls: TlsProfileInfo | None = None
 
 
 class ToolChangeRecord(BaseModel):

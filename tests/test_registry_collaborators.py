@@ -17,6 +17,7 @@ from device_mcp_gateway.registry.models import DeviceProfile
 from device_mcp_gateway.registry.pod_supervisor import PodSupervisor
 from device_mcp_gateway.registry.spec_service import SpecCache, SpecService
 from device_mcp_gateway.shared.registry_backend import DeviceConfig, MemoryRegistryBackend
+from device_mcp_gateway.security.mtls import TlsProfiles
 
 _SPEC_V1 = {"openapi": "3.0.3", "info": {"title": "x", "version": "1"}, "paths": {}}
 _SPEC_V2 = {
@@ -46,8 +47,8 @@ class _StubClient:
 async def _spec_service(backend, body):
     from device_mcp_gateway.core.backoff import RetryPolicy
 
-    svc = SpecService(backend=backend, config={}, tls_verify=True, retry_policy=RetryPolicy())
-    svc._http_client = _StubClient(body)
+    svc = SpecService(backend=backend, config={}, tls_profiles=TlsProfiles(None), retry_policy=RetryPolicy())
+    svc._http_clients[svc._tls.key_for(None)] = _StubClient(body)
     return svc
 
 
@@ -96,7 +97,7 @@ async def test_fetch_spec_reports_changed_on_hash_change():
     await svc.fetch_spec(profile)
 
     # New upstream spec, force a cache miss → should report changed=True.
-    svc._http_client = _StubClient(_SPEC_V2)
+    svc._http_clients[svc._tls.key_for(None)] = _StubClient(_SPEC_V2)
     svc._cache._store.clear()
     profile.config.last_check = 0.0
     changed = await svc.fetch_spec(profile)
@@ -127,7 +128,7 @@ def _pod_supervisor(spec_service, profiles, max_pods=50):
     return PodSupervisor(
         backend=MemoryRegistryBackend(),
         config={"max_concurrent_pods": max_pods},
-        tls_verify=True,
+        tls_profiles=TlsProfiles(None),
         retry_policy=RetryPolicy(),
         spec_service=spec_service,
         profiles=profiles,
@@ -161,7 +162,7 @@ async def test_pod_supervisor_caches_manifest_for_rest_introspection():
     sup = PodSupervisor(
         backend=backend,
         config={"max_concurrent_pods": 50},
-        tls_verify=True,
+        tls_profiles=TlsProfiles(None),
         retry_policy=RetryPolicy(),
         spec_service=_StubSpecService(_SPEC_V2),
         profiles={profile.hostname: profile},

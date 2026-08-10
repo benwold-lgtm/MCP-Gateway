@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import ssl
 import time
 from functools import partial
 from typing import Any
@@ -31,6 +30,7 @@ from device_mcp_gateway.core.spec_limits import (
     run_translation,
 )
 from device_mcp_gateway.core.translator import manifest_to_dict
+from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.security.url_policy import build_guarded_client
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.shared.keys import KEYS
@@ -85,7 +85,7 @@ class WorkerHealthLoop:
         retry_policy: RetryPolicy | None = None,
         spec_max_bytes: int = DEFAULT_MAX_SPEC_BYTES,
         spec_translate_timeout: float = DEFAULT_TRANSLATE_TIMEOUT,
-        tls_verify: ssl.SSLContext | bool = True,
+        tls_profiles: TlsProfiles | None = None,
         allow_private: bool = False,
         allowed_ports: set[int] | None = None,
         auth_provider: Any = None,
@@ -113,10 +113,13 @@ class WorkerHealthLoop:
         # It is only a crash/hang safety net: the holder deletes the lock in
         # _check_device's finally, so a longer TTL never blocks the next cycle.
         self._lock_ttl = lock_ttl if lock_ttl is not None else max(self._interval * 2, 120)
-        self._http: httpx.AsyncClient | None = None
-        # Outbound mutual-TLS for reachability/spec GETs to devices (F-31). All
-        # assigned devices share one config today, so one client is sufficient.
-        self._tls_verify = tls_verify
+        # Outbound mutual-TLS for reachability/spec GETs to devices (F-31), resolved
+        # per device (TG-4 residual). Pooled by resolved profile rather than shared
+        # outright: a single client would probe every assigned device through one trust
+        # set, so a self-signed device this worker happens to own would silently relax
+        # verification for the rest of them.
+        self._tls = tls_profiles or TlsProfiles(None)
+        self._http_clients: dict[tuple, httpx.AsyncClient] = {}
         self._allow_private = allow_private
         self._allowed_ports = allowed_ports
         # Per-device timestamp of the last spec poll. Tracked separately from
@@ -126,14 +129,21 @@ class WorkerHealthLoop:
         # Callback set by DeviceWorker: (hostname) -> coroutine — replace pod
         self.on_spec_changed: Any = None
 
-    def _client(self) -> httpx.AsyncClient:
-        if self._http is None or self._http.is_closed:
-            # SSRF-guarded: the worker re-checks every reachability/spec hop against the
-            # URL policy (incl. redirects), so it can't be steered to an internal address.
-            self._http = build_guarded_client(
-                verify=self._tls_verify, allow_private=self._allow_private, allowed_ports=self._allowed_ports
-            )
-        return self._http
+    def _client(self, hostname: str | None) -> httpx.AsyncClient:
+        """The guarded client carrying ``hostname``'s TLS profile (``None`` = fleet)."""
+        key = self._tls.key_for(hostname)
+        existing = self._http_clients.get(key)
+        if existing is not None and not existing.is_closed:
+            return existing
+        # SSRF-guarded: the worker re-checks every reachability/spec hop against the
+        # URL policy (incl. redirects), so it can't be steered to an internal address.
+        client = build_guarded_client(
+            verify=self._tls.for_device(hostname),
+            allow_private=self._allow_private,
+            allowed_ports=self._allowed_ports,
+        )
+        self._http_clients[key] = client
+        return client
 
     async def run_forever(self, assigned: set[str]) -> None:
         """Loop until cancelled. `assigned` is a live set mutated by the worker."""
@@ -290,7 +300,7 @@ class WorkerHealthLoop:
 
         return StreamableHttpClient(
             url=cfg.base_url,
-            get_client=self._client,
+            get_client=partial(self._client, cfg.hostname),
             auth=self._auth_provider(cfg) if self._auth_provider else None,
             timeout=self._discovery.get("timeout", 10),
         )
@@ -310,7 +320,7 @@ class WorkerHealthLoop:
                 await upstream.close_session()
         try:
             resp = await send_with_retry(
-                lambda: self._client().get(cfg.base_url, timeout=5), method="GET", policy=self._retry_policy
+                lambda: self._client(cfg.hostname).get(cfg.base_url, timeout=5), method="GET", policy=self._retry_policy
             )
             return resp.status_code < 500
         except Exception:
@@ -329,7 +339,9 @@ class WorkerHealthLoop:
         if cfg.spec_url:
             try:
                 resp = await send_with_retry(
-                    lambda: self._client().get(cfg.spec_url, timeout=10), method="GET", policy=self._retry_policy
+                    lambda: self._client(cfg.hostname).get(cfg.spec_url, timeout=10),
+                    method="GET",
+                    policy=self._retry_policy,
                 )
                 return fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
             except SpecTooLargeError as exc:
@@ -349,7 +361,7 @@ class WorkerHealthLoop:
                 url = cfg.base_url.rstrip("/") + path
 
                 async def _probe(u: str = url) -> httpx.Response:
-                    return await self._client().get(u, timeout=timeout)
+                    return await self._client(cfg.hostname).get(u, timeout=timeout)
 
                 resp = await send_with_retry(_probe, method="GET", policy=self._retry_policy)
                 spec = fetched_spec_or_none(resp, max_bytes=self._spec_max_bytes)
@@ -363,8 +375,10 @@ class WorkerHealthLoop:
         return None
 
     async def close(self) -> None:
-        if self._http and not self._http.is_closed:
-            await self._http.aclose()
+        for client in list(self._http_clients.values()):
+            if not client.is_closed:
+                await client.aclose()
+        self._http_clients.clear()
 
 
 # The manifest serialiser now lives next to McpManifest in core.translator so the
