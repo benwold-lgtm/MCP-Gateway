@@ -10,6 +10,28 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-10
+
+Two changes, both verified against a live Kubernetes cluster rather than only in the test
+suite — unusual for a patch release, and the reason to trust it.
+
+### Read this before upgrading
+
+- **Nothing here breaks an existing deployment.** A config with no `security.mtls.devices`
+  block resolves exactly as before — same trust set, same behaviour. No action is required to
+  upgrade.
+- **Why a patch number for a new capability.** [docs/releasing.md](docs/releasing.md) §1.5 says
+  a new capability is a minor bump even at `0.x`, and this release deliberately departs from
+  that. `0.4.0` is committed in the 0.3.0 notes to **removing** the deprecated HTTP+SSE
+  endpoints, and 0.3.0 shipped two days ago; numbering this release `0.4.0` would either break
+  that commitment or cut the deprecation window to days. The HTTP+SSE removal and the
+  `2026-07-28` protocol shift stay paired in `0.4.0` as announced. Per-device TLS is purely
+  additive, so a patch number understates the feature without overstating the upgrade risk.
+- **The HTTP+SSE deprecation clock is unchanged.** `GET /v1/devices/{hostname}/sse`,
+  `POST /v1/devices/{hostname}/messages`, `GET /v1/fleet/sse` and `POST /v1/fleet/messages`
+  still work and are still scheduled for removal in **0.4.0**. This release does not move that
+  date in either direction.
+
 ### Added
 
 - **Per-device outbound TLS trust** (`security.mtls.devices.<hostname>`), closing the last TG-4
@@ -599,6 +621,7 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.3.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.1
 [0.3.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.0
 [0.2.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.2.0
 [0.1.4]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.4
