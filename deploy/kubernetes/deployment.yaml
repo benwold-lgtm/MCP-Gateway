@@ -59,7 +59,7 @@ spec:
           #
           # Using a MOVING tag instead (:latest, :lite) requires imagePullPolicy: Always —
           # with IfNotPresent a node keeps running whatever it cached, indefinitely.
-          image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.3.0@sha256:eedc74fb005f81792d8597cf9af92015c2d66a16d410bb31dd9d2651fbe1621f
+          image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.3.1@sha256:a1aae77e669d57a323166e489dbee0340efdc412ff2c586ebd52c79802e90bc7
           # Correct for a digest/immutable tag: the bits can't change under a fixed digest,
           # so re-pulling would be pure overhead.
           imagePullPolicy: IfNotPresent
