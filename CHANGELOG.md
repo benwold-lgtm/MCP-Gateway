@@ -33,6 +33,25 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   is presented), so the trust a device actually gets is answerable without reading config on
   the pod. Resolved live rather than stored, so it cannot drift from the running config.
 
+### Fixed
+
+- **A deleted device could come back as an unreadable record** (distributed mode only). Deleting a
+  device removed it from the index and deleted its hash; a worker that still had the device
+  assigned then wrote `pod_active`/`worker_id`, and a plain `HSET` **re-created the hash** with
+  only those two fields and no `hostname`. The result was invisible to `GET /v1/devices` (which
+  reads the index) while every read *by hostname* returned **500** (`KeyError: 'hostname'`) — and
+  re-registering that hostname failed too, since registration reads the device first. The only
+  field remedy was deleting the key by hand.
+
+  `update_device_fields` no longer creates the record, using `WATCH`/`MULTI` rather than
+  check-then-write (a delete can land between the check and the write, losing the race exactly as
+  before). A partial record left by an earlier version now reads as **absent** rather than
+  raising, so it stops returning 500 immediately and is overwritten the next time that hostname is
+  registered — no manual cleanup. `MemoryRegistryBackend` never had the bug, which is why the
+  embedded suite could not see it; both backends are now pinned to the same contract.
+
+  Found on a cluster, not in the suite.
+
 ### Changed
 
 - The spec fetcher and the worker health loop now keep **one HTTP client per TLS profile**

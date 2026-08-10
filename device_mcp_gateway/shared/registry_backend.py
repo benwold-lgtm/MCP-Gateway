@@ -19,6 +19,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from loguru import logger
+from redis.exceptions import WatchError
+
 from device_mcp_gateway.shared.keys import KEYS
 
 # ---------------------------------------------------------------------------
@@ -121,8 +123,12 @@ class AbstractRegistryBackend(ABC):
     async def set_device(self, hostname: str, config: DeviceConfig) -> None: ...
 
     @abstractmethod
-    async def update_device_fields(self, hostname: str, **fields: Any) -> None:
-        """Partial update — only write the supplied fields."""
+    async def update_device_fields(self, hostname: str, **fields: Any) -> bool:
+        """Partial update — only write the supplied fields.
+
+        Must **not** create the record: a device that has been deleted stays deleted.
+        Returns True when the update applied, False when there was no record to update.
+        """
         ...
 
     @abstractmethod
@@ -263,11 +269,13 @@ class MemoryRegistryBackend(AbstractRegistryBackend):
     async def set_device(self, hostname: str, config: DeviceConfig) -> None:
         self._devices[hostname] = config
 
-    async def update_device_fields(self, hostname: str, **fields: Any) -> None:
+    async def update_device_fields(self, hostname: str, **fields: Any) -> bool:
         cfg = self._devices.get(hostname)
-        if cfg:
-            for k, v in fields.items():
-                setattr(cfg, k, v)
+        if not cfg:
+            return False
+        for k, v in fields.items():
+            setattr(cfg, k, v)
+        return True
 
     async def delete_device(self, hostname: str) -> None:
         self._devices.pop(hostname, None)
@@ -351,11 +359,31 @@ class RedisRegistryBackend(AbstractRegistryBackend):
             else:
                 logger.warning(f"xgroup_create warning: {exc}")
 
-    async def get_device(self, hostname: str) -> DeviceConfig | None:
-        h = await self._r.hgetall(KEYS.device_config(hostname))
+    @staticmethod
+    def _config_or_none(hostname: str, h: dict[str, str]) -> "DeviceConfig | None":
+        """Decode a config hash, treating a *partial* one as absent rather than raising.
+
+        A hash with no ``hostname`` field is not a device — it is wreckage. The write
+        path can no longer produce one (see ``update_device_fields``), but a record
+        left behind by a version that could must still read as "no such device"
+        instead of raising ``KeyError`` out of every endpoint that touches it. Once it
+        reads as absent, re-registering the hostname overwrites it and the wreckage
+        clears itself.
+        """
         if not h:
             return None
+        if "hostname" not in h:
+            logger.warning(
+                f"Ignoring a partial device record at {KEYS.device_config(hostname)} "
+                f"(fields: {sorted(h)}) — no hostname, so it cannot be a device. Left over from "
+                f"a delete that raced a field update; re-registering {hostname} will overwrite it."
+            )
+            return None
         return DeviceConfig.from_redis_hash(h)
+
+    async def get_device(self, hostname: str) -> DeviceConfig | None:
+        h = await self._r.hgetall(KEYS.device_config(hostname))
+        return self._config_or_none(hostname, h)
 
     async def get_devices(self, hostnames: list[str]) -> list[DeviceConfig]:
         """Fetch all device configs in a single pipeline (avoids N round-trips)."""
@@ -365,7 +393,8 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         for h in hostnames:
             pipe.hgetall(KEYS.device_config(h))
         raw_hashes = await pipe.execute()
-        return [DeviceConfig.from_redis_hash(h) for h in raw_hashes if h]
+        configs = [self._config_or_none(host, raw) for host, raw in zip(hostnames, raw_hashes)]
+        return [c for c in configs if c is not None]
 
     async def set_device(self, hostname: str, config: DeviceConfig) -> None:
         pipe = self._r.pipeline()
@@ -373,9 +402,40 @@ class RedisRegistryBackend(AbstractRegistryBackend):
         pipe.sadd(KEYS.devices_set, hostname)
         await pipe.execute()
 
-    async def update_device_fields(self, hostname: str, **fields: Any) -> None:
+    async def update_device_fields(self, hostname: str, **fields: Any) -> bool:
+        """Partial update that will **not** create the record. Returns whether it applied.
+
+        A plain ``HSET`` creates the key when it is missing, which is how a deleted
+        device came back as wreckage: ``DELETE`` removes ``device:{h}:config`` and drops
+        the hostname from ``devices:all``, then a worker that still had the device
+        assigned wrote ``pod_active``/``worker_id`` and re-created the hash with just
+        those two fields. The result was invisible to ``GET /v1/devices`` (which reads
+        the set) while every read *by hostname* raised ``KeyError: 'hostname'`` as a 500
+        — and re-registering the hostname failed too, because registration reads the
+        device first. Found on a cluster, not here.
+
+        ``WATCH``/``MULTI`` rather than a check-then-write: the delete can land between
+        the two, and an ``EXISTS``-then-``HSET`` would lose that race exactly as before.
+        The transaction aborts if the key changes under us, and the retry re-reads a now
+        missing key and reports ``False``. ``MemoryRegistryBackend`` never had the bug —
+        it guards with ``if cfg`` — which is why the embedded suite could not see this.
+        """
         mapping = {k: "" if v is None else str(v) for k, v in fields.items()}
-        await self._r.hset(KEYS.device_config(hostname), mapping=mapping)
+        key = KEYS.device_config(hostname)
+        async with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    if not await pipe.exists(key):
+                        await pipe.reset()
+                        logger.debug(f"Skipped field update for {hostname}: the device record is gone")
+                        return False
+                    pipe.multi()
+                    pipe.hset(key, mapping=mapping)
+                    await pipe.execute()
+                    return True
+                except WatchError:
+                    continue  # the record changed mid-flight; re-read and decide again
 
     async def delete_device(self, hostname: str) -> None:
         pipe = self._r.pipeline()
