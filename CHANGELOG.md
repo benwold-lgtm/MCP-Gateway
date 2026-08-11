@@ -24,12 +24,23 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   per-provider service token would be a regression rather than a new trade-off; makes BFF-side
   hash-chained audit a prerequisite for federation instead of a parallel workstream.
 
-### Known issues
+### Fixed
 
-- **F-66 / FMEA D10** — a device whose pod never spawns is never assigned to a worker, so the
-  health loop never checks it and `reachable` serves its dataclass default (`true`) forever
-  while `spawn_error` records the failure. Found during lab-cluster verification 2026-08-10.
-  For a device that has never come up, trust `spawn_error` and `last_check`, not `reachable`.
+- **F-66 / FMEA D10 — a device that was never checked no longer reports itself reachable.**
+  The health loop iterates only a worker's *assigned* devices, so a device whose pod never
+  spawned was never checked by anything, and `reachable` served its dataclass default (`true`)
+  forever — next to a `spawn_error` saying it had failed, with a `last_check` that aged without
+  bound. Fixed at both ends: the defaults now claim nothing (`reachable=false`, `last_check=0`),
+  and the spawn path records the reachability verdict its spec fetch already established.
+  A spec that was fetched and then rejected keeps `reachable: true` — reached-but-unusable is a
+  different fact, and `spawn_error` carries it. Found during lab-cluster verification 2026-08-10.
+
+  **What changes for a client:** the API shape is unchanged — `reachable` is still a bool — but
+  `last_check` and `last_check_age_seconds` are now `null` for a device nothing has contacted
+  yet, where they previously carried the registration time. Read a null `last_check` as "never
+  checked", which is a distinct state from a check that found the device dead. A device
+  registered *before* upgrading that was never successfully checked keeps its optimistic stored
+  value until its next spawn attempt, which now records a verdict either way.
 
 ## [0.3.1] - 2026-08-10
 
