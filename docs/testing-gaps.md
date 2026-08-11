@@ -22,7 +22,7 @@ confidence: link the run, the baseline, or the recording that closed it.
 | [TG-3](#tg-3--ha-redis-failover) | HA Redis failover behaviour | A real Sentinel/Cluster deployment able to promote a replica | The retry/health-check settings may not cover a real election window |
 | ~~[TG-4](#tg-4--the-kubernetes-manifests-on-a-real-cluster)~~ | ~~The k8s manifests on a real cluster~~ | **CLOSED 2026-08-06** — see below | — |
 | [TG-5](#tg-5--the-arm64-image-on-real-arm64-hardware) | arm64 image on real arm64 hardware | A Pi / arm64 host | QEMU-built arm64 layers can pass build and still fail at runtime |
-| [TG-6](#tg-6--hash-reading-redis-paths-in-the-unit-tier) | Hash-reading Redis paths in the unit tier | A fakeredis fix, or moving the test to the real-Redis tier | Unit tests cannot exercise any `hgetall` consumer; a regression there surfaces only in the integration tier |
+| [TG-6](#tg-6--hash-reading-redis-paths-in-the-unit-tier) | Hash-reading Redis paths in the unit tier | A fakeredis fix, or moving the test to the real-Redis tier | Unit tests cannot exercise any `hgetall` consumer. **Demonstrated 2026-08-10** — the R6 defect was exactly this class, and reached a live cluster |
 
 ---
 
@@ -241,6 +241,24 @@ is confusion, not missing coverage.
 
 **Risk if the design is wrong.** Low for correctness, real for velocity: the failure mode
 looks like a product bug, and the natural "fix" is to weaken the test.
+
+**Demonstrated 2026-08-10 — this stopped being hypothetical.** The R6 defect
+([failure-modes.md](failure-modes.md) §2) was exactly this class: a deleted device could be
+resurrected as a partial hash by a worker still writing to it, and every read of that
+hostname then raised `KeyError: 'hostname'` out of `from_redis_hash` as a 500. An `hgetall`
+consumer, invisible to the unit tier, found on a live cluster.
+
+Two things this confirms about the gap as written. First, the *risk* line understates it:
+the cost was not only velocity — a real defect shipped and reached a cluster. Second, the
+stated workaround held. The fix's tests use the `real_redis` fixture and perform the actual
+delete-then-update sequence rather than pre-seeding a partial hash, because a pre-seeded
+fixture would only prove the decoder tolerates wreckage while saying nothing about whether
+the write path still creates it — see
+[tests/test_deleted_device_stays_deleted.py](../tests/test_deleted_device_stays_deleted.py).
+
+So the gap is still open, and it is now known to be load-bearing rather than merely
+inconvenient. Anything that reads a device config from Redis needs a test in the
+integration tier; the unit tier cannot see it fail.
 
 ---
 
