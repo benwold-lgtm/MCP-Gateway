@@ -342,6 +342,37 @@ entirely, the at-rest credentials are unrecoverable — re-register the devices'
 
 ## Standard procedures
 
+### Take a backup
+
+Two archive kinds ([ADR-0011](adr/0011-backup-and-restore.md)). Pick by *what will need to
+open it*, not by how sensitive it feels.
+
+```bash
+# Routine/scheduled: credentials stay encrypted under this stack's MCP_SECRET_KEY.
+# Restores into this stack, or any stack sharing that key.
+curl -s -H "Authorization: Bearer $KEY" "$GW/v1/admin/backup" -o fleet-$(date +%F).json
+
+# Migration / key loss: credentials re-encrypted to a passphrase, key-independent.
+# POST, not GET — the passphrase must not land in a URL, proxy log, or shell history.
+curl -s -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"kind":"portable","passphrase":"<20+ chars>"}' \
+  "$GW/v1/admin/backup" -o fleet-portable-$(date +%F).json
+```
+
+Add `"include_deadletters": true` mid-incident to capture undeliverable calls; they are
+excluded by default because they are unbounded and mostly noise.
+
+**An archive never contains `MCP_SECRET_KEY`.** That is the point of the ciphertext kind —
+and it means a ciphertext archive alone will not rebuild a stack whose key is gone. Back
+the key up out-of-band, or keep a portable archive.
+
+Both kinds are audited (`backup.export` / `backup.export_portable`); the passphrase is
+never logged.
+
+**A ciphertext export returns `409` when no `MCP_SECRET_KEY` is set.** That is deliberate,
+not a bug: with no key the archive would be labelled ciphertext and contain plaintext
+credentials. Set a key, or take a portable archive.
+
 ### Scale workers
 
 Each worker owns a disjoint set of devices (single-owner, D-2); scaling out triggers a

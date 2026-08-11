@@ -382,6 +382,26 @@ security:
   #   # unknown key inside a device block (a misspelt `ca-bundle` would silently leave
   #   # that device on the fleet trust set, which looks exactly like success).
 
+backup:
+  # Backup and restore (ADR-0011). Two archive kinds: "ciphertext" (the default —
+  # credentials stay encrypted under this stack's MCP_SECRET_KEY) and "portable"
+  # (re-encrypted to a caller-supplied passphrase, for migrating to a stack with a
+  # different key). An archive NEVER contains MCP_SECRET_KEY itself — back that up
+  # out-of-band, or a portable archive is your only route back.
+  #
+  # Minimum passphrase length accepted for a portable export. Recorded in the
+  # envelope, so an archive says what floor it was made under.
+  passphrase_min_length: 16
+  # Argon2id parameters for passphrase -> key. These are written INTO each portable
+  # archive's envelope and the reader uses the envelope's values, not these — so
+  # raising the cost later hardens new archives without orphaning existing ones.
+  argon2_memory_cost_kib: 65536   # 64 MiB
+  argon2_iterations: 3
+  argon2_lanes: 4
+  # Max dead-letter entries archived per device when include_deadletters=true.
+  # Dead letters are opt-in: valuable mid-incident, unbounded noise otherwise.
+  deadletter_limit: 1000
+
 metrics:
   # Prometheus exposition is served on a DEDICATED port, separate from the API
   # port — point a ServiceMonitor / scrape config at this port (named "metrics"),

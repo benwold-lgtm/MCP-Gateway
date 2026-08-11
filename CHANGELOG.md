@@ -12,6 +12,28 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Added
 
+- **Backup export ([ADR-0011](docs/adr/0011-backup-and-restore.md))** — `GET /v1/admin/backup`
+  returns a **ciphertext** archive of the device registry and its tool-change governance
+  record, with credentials encrypted under this stack's `MCP_SECRET_KEY`. `POST` to the same
+  path takes `{"kind": "portable", "passphrase": "…"}` for a **key-independent** archive
+  re-encrypted to a passphrase via Argon2id (`m=64 MiB, t=3, p=4`, random per-archive salt,
+  parameters written into the envelope so raising the cost later cannot orphan older
+  archives). POST rather than GET for that one so the passphrase never lands in a URL, proxy
+  log, or shell history. Dead letters are opt-in via `include_deadletters`.
+
+  Three new scopes — `backup:read`, `backup:write`, `backup:export-portable` — plus a
+  `backup` role for scheduled jobs holding the first two only. `backup:export-portable` is
+  never implied: a portable archive is every device credential in the stack behind one
+  passphrase. Every export is audited, both kinds, and the passphrase is never a log field.
+  **An archive never contains `MCP_SECRET_KEY`** — keep backing that up out-of-band.
+
+  Two notes for operators. A ciphertext export **returns 409 when no `MCP_SECRET_KEY` is
+  configured**, because the alternative is an archive labelled ciphertext that contains
+  plaintext credentials. And in **embedded mode** credentials are stored as plaintext in the
+  device record (encryption happens in the SQLite layer), so export encrypts them on the way
+  out — the archive's security property is the same whichever mode produced it. Restore
+  lands next.
+
 - **[ADR-0011](docs/adr/0011-backup-and-restore.md) — backup and restore** (Accepted).
   Ciphertext archives by default; portable, passphrase-encrypted export behind its own
   `backup:export-portable` scope. Restore replays through `register_device` so the egress

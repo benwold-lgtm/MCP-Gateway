@@ -14,6 +14,20 @@ for the role/scope model; the *decision* behind it is
 | `devices:write` | Manage the fleet | `POST/PUT/DELETE /v1/devices/{h}`, `POST …/deadletter/replay`, `DELETE …/deadletter` (drain) |
 | `tools:call` | Invoke a device's MCP tools | `GET /v1/devices/{h}/sse`, `POST /v1/devices/{h}/messages` |
 | `metrics:read` | Read operational metrics | `GET /v1/metrics/summary` |
+| `backup:read` | Export an archive of the registry | `GET /v1/admin/backup`, `POST /v1/admin/backup` |
+| `backup:write` | Restore an archive | `POST /v1/admin/restore` |
+| `backup:export-portable` | **Additionally** export a *portable* archive — credentials re-encrypted to a passphrase instead of the stack key | `POST /v1/admin/backup` with `kind=portable` |
+
+> **`backup:read` is not a read-only grant in the ordinary sense.** An archive contains
+> every device's `base_url`, spec URL and configuration, plus its credentials as
+> ciphertext. Treat it like `devices:read` over the whole fleet at once, and see
+> [ADR-0011](adr/0011-backup-and-restore.md).
+>
+> **`backup:export-portable` is never implied by the other two.** A portable archive is a
+> complete set of live device credentials behind a single passphrase, so it is
+> key-independent by design — that is what makes it useful for migration and dangerous to
+> hold standing permission for. It is checked *inside* the handler, because whether it is
+> required depends on the requested `kind`.
 
 > `/health`, `/livez`, `/readyz` and the Prometheus scrape port are unauthenticated infra
 > contracts and are not scope-gated.
@@ -27,17 +41,22 @@ for the role/scope model; the *decision* behind it is
 Two kinds of principal: **humans** operating the UI, and **machines** (an MCP client/agent
 invoking tools over SSE). One scope model serves both.
 
-| Role | `devices:read` | `devices:write` | `tools:call` | `metrics:read` | For |
-|------|:---:|:---:|:---:|:---:|-----|
-| **admin** | ✅ | ✅ | ✅ | ✅ | Full control (human) |
-| **operator** | ✅ | ✅ | — | ✅ | Onboard / edit / remove devices, manage the dead-letter queue — but not invoke tools (human) |
-| **viewer** | ✅ | — | — | ✅ | Read-only (human) — *current `viewer`* |
-| **auditor** | — | — | — | ✅ | Observability / compliance, no device access (human). Widens to `audit:read` when that scope exists |
-| **caller** (agent) | ✅ | — | ✅ | — | An MCP client/agent that discovers and invokes tools — **machine identity**, not a UI role |
+| Role | `devices:read` | `devices:write` | `tools:call` | `metrics:read` | `backup:read` | `backup:write` | `backup:export-portable` | For |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|-----|
+| **admin** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Full control (human) |
+| **operator** | ✅ | ✅ | — | ✅ | — | — | — | Onboard / edit / remove devices, manage the dead-letter queue — but not invoke tools (human) |
+| **viewer** | ✅ | — | — | ✅ | — | — | — | Read-only (human) — *current `viewer`* |
+| **auditor** | — | — | — | ✅ | — | — | — | Observability / compliance, no device access (human). Widens to `audit:read` when that scope exists |
+| **caller** (agent) | ✅ | — | ✅ | — | — | — | — | An MCP client/agent that discovers and invokes tools — **machine identity**, not a UI role |
+| **backup** (agent) | — | — | — | — | ✅ | ✅ | — | A scheduled backup/restore job — **machine identity**. Deliberately not `admin`: a nightly cron entry should not also be able to invoke tools or edit the fleet, and the portable archive stays an explicit operator action rather than a standing grant |
 
-All five roles are defined in [`ROLE_SCOPES`](../device_mcp_gateway/rbac.py) today
-(`operator`/`auditor`/`caller` were added with the OIDC work, ADR-0007). Add a role by
-adding one entry to `ROLE_SCOPES` — no route changes.
+All six roles are defined in [`ROLE_SCOPES`](../device_mcp_gateway/rbac.py) today
+(`operator`/`auditor`/`caller` were added with the OIDC work, ADR-0007; `backup` with
+ADR-0011). Add a role by adding one entry to `ROLE_SCOPES` — no route changes.
+
+Note that `operator` does **not** get the backup scopes even though it manages the fleet:
+one call as `backup:read` yields every device's configuration in a single file, which is a
+different exposure from editing devices one at a time.
 
 ## Where roles come from
 

@@ -123,6 +123,16 @@ _CONFIG_SCHEMA: dict[str, Any] = {
             ),
         },
     },
+    # Backup/restore (ADR-0011). The Argon2id parameters are configurable *and* written
+    # into every portable archive's envelope, so raising the cost here can never orphan
+    # an archive produced under the old settings — the reader uses what the envelope says.
+    "backup": {
+        "passphrase_min_length": int,
+        "argon2_memory_cost_kib": int,
+        "argon2_iterations": int,
+        "argon2_lanes": int,
+        "deadletter_limit": int,
+    },
     "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM, "auth_token": str},
     "tracing": {
         "enabled": bool,
@@ -334,6 +344,13 @@ def _defaults() -> dict:
         "transport": {"default": "sse"},
         "storage": {"db_path": "./data/devices.db"},
         "cors": {"allowed_origins": []},
+        "backup": {
+            "passphrase_min_length": 16,
+            "argon2_memory_cost_kib": 65536,  # 64 MiB (ADR-0011)
+            "argon2_iterations": 3,
+            "argon2_lanes": 4,
+            "deadletter_limit": 1000,
+        },
         "metrics": {"enabled": True, "port": 9100, "gauge_refresh_interval": 15},
         "logging": {"level": "INFO", "audit_retention": "90 days", "audit_enabled": True},
     }
