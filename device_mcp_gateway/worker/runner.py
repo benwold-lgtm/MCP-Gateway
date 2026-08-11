@@ -664,7 +664,15 @@ class DeviceWorker:
             if spec is None:
                 err = f"No spec available for {hostname}"
                 logger.warning(err)
-                await self._backend.update_device_fields(hostname, spawn_error=err, pod_active=False)
+                # We reached out and got nothing back, so this IS a reachability
+                # measurement — record it (F-66). A device that fails here is never
+                # assigned, and the health loop only iterates *assigned* devices, so
+                # this is the only moment anything will ever say whether it answered.
+                # Without it the record kept its optimistic default forever: the fleet
+                # listing showed a healthy device alongside this very spawn_error.
+                await self._backend.update_device_fields(
+                    hostname, spawn_error=err, pod_active=False, reachable=False, last_check=time.time()
+                )
                 await self._release_claim(hostname)
                 return
             try:
@@ -682,7 +690,12 @@ class DeviceWorker:
             except (SpecTooLargeError, ValueError) as exc:
                 err = f"Spec for {hostname} rejected: {exc} (F-09)"
                 logger.warning(err)
-                await self._backend.update_device_fields(hostname, spawn_error=err, pod_active=False)
+                # Reachable, unusable: the device answered with a spec we then refused.
+                # Scoring it unreachable here would blame the network for a spec fault —
+                # the two are separate facts and `spawn_error` already carries the second.
+                await self._backend.update_device_fields(
+                    hostname, spawn_error=err, pod_active=False, reachable=True, last_check=time.time()
+                )
                 await self._release_claim(hostname)
                 return
             manifest_dict = _manifest_to_dict(manifest_obj)
@@ -715,6 +728,12 @@ class DeviceWorker:
         spawn_fields: dict[str, Any] = {"pod_active": True, "worker_id": self._id, "spawn_error": None}
         if spec_hash is not None:
             spawn_fields["spec_hash"] = spec_hash
+            # A fetched spec means the device answered us. Claiming reachability only on
+            # this branch is deliberate: the cache-hit path above spawns from a stored
+            # manifest without touching the device, so it has nothing to report and the
+            # health loop — which now owns this device — takes the first measurement.
+            spawn_fields["reachable"] = True
+            spawn_fields["last_check"] = time.time()
         await self._backend.update_device_fields(hostname, **spawn_fields)
         await self._r.sadd(KEYS.worker_devices(self._id), hostname)
 

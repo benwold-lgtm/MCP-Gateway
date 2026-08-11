@@ -196,7 +196,17 @@ async def test_spec_change_replaces_pod():
     }
 
     registry = Registry(config={"spec_cache_ttl": 10, "health_check_interval": 10, "max_concurrent_pods": 10})
-    registry.check_reachability = AsyncMock(return_value=True)
+
+    async def _reachable(profile):
+        # Stands in for the network hop only. The real check *records* what it found
+        # (`reachable` + `last_check`) and the orchestration below reads those fields
+        # back, so a stub that merely returns True tests nothing — it used to pass on
+        # the dataclass default, which is the F-66 bug the defaults no longer allow.
+        profile.config.reachable = True
+        profile.config.last_check = time.time()
+        return True
+
+    registry.check_reachability = _reachable
     registry._spec_service._discover_spec = AsyncMock(return_value=spec_v1)
 
     device_cfg = await registry.register_device(hostname="spec-change-test", base_url="http://test.local")

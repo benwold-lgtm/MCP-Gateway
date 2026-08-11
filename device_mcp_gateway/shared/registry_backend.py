@@ -13,9 +13,8 @@ RedisRegistryBackend   — Redis-backed; used by registry.mode = "distributed".
 from __future__ import annotations
 
 import json
-import time
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from loguru import logger
@@ -46,8 +45,15 @@ class DeviceConfig:
     rate_limit_rps: float | None = None
     spec_hash: str | None = None
     pod_active: bool = False
-    reachable: bool = True
-    last_check: float = field(default_factory=time.time)
+    # Both of these describe a *measurement*, so neither may default to one (F-66).
+    # `reachable=True` + a registration-time `last_check` meant a device nothing had
+    # ever contacted read as healthy with a timestamp that aged without bound, next to
+    # a `spawn_error` saying it had failed. The honest defaults are "not established"
+    # and "never checked": `last_check=0.0` already renders as a null `last_check` /
+    # `last_check_age_seconds` through the response models, so a client can tell "never
+    # checked" from "checked and dead" without the tri-state that would break the shape.
+    reachable: bool = False
+    last_check: float = 0.0
     spawn_error: str | None = None
     worker_id: str | None = None
     # Monotonic counter bumped whenever a spec change mutated the generated tool
@@ -81,6 +87,12 @@ class DeviceConfig:
         def _opt_str(v: str) -> str | None:
             return v if v else None
 
+        # `reachable` is only ever true alongside the check that established it (F-66).
+        # Its writers set both fields in one call, so this is an invariant rather than a
+        # repair — but it is the one place every distributed read passes through, and it
+        # keeps a future writer from reintroducing a truth claim with nothing behind it.
+        last_check = float(h.get("last_check", "0") or "0")
+
         return cls(
             hostname=h["hostname"],
             base_url=h["base_url"],
@@ -91,8 +103,8 @@ class DeviceConfig:
             rate_limit_rps=_opt_float(h.get("rate_limit_rps", "")),
             spec_hash=_opt_str(h.get("spec_hash", "")),
             pod_active=h.get("pod_active", "False") == "True",
-            reachable=h.get("reachable", "True") == "True",
-            last_check=float(h.get("last_check", "0") or "0"),
+            reachable=h.get("reachable", "") == "True" and last_check > 0,
+            last_check=last_check,
             spawn_error=_opt_str(h.get("spawn_error", "")),
             worker_id=_opt_str(h.get("worker_id", "")),
             tools_revision=int(h.get("tools_revision", "0") or "0"),
