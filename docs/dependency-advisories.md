@@ -96,6 +96,9 @@ The remaining three need `cryptography>=49`, which the **deliberate** major cap 
 something a clean install picks up; since all three are unreachable, there is no reason to
 force it. Revisit when `cryptography` is bumped on purpose.
 
+> **Lifted on purpose in 0.3.2 (2026-08-11)** — see the re-verification below. `-3553` and
+> `-3554` are cleared; `-3552` still reports and still is not reachable.
+
 ## Re-verification — 2026-08-07 (the three `cryptography` findings)
 
 CI still reports `PYSEC-2026-3552/3553/3554` against `cryptography==48.0.1`. **The verdict is
@@ -127,6 +130,52 @@ If that API is ever adopted deliberately — for per-device trust or anything el
 comes back, and `>=49` becomes a hard prerequisite. The reasoning lives at the finding itself in
 [testing-gaps.md](testing-gaps.md#tg-4--the-kubernetes-manifests-on-a-real-cluster).
 
+## Re-verification — 2026-08-11 (backup/restore, and lifting the cap)
+
+Re-checked rather than re-read, for the same reason as last time: an input had moved. ADR-0011
+backup/restore is **new `cryptography` code**, the first this project has added since the
+findings were triaged, so the "none reachable" verdict could not simply be carried forward.
+
+What it uses is `cryptography.hazmat.primitives.kdf.argon2.Argon2id` for passphrase derivation
+and `Fernet`/`MultiFernet` for the archive envelope — a KDF and authenticated symmetric
+encryption. Neither is PKCS#7 nor `x509.verification`. The codebase still contains no
+PKCS#7/S-MIME/CMS and no `x509.verification` usage; the only textual match for the latter is the
+comment in `security/mtls.py` recording why it is avoided. **Verdict on all three findings
+unchanged: none reachable.**
+
+**The cap was lifted anyway**, to `>=44.0.0,<50.0.0`, pinning `cryptography==49.0.0`. Not because
+anything became reachable — because a release artifact is the right place to spend a refresh
+(`releasing.md` §1.6), and `49.0.0` was by then two months old, older than the pin it replaced.
+`-3553` and `-3554` no longer report. `-3552` (PKCS#7) still does and needs `50.0.0`, which was
+11 days old at the time; by this document's own release-age rule it should season first, and
+nothing about it is reachable. The next major (`50`) stays excluded so the
+`test_critical_deps_exclude_the_next_major` guard keeps holding.
+
+Resolved in a clean virtualenv per the procedure below. The whole bounded set re-resolved
+unchanged — `mcp` 1.29.0, `fastapi` 0.137.2, `starlette` 1.3.1, `pydantic` 2.13.4, `redis` 8.1.0
+— so the lockfile diff is a single line. Full suite: 1030 passed, 1 skipped (the `[otel]` extra).
+
+> **`pip-compile` trap.** Compile to `requirements.txt` **in place**. Writing to a scratch output
+> file gives it no existing pins to anchor to, so it re-resolves everything and quietly drags
+> unrelated packages forward — that produced three spurious bumps here before being spotted.
+> Separately, `pip-tools` 7.5.3 does not import under pip 26.x (`stdlib_pkgs` moved); the clean
+> venv needs `pip==24.0` to match the working one.
+
+### The floor matters too, not just the cap
+
+This refresh surfaced the inverse bug. `pyproject.toml` declared `cryptography>=41.0.7` — a floor
+predating ADR-0011 — while the backup code imports `Argon2id`, added in **44.0.0**. `pip install`
+resolves against `pyproject.toml` and ignores the lockfile, so a clean install into an
+environment already holding 43.x satisfied the spec and then raised `ImportError` on the first
+portable export. Every existing guard passed: they check that the locked version satisfies the
+range, and that critical packages exclude the next major. Nothing compared the declared floor
+against what the code imports.
+
+Fixed in 0.3.2, with `test_declared_floor_supports_the_apis_the_code_imports` asserting the floor
+against a table of the APIs requiring it. **Add an entry to that table whenever new code adopts a
+recently-added API of a bounded dependency** — the upper bound and the lower bound are two halves
+of the same claim, and only one of them was ever being checked.
+
 ### Choosing the version, when the cap is lifted on purpose
 
 Judge a candidate by **release age**, not by distance from latest — a just-released version is
@@ -135,8 +184,8 @@ an unpaid debt, and this project has already paid for that once (FastAPI 0.137 c
 
 | Version | Released | Age | Clears |
 |---|---|---|---|
-| 48.0.1 (current pin) | 2026-06-09 | 59 days | — |
-| **49.0.0** | 2026-06-12 | **56 days** | `-3553`, `-3554` |
+| 48.0.1 (the pin at the time) | 2026-06-09 | 59 days | — |
+| **49.0.0** ← adopted in 0.3.2 | 2026-06-12 | **56 days** | `-3553`, `-3554` |
 | 50.0.0 (latest) | 2026-07-31 | 7 days | all three |
 
 `49.0.0` is as seasoned as the pin it would replace, so adopting it carries no recency risk and

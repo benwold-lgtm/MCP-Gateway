@@ -10,6 +10,37 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-11
+
+Backup and restore ([ADR-0011](docs/adr/0011-backup-and-restore.md)), two fixes that only a
+live cluster could have found, and the decision that settles multitenancy. Cut deliberately
+small: three changes had stacked up unverified against real infrastructure, and the longer that
+queue grows the less a green verification tells you about *which* change was responsible.
+
+### Read this before upgrading
+
+- **`last_check` is now `null` for a device nothing has ever contacted.** The API shape is
+  unchanged — `reachable` is still a bool — but `last_check` and `last_check_age_seconds` no
+  longer carry the registration time for a device that was never checked. Read a null
+  `last_check` as "never checked", which is a distinct state from a check that found the device
+  dead. This is the only client-visible behaviour change in the release; see the F-66 entry
+  under *Fixed* for what a device registered before the upgrade does.
+- **`cryptography` now requires `>=44.0.0`** if you install the Python package rather than
+  running the published image. The old floor (`>=41.0.7`) predated portable backup and was
+  wrong the moment ADR-0011 shipped — see the third *Fixed* entry. Image users are unaffected;
+  the lockfile has always pinned a version well above it.
+- **Why a patch number for a new capability.** [docs/releasing.md](docs/releasing.md) §1.5 says a
+  new capability is a minor bump even at `0.x`, and this release departs from it for the same
+  reason `0.3.1` did. `0.4.0` is committed to **removing** the deprecated HTTP+SSE endpoints and
+  to the MCP `2026-07-28` protocol shift, deliberately paired so clients face one transport
+  upgrade rather than two. Numbering this release `0.4.0` would either break that commitment or
+  collapse the deprecation window. Backup/restore is additive and sits behind its own scopes, so
+  a patch number understates the feature without overstating the upgrade risk.
+- **The HTTP+SSE deprecation clock is unchanged.** `GET /v1/devices/{hostname}/sse`,
+  `POST /v1/devices/{hostname}/messages`, `GET /v1/fleet/sse` and `POST /v1/fleet/messages`
+  still work and are still scheduled for removal in **0.4.0**. This release does not move that
+  date in either direction.
+
 ### Added
 
 - **[ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) — two-plane
@@ -45,6 +76,21 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
   No code has changed yet — ADR-0013 is Proposed, with three open questions named in it.
   `docs/multitenancy.md` carries a pointer and is revised in full once it is Accepted.
+
+- **[ADR-0011](docs/adr/0011-backup-and-restore.md) — backup and restore** (Accepted), the
+  decision record behind the two entries below. Written **before** any code, which is exactly
+  why it now carries an *Implementation notes* addendum: three of its claims turned out to be
+  false of the code it was describing. Credentials are encrypted at rest in **distributed mode
+  only** (embedded keeps them plaintext in the device record, one layer above SQLite's own
+  encryption); §4's "restore replays through `register_device`, so the egress policy still
+  applies" was **untrue** and became F-67; and Argon2id is not the visible cost the ADR
+  predicted — roughly 0.12s, once per archive. The corrections are recorded as an addendum
+  rather than quietly edited into the decision text, because an Accepted ADR is immutable and
+  the gap between what it assumed and what the code did is the useful part.
+- **[ADR-0012](docs/adr/0012-federation-credential-model.md) — credential model for BFF
+  provider federation** (Proposed). Records that per-user OIDC relay is already shipped, so a
+  per-provider service token would be a regression rather than a new trade-off; makes BFF-side
+  hash-chained audit a prerequisite for federation instead of a parallel workstream.
 
 - **Backup export ([ADR-0011](docs/adr/0011-backup-and-restore.md))** — `GET /v1/admin/backup`
   returns a **ciphertext** archive of the device registry and its tool-change governance
@@ -90,6 +136,20 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   stream: they stay inert until explicitly replayed. Every restore is audited, dry runs
   included.
 
+### Changed
+
+- **`cryptography` 48.0.1 → 49.0.0**, lifting the deliberate `<49` cap. This clears
+  PYSEC-2026-3553 and PYSEC-2026-3554 from `pip-audit`. Both remain **unreachable** in this
+  codebase — they are `x509.verification` bugs, and chain building and name-constraint checking
+  go through `ssl.create_default_context()`, which is OpenSSL via the stdlib — so this is
+  hygiene, not a patched vulnerability. PYSEC-2026-3552 (`pkcs7_decrypt_*`) still reports
+  against 49.0.0 and needs 50.0.0; it stays unreachable for the same reason as before, the
+  codebase contains no PKCS#7/S-MIME/CMS at all, and 50.0.0 is 11 days old, which
+  [docs/dependency-advisories.md](docs/dependency-advisories.md) rates as unseasoned. Resolved
+  in a clean virtualenv as that document requires: the whole bounded set (`mcp`, `fastapi`,
+  `starlette`, `pydantic`, `redis`) re-resolved unchanged, and the resulting lockfile diff is
+  one line.
+
 ### Fixed
 
 - **F-67 — the egress policy is now enforced by registration, not by one route.** The URL
@@ -102,20 +162,6 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   restore built on it would have been a `backup:write` privilege-escalation primitive. The
   gates now live in `registry/validation.py` behind one `validate_device_registration(...)`
   that both callers use. No behaviour change for existing API clients.
-
-- **[ADR-0011](docs/adr/0011-backup-and-restore.md) — backup and restore** (Accepted).
-  Ciphertext archives by default; portable, passphrase-encrypted export behind its own
-  `backup:export-portable` scope. Restore replays through `register_device` so the egress
-  policy and spec bounds still apply, defaults to `dry_run=true`, and runs a fail-closed
-  decrypt preflight over the whole archive — made total by a canary token in the envelope, so
-  an archive of only unauthenticated devices can still be verified. Argon2id (`m=64 MiB, t=3,
-  p=4`) with a per-archive salt, parameters stored in the envelope. Written before any code.
-- **[ADR-0012](docs/adr/0012-federation-credential-model.md) — credential model for BFF
-  provider federation** (Proposed). Records that per-user OIDC relay is already shipped, so a
-  per-provider service token would be a regression rather than a new trade-off; makes BFF-side
-  hash-chained audit a prerequisite for federation instead of a parallel workstream.
-
-### Fixed
 
 - **F-66 / FMEA D10 — a device that was never checked no longer reports itself reachable.**
   The health loop iterates only a worker's *assigned* devices, so a device whose pod never
@@ -132,6 +178,18 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   checked", which is a distinct state from a check that found the device dead. A device
   registered *before* upgrading that was never successfully checked keeps its optimistic stored
   value until its next spawn attempt, which now records a verdict either way.
+
+- **The declared `cryptography` floor could not run this code.** Portable backup imports
+  `cryptography.hazmat.primitives.kdf.argon2.Argon2id`, which does not exist before **44.0.0**,
+  while `pyproject.toml` still declared `>=41.0.7` — a floor written long before ADR-0011. `pip
+  install` resolves against `pyproject.toml` and ignores the lockfile, so an environment already
+  holding cryptography 43.x satisfied the dependency and then raised `ImportError` on the first
+  portable export. The image and CI were never affected, which is why nothing caught it: the
+  existing guards check that the *locked* version satisfies the declared range (48.0.1 did) and
+  that critical dependencies exclude the next *major* — nobody compared the floor against what
+  the code imports. Floor raised to `>=44.0.0`, with a new guard
+  (`test_declared_floor_supports_the_apis_the_code_imports`) asserting the declared minimum
+  against a table of the APIs that require it.
 
 ## [0.3.1] - 2026-08-10
 
@@ -744,6 +802,7 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.3.2]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.2
 [0.3.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.1
 [0.3.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.0
 [0.2.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.2.0

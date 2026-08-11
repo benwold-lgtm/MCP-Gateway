@@ -31,7 +31,7 @@ cffi==2.1.1
     # via cryptography
 click==8.4.2
     # via uvicorn
-cryptography==48.0.1
+cryptography==49.0.0
     # via
     #   device-mcp-gateway (pyproject.toml)
     #   pyjwt
