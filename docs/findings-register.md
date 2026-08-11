@@ -1,0 +1,90 @@
+# Findings register
+
+Every `F-nn` cited anywhere in this documentation is defined here — one row per finding,
+with its severity, what it was, and how it was resolved. The docs reference these IDs
+constantly (`F-31` in [security-mtls.md](security-mtls.md), `F-62` in
+[failure-modes.md](failure-modes.md), `F-01`/`F-32`/`F-33` in
+[ADR-0004](adr/0004-single-tenant-per-stack.md), and so on), so the register is a
+dependency of those documents rather than a historical curiosity.
+
+It is the de-duplicated output of a series of completed reviews — architecture, SRE,
+distributed systems, security, zero-trust, red-team, API governance, enterprise
+integration, product/DX, compliance and chaos. A finding raised by more than one review
+appears once, with all sources named. The per-review working notes are not kept: what
+survived them is this table, the [ADRs](adr/), and the entries in
+[CHANGELOG.md](../CHANGELOG.md).
+
+**This is a closed record.** Everything below is resolved, accepted, or explicitly
+deferred; nothing here is a live work queue. New work is tracked in the changelog and in
+[testing-gaps.md](testing-gaps.md). Add a row only when a new review assigns a new `F-nn`,
+and never renumber — the IDs are cited from a dozen other files.
+
+Status: 🆕 open · 👀 triaged · 🛠️ in progress · ✅ done · 🔵 accepted (won't fix) · ⏸️ deferred
+
+| ID | Sev | Finding | Sources | Status |
+|----|-----|---------|---------|--------|
+| F-01 | 🔵 | No multi-tenant isolation — flat device namespace, global roles; any `devices:write` key controls any device | Arch A1; SRE R5 (fairness) | ✅ accepted (D-1: single-tenant-per-stack documented, Tier 1) |
+| F-02 | 🔴 | SSRF — arbitrary `base_url`/`spec_url` fetched server-side; redirects followed; wide NetworkPolicy egress | Arch A2 | ✅ done (Tier 0) |
+| F-03 | 🔵 | Per-device single-consumer throughput ceiling (1 worker × 20) — a hot device can't scale horizontally | Dist D1 | ✅ accepted 2026-06-14 — **single-owner by design** (decision below); scale vertically + register-twice fan-out; rate-limiting deferred to F-16 |
+| F-04 | 🟠 | Tool-gen correctness: cross-location param-name collisions (last-wins) + unencoded path interpolation (traversal/injection) + silent empty schema on external `$ref` | Arch A3 | ✅ done (Tier 1) |
+| F-05 | 🟠 | No retries/backoff on any outbound path (tool calls, reachability, spec fetch) | SRE R3 | ✅ done (Tier 1) |
+| F-06 | 🟠 | Overload handling: stream MAXLEN trims accepted-but-undelivered calls silently (>10k); backpressure invisible to client until 30s timeout | Dist D3, D4; SRE R6 | ✅ done (Tier 1) |
+| F-07 | 🟠 | No rebalancing on worker scale-out — sticky claims → load skew, HPA doesn't relieve hot workers | Dist D2 | ✅ done (Tier 1) |
+| F-08 | 🟠 | At-least-once delivery → non-idempotent (POST/PUT/PATCH) tool calls can double-execute on reclaim | Dist D7 | ✅ done (Tier 1) |
+| F-09 | 🟠 | Spec translation unbounded — no timeout, no size limit; 4-process pool starvable by a hostile/huge spec | Arch A7; SRE R4 | ✅ done (Tier 1) |
+| F-10 | 🟠 | DLQ (`device:*:calls:dead`) is write-only — no drain, inspection, replay, or alert | Arch A8; SRE R6 | ✅ done (Tier 1) — alert in H, ops in N |
+| F-11 | 🟠 | Registration latency long-tail — serial 8×10s spec discovery + untimed translation; synchronous register | SRE R4; Arch A7 | ✅ done (Tier 1) |
+| F-12 | 🟠 | `Registry` god-object straddles embedded/distributed via mode conditionals — leaky abstraction | Arch A4 | ✅ done 2026-06-15 — 2-collaborator split: SpecService + PodSupervisor extracted, Registry 726→449 lines; spec↔pod recursion cut (fetch_spec now side-effect-free). Embedded/distributed mode split deferred to F-15/F-19 |
+| F-13 | 🟠 | Noisy-neighbor within a worker — co-located devices share event loop / HTTP pool / spec pool / breaker process; no per-worker total in-flight cap; unbounded upstream response size | SRE R7 | ✅ done 2026-06-15 — added worker-wide aggregate in-flight cap `registry.max_concurrent_calls_per_worker` (default 200), acquired after the per-device slot in `_schedule_dispatch`; saturation surfaced via `mcp_worker_calls_throttled_total`. Response-size already capped (adapter `_max_response_bytes`); shared event-loop/HTTP-pool/breaker accepted under D-1/F-33. Branch `remediation/tier1-overload-fairness` |
+| F-14 | 🟠 | Observability residuals — no tracing spans (OTel), no SLOs/error budgets, DLQ/undelivered unalerted | SRE R6 | ✅ done (Tier 1) |
+| F-15 | 🟠 | No external API versioning (`/v1`); MCP `protocolVersion` hardcoded | Arch A5 | ✅ done 2026-06-15 — hard `/v1` cutover for the management API (probes/Prom scrape stay unversioned); MCP `initialize` now negotiates `protocolVersion` (echo-if-supported else newest). Branch `remediation/tier1-api-versioning` |
+| F-16 | 🟡 | Gateway rate limit IP-keyed only — no per-principal/per-key quota | SRE R5 | ✅ done 2026-06-15 — added `principal_key_func` + `rate_limit_principal(spec, scope)` (keys on `request.state.principal.subject`), composed with the existing per-IP limit on the expensive scopes: `POST /v1/devices` (devices:write, 120/min/principal) and `POST .../messages` (tools:call, 1200/min/principal). Disjoint key namespaces; reuses the app.state limiter (per-process embedded / shared Redis distributed). Branch `remediation/tier1-overload-fairness` |
+| F-17 | 🟡 | Worker liveness probe heavyweight (process spawn + Redis connect / 30s / worker); gateway liveness can't detect wedged-but-serving | SRE R1 | ✅ done 2026-06-15 — worker probe now a cheap `find -mmin` on a local liveness file the heartbeat touches only when healthy (no Python/Redis spawn; `registry.liveness_file`, default tempdir/mcp-worker-alive). Gateway: new no-I/O `/livez` backed by a 1s event-loop heartbeat tick (`app.state.loop_heartbeat`) → 503 when stale (wedged-but-serving), livenessProbe repointed `/health`→`/livez`. Branch `remediation/tier1-liveness-coordination` |
+| F-18 | 🟡 | Circuit breaker per-worker-process, not shared (matters only if device sharding adopted — see F-03) | SRE R2; Dist D7-adjacent | 🔵 accepted (today) |
+| F-19 | 🟡 | API surface not normalized — read endpoints hand-build divergent device dicts; partial typed models | Arch A9 | ✅ done 2026-06-15 — single `DeviceSummary/DeviceDetail.from_config` serializer; list/overview→Summary, get-one→Detail (superset), register/update→DeviceMutationResult (envelope + full device). Zero hand-built device dicts. Branch `remediation/tier1-api-surface` |
+| F-20 | 🟡 | Soft gateway statefulness — SSE replica-pinned; F6 watcher lost if dispatching replica dies | Arch A6 | 🔵 accepted (document) |
+| F-21 | 🟡 | Coordination SPOFs — reconciler & gauge-leader elections; gaps on flap (idempotent, but alert) | Dist D6; SRE R6 | ✅ done 2026-06-15 — exported `mcp_gateway_gauge_leader` gauge (reconciler_leader already existed); added PrometheusRule alerts `MCPGaugeLeaderAbsent` (sum==0 5m) + `MCPReconcilerReassignmentChurn` (rate>0.05 15m, the F-62 flap detector). Branch `remediation/tier1-liveness-coordination` |
+| F-22 | 🟠 | Phase-0 artifact gaps — no threat model, no load-test harness/baseline, no failure-mode matrix, no ADRs | Phase 0 | ✅ done 2026-06-15 (Z4a) — `docs/threat-model.md` (STRIDE), `docs/failure-modes.md` (FMEA), `docs/adr/` (6 ADRs + template/index), runnable load harness `tools/loadtest/loadgen.py` + `docs/load-testing.md` methodology. Branch `remediation/tier1-readiness-artifacts` |
+| F-23 | 🔴 | **Fail-open auth** — no keys configured ⇒ ANONYMOUS with all scopes; K8s secret marked optional | Sec V1; ZT Z4; Red X8 | ✅ done (Tier 0) |
+| F-24 | 🔴 | **Redis control plane unauthenticated/unencrypted** — no AUTH/TLS; injectable streams, readable state | Sec V2; ZT Z3; Red X5 | ✅ done (Tier 0) |
+| F-25 | 🔴 | Tool-call **header injection / upstream auth-header override** (header-located params merged over auth) | Sec V3; Red X2 | ✅ done (Tier 0) |
+| F-26 | 🔴 | **Schema poisoning** — device spec text → LLM tool metadata verbatim ⇒ indirect prompt injection | Sec V4; Red X3 | ✅ done (Tier 0) |
+| F-27 | 🟠 | **Malicious upstream response** returned verbatim to LLM; no size cap/sanitization | Sec V4-adj; Red X4 | ✅ done (Tier 0) |
+| F-28 | 🟠 | No server-side **tool-call argument validation** (advisory schema only; over-posting) | Sec V6 | ✅ done (Tier 0) |
+| F-29 | 🟠 | `resources/read` **path traversal + SSRF** (LLM-supplied path appended unvalidated) | Sec V5; Red X7 | ✅ done (Tier 0) |
+| F-30 | 🟠 | **Identity stops at the gateway** — principal not propagated to worker/upstream; worker trusts stream | ZT Z2; Sec (V2-adj) | ✅ done 2026-06-15 (Z4a) — residual audit/attribution shipped: principal `subject` rides the call stream into the worker's execution-audit records (dispatch/dead_letter/duplicate), so actor attribution spans the gateway→worker hop, not just `rid`. (D-1: not an isolation gate; documented.) Branch `remediation/tier1-readiness-artifacts` |
+| F-31 | 🟠 | **No workload identity / mTLS** between gateway↔worker↔Redis; trust = network reachability | ZT Z3 | ✅ device-facing mTLS done 2026-06-15 (`security/mtls.py`, all outbound device paths); internal leg = Redis-TLS deploy (F-24 family) + gateway↔worker have no direct channel (mediated by Redis) — see resolution note |
+| F-32 | 🔵 | **No least privilege / per-resource authz** — global scopes, no device ownership (deep dive of F-01) | ZT Z1; Sec V10-adj | ✅ accepted (D-1: = F-01 core, documented in docs/multitenancy.md) |
+| F-33 | 🔵 | **Cross-API isolation is process-shared** — co-located pods' decrypted creds in one worker process | ZT Z5; SRE R7 | ✅ accepted (D-1: "don't co-host tenants" documented) |
+| F-34 | 🟠 | **Secrets lifecycle** — static non-rotatable API keys; single Fernet key (no MultiFernet/rotation/revocation) | Sec V7 | ✅ done 2026-06-15 — MultiFernet multi-key codec + `device-mcp-rotate-secrets` re-encrypt pass (zero-downtime Fernet rotation); device-credential rotation = re-register (re-encrypts under primary) |
+| F-35 | 🟡 | Body-size guard **bypass via chunked / missing Content-Length** | Sec V8; Red X6 | ✅ done (Tier 1) |
+| F-36 | 🟡 | **Metrics exposition unauthenticated** (:9100) — NetworkPolicy-only control | Sec V9 | ✅ done (Tier 1) |
+| F-37 | 🟡 | **No principal↔session binding** — any tools:call holder can post to a known session_id | Sec V10 | ✅ done (Tier 1) |
+| F-38 | 🟠 | **No adversarial/security tests** — suite has no SSRF/injection/fail-open/poisoning/Redis-injection cases | Red (coverage) | ✅ done (Tier 0) |
+| F-39 | 🟠 | **Error shapes not normalized** — upstream ≥400 returned as a *successful* MCP result; 3 inconsistent call_api shapes | APIGov G1 | ✅ done (Tier 1) |
+| F-40 | 🔴 | **Non-JSON request bodies / file uploads broken** — always `json=`; form/multipart/binary unsupported; content types merged | APIGov G3; Integ I1 | ✅ done (Tier 1) |
+| F-41 | 🟠 | **No breaking-change governance** — any spec change → full repod; tool set mutates with no version negotiation/signal | APIGov G2 | ✅ done 2026-06-15 (Z3) — tool-set diff classifier (compatible vs breaking) → audit `device.tools_changed` + `mcp_device_tools_changed_total{breaking}` metric + alert; client-pollable `tools_revision` on DeviceDetail/Diagnostics. Branch `remediation/tier1-change-governance` (PR #33) |
+| F-42 | 🟠 | **OAuth2 only client_credentials** — no auth-code/refresh/JWT-bearer/basic-token-endpoint/audience; per-instance token cache | Integ I2 | ✅ done (Tier 1) — auth-code/JWT-bearer/shared-cache deferred (see log) |
+| F-43 | 🟠 | **API-key only header-based** — no query/cookie/scheme-prefixed/HMAC-signing placements | Integ I3 | ✅ done (Tier 1) — HMAC-signing deferred (see log) |
+| F-44 | 🟠 | **No upstream rate-limit awareness** — ignores 429/`Retry-After`/`X-RateLimit`; no adaptive backoff | Integ I4; SRE F-05 | ✅ done (Tier 1) |
+| F-45 | 🟠 | **No long-running-op support** — synchronous 15s only; no 202+`Location`/job-poll | Integ I5 | ✅ done (Tier 1) — surfaces job handle; server-side poll deferred |
+| F-46 | 🟠 | **Webhooks/callbacks ignored** — only `paths` translated; gateway is pull-only (document as limitation) | Integ I6; APIGov | ✅ done 2026-06-15 (Z3) — documented pull-only limitation + future inbound-webhook→MCP-notification bridge in `docs/api-change-governance.md` + README. Branch `remediation/tier1-change-governance` (PR #33) |
+| F-47 | 🟡 | **Typing-fidelity gaps** — `oneOf`/`anyOf` exclusivity lost, `discriminator`/`nullable` unhandled, `examples` dropped, `required` may ref dropped param | APIGov G4 (refines F-04) | ✅ done (Tier 1) |
+| F-48 | 🟡 | **No pagination assistance** — `Link`/cursor headers invisible (only body returned); relies on LLM + spec params | APIGov G5; Integ I7 | ✅ done (Tier 1) |
+| F-49 | 🟡 | **No per-device adapter/normalizer seam** — vendor quirks (Accept, trailing slash, error envelopes, base-path) need core changes | Integ I11 | ✅ done (Tier 1) |
+| F-50 | 🟠 | **No config validation** — mistyped/misplaced YAML keys silently ignored (default used, no warning) | DX1 | ✅ done (Tier 1) |
+| F-51 | 🟡 | **Distributed failures hard to diagnose** — 30s timeout / error-shaped success; `rid` not returned to caller; no error catalog | DX2 (ties F-39/F-06) | ✅ done (Tier 1) |
+| F-52 | 🟡 | **Thin device self-service** — no diagnostics endpoint (last check/spec/breaker/recent errors); onboarding flaky devices is trial-and-error | DX3 | ✅ done (Tier 1) |
+| F-53 | 🟠 | **Safety defaults favor convenience** — fail-open auth, plaintext-allowed (embedded), 0.0.0.0 bind, CORS `["*"]` examples | DX4 (ties F-23) | ✅ done (Tier 1) |
+| F-54 | 🟡 | **Documentation gaps** — no runbook/troubleshooting, multitenancy guide (R-1), threat model (F-22), error catalog, upgrade guide | DX5 | ✅ done 2026-06-15 (Tier 1, Z4b) — residual closed: `docs/runbook.md` (per-alert playbooks + symptom troubleshooting + standard procedures) + `docs/upgrade.md` (versioning/compat policy, rolling procedure, breaking gates, rollback). Other named gaps closed earlier: multitenancy.md (Y), threat-model.md (Z4a/F-22), error-catalog.md (sub-batch D/F-51), audit-logging.md (E/F-59) |
+| F-55 | 🟠 | **Audit trail covers only tool dispatch** — device CRUD + auth failures (401/403) not audited with subject | Compliance C1 | ✅ done (Tier 1) |
+| F-56 | 🟠 | **Access logs lack actor attribution** — request log has `rid` but no `principal.subject`; read endpoints unlogged | Compliance C2 | ✅ done (Tier 1) |
+| F-57 | 🟠 | **Audit logs not tamper-evident / not guaranteed-forwarded** — local mutable rotating files, no WORM/sign/SIEM | Compliance C3 | ✅ done (Tier 1) |
+| F-58 | 🟠 | **Retention size-based not time-based; no policy** — no configurable retention period, legal-hold, or disposal schedule | Compliance C4 | ✅ done (Tier 1) |
+| F-59 | 🟠 | **No PII/PHI handling framework** — no classification/redaction/DLP; `base_url` (may embed creds) logged; tool I/O unredacted | Compliance C5 | ✅ done (Tier 1) |
+| F-60 | 🟠 | **No compliance framework mapping** (SOC2/HIPAA/FedRAMP); Fernet not FIPS-validated (matters only for FedRAMP) | Compliance C8 (ties F-24/F-02/F-31) | ✅ done 2026-06-15 (Tier 1, Z4b) — new `docs/compliance.md`: SOC 2 TSC map (Common Criteria + Availability + Confidentiality, control→operator-responsibility), HIPAA §164.312 technical-safeguards table (conduit model), and the **FedRAMP/FIPS hard limit** (Fernet not FIPS-validated → blocker as shipped; mitigation = delegate secrecy to a FIPS-validated KMS). Shared-responsibility model up front; explicit "not a certification" disclaimer; D-1 deployment-boundary assumption stated |
+| F-61 | 🟠 | **No jitter ⇒ coordinated reconvergence** — fixed-interval loops/elections/reconnects spike Redis in lock-step on recovery (thundering herd) | Chaos C-1 | ✅ done (Tier 1) |
+| F-62 | 🟠 | **Claim-lease flap → premature dead-worker declaration** — GC pause/Redis latency > TTL ⇒ healthy worker reassigned, transient double-pod/churn | Chaos C-2 (ties SRE #8, F-08) | ✅ done 2026-06-15 — reconciler hysteresis: a device must be seen orphaned across N consecutive leader sweeps (`registry.reconcile_orphan_grace_cycles`, default 2) before reassigning, so a transient lapse self-heals on the owner's next heartbeat (adds ~grace×reconcile_interval margin over claim TTL); streak resets when the claim reappears, pruned for vanished devices. Churn surfaced via `mcp_reconciler_reassignments_total` + alert (F-21). Branch `remediation/tier1-liveness-coordination` |
+| F-63 | 🟠 | **No chaos harness / fault-injection / game-day** — resilience designed but not demonstrated (extends F-22) | Chaos C-3 | 🆕 open |
+| F-64 | 🟡 | **False-positive bind-all warning** — F-53 "binding 0.0.0.0 (all interfaces)" warning reads `server.host` from config, ignoring the CLI `--host` override ⇒ cries wolf on a *security* warning when `--host 127.0.0.1` is passed | First-run smoke (2026-06-15) | ✅ done 2026-06-15 (Tier 1, Z5) — new `cfg.resolve_bind_host()` honors `MCP_BIND_HOST`; CLI exports the resolved host before importing the app so `warn_unsafe_settings` sees the effective bind. Real bind-all+no-auth still warns. Regression tests both directions |
+| F-65 | 🟡 | **Quickstart SSRF doc gap** — README embedded quickstart registers a private `base_url` (`192.168.1.42`) but the Tier-0 SSRF default (`allow_private_targets: false`, F-02) refuses it with `400`; quickstart didn't foreshadow the opt-in | First-run smoke (2026-06-15) | ✅ done 2026-06-15 (Tier 1, Z5) — README note after the register step: private/loopback/link-local refused by default; opt in with `MCP_ALLOW_PRIVATE_TARGETS=true` / `security.allow_private_targets: true` for a trusted LAN fleet. (Error message itself was already clear/actionable) |

@@ -988,6 +988,7 @@ Phase-0 / governance artifacts for reviewers and operators:
 | [docs/threat-model.md](docs/threat-model.md) | STRIDE threat model — trust boundaries, adversaries, control-per-threat, accepted risks |
 | [docs/threat-model-identity.md](docs/threat-model-identity.md) | Threat-model addendum for federated identity (IdP → BFF → gateway) — new boundaries, `TM-I-nn` requirements, pre-implementation gate (see [ADR-0007](docs/adr/0007-federated-identity-oidc-and-gateway-rbac.md)) |
 | [docs/failure-modes.md](docs/failure-modes.md) | FMEA matrix — per-component failure, detection (metric/alert), mitigation, operator action |
+| [docs/findings-register.md](docs/findings-register.md) | Every `F-nn` cited in these docs, defined once — severity, what it was, how it was resolved. A closed record of the completed review programme |
 | [docs/adr/](docs/adr/) | Architecture Decision Records — the load-bearing decisions (dual-mode, Redis control plane, single-owner, single-tenant, at-least-once+idempotency, fail-closed defaults, federated identity/RBAC) |
 | [docs/load-testing.md](docs/load-testing.md) | Load-baseline methodology + the runnable harness in [tools/loadtest/](tools/loadtest/) |
 | [docs/testing-gaps.md](docs/testing-gaps.md) | **What we have not empirically validated** and why — chaos/fault injection, scale baseline, HA Redis failover, live-cluster and arm64 verification. Read this before treating a resilience claim as proven |
