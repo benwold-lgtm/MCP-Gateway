@@ -123,6 +123,44 @@ def test_critical_deps_exclude_the_next_major():
     )
 
 
+# --- a declared floor must support the APIs the code actually imports --------
+
+# The mirror of the guard above. `cryptography>=41.0.7` was declared long before
+# ADR-0011 backup/restore began importing
+# `cryptography.hazmat.primitives.kdf.argon2.Argon2id`, which does not exist before
+# 44.0.0. Every check above still passed: the lockfile pins a version well inside the
+# range, so nothing ever compared the declared *floor* against what the code needs.
+# `pip install` resolves against pyproject.toml, so an environment already holding
+# cryptography 43.x satisfied the spec and then raised ImportError on the first portable
+# export. Upper bounds keep an untested major out; this keeps an unusable minimum from
+# being declared.
+_API_FLOORS = {
+    # package: (minimum version, the import that requires it)
+    "cryptography": ("44.0.0", "cryptography.hazmat.primitives.kdf.argon2.Argon2id (ADR-0011 portable backup)"),
+}
+
+
+def _declared_floor(req: Requirement) -> Version | None:
+    """The highest lower bound the specifier declares, or None if it declares no floor."""
+    floors = [Version(s.version) for s in req.specifier if s.operator in (">=", "==", "~=")]
+    return max(floors) if floors else None
+
+
+def test_declared_floor_supports_the_apis_the_code_imports():
+    specs = _pyproject_runtime_specs()
+    too_low = []
+    for name, (required, why) in sorted(_API_FLOORS.items()):
+        req = specs.get(name)
+        assert req is not None, f"{name} is no longer a runtime dependency — update _API_FLOORS"
+        floor = _declared_floor(req)
+        if floor is None or floor < Version(required):
+            too_low.append(f"{name}: declares >={floor or '(none)'} but needs >={required} for {why}")
+    assert not too_low, (
+        "pyproject.toml declares a minimum version that cannot run this code, so a clean "
+        "install can resolve to an unusable version: " + "; ".join(too_low)
+    )
+
+
 # --- review item 12: the CI-gating dev tools need upper bounds too -----------
 
 # `black --check` FAILS the build, and flake8/mypy gate it as well. An unbounded spec on
