@@ -18,18 +18,33 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   bound to one tenant at login and cannot learn that another exists (404 rather than 403,
   per-tenant hostnames so tenant selection is never an enumeration surface). Above them sits
   a separate **provider plane** — a manager-of-managers console for the party operating the
-  platform, with its own IdP and its own `provider:monitor` / `provider:admin` scopes held
-  in the BFF, not in any tenant's gateway. The plane is fixed at login from *which IdP
-  authenticated* and is immutable for the session, and cross-tenant power is exercised as a
-  discrete audited act on a named tenant rather than held ambiently.
+  platform, with its own IdP and its own `provider:*` scopes held in the BFF, not in any
+  tenant's gateway. The plane is fixed at login from *which IdP authenticated* and is
+  immutable for the session, and cross-tenant power is exercised as a discrete audited act
+  on a named tenant rather than held ambiently.
 
-  Two consequences to plan for: a tenant gateway will trust the **provider IdP as a second
+  **`provider:admin` is deliberately not the gateway's `admin` role.** It is the everyday
+  debugging grant — device read, configuration, governance history, lease management — with
+  `tools:call` and credential access carved out into separate **elevated** grants
+  (`provider:invoke`, `provider:credentials`), each time-boxed, individually justified, and
+  separately audited. Tool invocation is the most consequential thing the gateway does, and
+  routine debugging should not silently carry standing authority to actuate a customer's
+  hardware. Credential access gets the same treatment: for the provider — who holds
+  `MCP_SECRET_KEY` — a *ciphertext* [ADR-0011](docs/adr/0011-backup-and-restore.md) archive
+  is a credential dump too, so no `backup:*` scope sits inside `provider:admin`.
+
+  Two consequences to plan for. A tenant gateway will trust the **provider IdP as a second
   issuer** (`gateway.oidc.issuer`/`audience` become lists) so provider actions land in the
-  tenant's own hash-chained audit as named humans instead of a shared admin key; and
-  cross-tenant *monitoring* is aggregated from the existing Prometheus metrics plane, so the
-  constant-use path holds no tenant API credentials at all. No code has changed yet —
-  ADR-0013 is Proposed, with four open questions named in it. `docs/multitenancy.md` carries
-  a pointer and is revised in full once it is Accepted.
+  tenant's own hash-chained audit as named humans instead of a shared admin key — and the
+  **gateway** must bind issuer → eligible scopes server-side, because the BFF's login-time
+  plane-fixing is a session-flow guarantee that a minted token can simply bypass. That makes
+  `group_roles` per-issuer: kept flat across two issuers, a tenant's own IdP admin could
+  create a group named whatever the provider mapping keys on and be handed provider scopes.
+  Separately, cross-tenant *monitoring* aggregates from the existing Prometheus metrics
+  plane, so the constant-use path holds no tenant API credentials at all.
+
+  No code has changed yet — ADR-0013 is Proposed, with three open questions named in it.
+  `docs/multitenancy.md` carries a pointer and is revised in full once it is Accepted.
 
 - **Backup export ([ADR-0011](docs/adr/0011-backup-and-restore.md))** — `GET /v1/admin/backup`
   returns a **ciphertext** archive of the device registry and its tool-change governance
