@@ -36,8 +36,26 @@ SCOPE_DEVICES_READ = "devices:read"
 SCOPE_DEVICES_WRITE = "devices:write"
 SCOPE_TOOLS_CALL = "tools:call"
 SCOPE_METRICS_READ = "metrics:read"
+# Backup/restore (ADR-0011). Three scopes rather than one because the three grants are
+# genuinely different: reading an archive exfiltrates every device's URL and configuration
+# even without the key; writing one can reinstate devices; and a *portable* export is a
+# complete set of live credentials under a single passphrase. The last is never implied by
+# the other two — it has to be asked for by name.
+SCOPE_BACKUP_READ = "backup:read"
+SCOPE_BACKUP_WRITE = "backup:write"
+SCOPE_BACKUP_EXPORT_PORTABLE = "backup:export-portable"
 
-ALL_SCOPES: frozenset[str] = frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_TOOLS_CALL, SCOPE_METRICS_READ})
+ALL_SCOPES: frozenset[str] = frozenset(
+    {
+        SCOPE_DEVICES_READ,
+        SCOPE_DEVICES_WRITE,
+        SCOPE_TOOLS_CALL,
+        SCOPE_METRICS_READ,
+        SCOPE_BACKUP_READ,
+        SCOPE_BACKUP_WRITE,
+        SCOPE_BACKUP_EXPORT_PORTABLE,
+    }
+)
 
 # Roles are just named bundles of scopes. New roles = new entries here; routes never
 # reference roles, only scopes, so adding one never touches a call site. The full matrix
@@ -51,6 +69,12 @@ ROLE_SCOPES: dict[str, frozenset[str]] = {
     "auditor": frozenset({SCOPE_METRICS_READ}),
     # Machine identity: an MCP client/agent that discovers and invokes tools.
     "caller": frozenset({SCOPE_DEVICES_READ, SCOPE_TOOLS_CALL}),
+    # Machine identity: a scheduled backup job. Deliberately NOT admin — a cron entry
+    # that runs nightly should not carry the ability to invoke tools or edit the fleet.
+    # Equally deliberately without `backup:export-portable`: routine backups are the
+    # ciphertext kind, and the key-independent archive is an operator decision, not a
+    # thing a scheduler holds standing permission to produce.
+    "backup": frozenset({SCOPE_BACKUP_READ, SCOPE_BACKUP_WRITE}),
 }
 
 

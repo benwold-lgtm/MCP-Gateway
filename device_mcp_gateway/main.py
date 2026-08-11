@@ -31,6 +31,7 @@ from loguru import logger
 
 from device_mcp_gateway import API_V1_PREFIX, __version__, metrics
 from device_mcp_gateway.api import admin as api_admin
+from device_mcp_gateway.api import backup as api_backup
 from device_mcp_gateway.api import deadletter as api_deadletter
 from device_mcp_gateway.api import devices as api_devices
 from device_mcp_gateway.api import fleet as api_fleet
@@ -238,6 +239,11 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.config = cfg
     _app.state.authenticator = _authenticator
     _app.state.mode = _mode
+    # The credential codec, so routes can reach it without digging through the registry.
+    # Backup export needs it directly: it normalises every archived credential to
+    # ciphertext under this stack's key, whichever way the mode happened to store it
+    # (embedded keeps plaintext in DeviceConfig; distributed encrypts). ADR-0011.
+    _app.state.codec = _codec
     _app.state.redis = None
     _app.state.pubsub_redis = None
     _app.state.session_router = None
@@ -444,6 +450,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     protected.include_router(api_fleet.router)
     protected.include_router(api_streamable_fleet.router)
     protected.include_router(api_admin.router)
+    protected.include_router(api_backup.router)
 
     # Version the entire management API under /v1 (e.g. /v1/devices). Probes
     # (/health, /livez, /readyz) and the Prometheus scrape endpoint stay unversioned.

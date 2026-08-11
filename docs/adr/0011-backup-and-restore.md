@@ -139,6 +139,39 @@ before a real one, so it is exactly the event a responder wants in the chain.
     providers and their credentials. That is a separate store on the other side of a trust
     boundary, and it needs its own backup story — this ADR does not cover it.
 
+## Implementation notes (2026-08-11)
+
+Three things the build found that this ADR had not accounted for. Recorded here rather than
+silently absorbed, because two of them change what the decision above actually guarantees.
+
+**1. "Credentials are encrypted at rest" is true of one mode, not both.** Distributed mode
+encrypts before writing to Redis; **embedded mode keeps `DeviceConfig.auth_config` as
+plaintext JSON** and encrypts a layer lower, in the SQLite store. So a ciphertext archive
+built by exporting the stored value verbatim would have been a real ciphertext archive on
+one mode and a **plaintext credential dump on the other** — from the same safe-by-default
+call, with nothing in the response to tell them apart.
+
+The archive's credential field is therefore defined as *ciphertext under whatever seals
+this archive*, and export normalises to it: distributed values are decrypted and re-sealed
+under the primary key (which also collapses a rotation window), embedded plaintext is
+encrypted. **A ciphertext export with no `MCP_SECRET_KEY` configured is refused with 409**
+rather than quietly downgraded — the archive would otherwise carry the safe label and the
+dangerous contents.
+
+**2. §4's guarantee did not hold as written.** "Restore replays through `register_device`,
+so the egress policy still applies" — it does not. `validate_target_url` is called by the
+*route handler* in `api/devices.py`, and `registry/server.py` never calls it. Nothing
+exploits this today because the handler is registration's only caller, but a restore built
+on that sentence would have been precisely the `backup:write` privilege-escalation
+primitive §4 exists to deny. Filed as **F-67** and closed by the restore PR, which hoists
+the handler's validation into one entry point both callers share. The decision stands; the
+code had to be made to match it.
+
+**3. "Argon2id makes export and restore visibly slow" is overstated.** At `m=64 MiB, t=3,
+p=4` a derivation measures ~0.12s, and it is performed **once per archive** — the whole
+body is sealed under one derived key — not once per credential. The cost is real but not
+operationally visible, so it should not be cited as a reason to avoid the portable kind.
+
 ## Alternatives considered
 
 - **Redis `BGSAVE`/RDB snapshots only:** rejected as the answer, though still worth running.

@@ -254,6 +254,12 @@ class AbstractRegistryBackend(ABC):
         DLQ. Returns the number removed (or -1 when the whole stream was dropped)."""
         return 0
 
+    async def dead_letter_export(self, hostname: str, count: int = 1000) -> list[dict]:
+        """Full dead-letter entries for backup (ADR-0011). Empty where there is no DLQ —
+        embedded mode has no call streams, so ``include_deadletters`` is a no-op there
+        rather than an error."""
+        return []
+
 
 # ---------------------------------------------------------------------------
 # In-memory backend (embedded mode)
@@ -608,6 +614,30 @@ class RedisRegistryBackend(AbstractRegistryBackend):
                 }
             )
         return result
+
+    async def dead_letter_export(self, hostname: str, count: int = 1000) -> list[dict]:
+        """Every field of a device's dead letters, oldest first, for backup (ADR-0011).
+
+        Deliberately not ``dead_letter_list``: that one is a *triage* view and drops the
+        ``message`` payload, keeping only enough to eyeball the queue. An archive built
+        from it would restore dead letters that could never be replayed, because the call
+        they carry would be gone — a backup that looks complete and is not.
+
+        Entry ids are preserved so a restored queue keeps its original ordering and an
+        operator can correlate a restored entry with the incident it came from.
+        """
+        key = KEYS.device_calls_dead(hostname)
+        try:
+            entries = await self._r.xrange(key, count=count)  # oldest first
+        except Exception:
+            return []
+        return [
+            {
+                "id": entry_id.decode() if isinstance(entry_id, bytes) else entry_id,
+                "fields": self._decode_entry(fields),
+            }
+            for entry_id, fields in entries
+        ]
 
     async def dead_letter_replay(self, hostname: str, ids: list[str] | None = None, count: int = 50) -> int:
         """Re-publish DLQ entries onto the live call stream, then XDEL them.
