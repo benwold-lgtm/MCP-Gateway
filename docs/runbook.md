@@ -373,6 +373,61 @@ never logged.
 not a bug: with no key the archive would be labelled ciphertext and contain plaintext
 credentials. Set a key, or take a portable archive.
 
+### Restore from a backup
+
+**Preview first — that is the default.** `dry_run` is `true` unless you say otherwise, and
+a dry run performs the same fail-closed preflight and the same per-device gates as the real
+thing, so its report is a prediction rather than a parse.
+
+```bash
+# 1. Preview. Reports per device: would_restore | skipped | failed.
+curl -s -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "{\"archive\": $(cat fleet-2026-08-11.json)}" "$GW/v1/admin/restore" | jq '.counts, .devices'
+
+# 2. Apply.
+curl -s -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "{\"archive\": $(cat fleet-2026-08-11.json), \"dry_run\": false, \"on_conflict\": \"skip\"}" \
+  "$GW/v1/admin/restore" | jq '.counts'
+```
+
+A portable archive additionally needs `"passphrase": "..."`. `on_conflict` is
+`skip` (default), `overwrite`, or `fail` — nothing silently overwrites live configuration.
+
+**Reading the outcomes:**
+
+| Outcome | Means |
+|---|---|
+| `restored` / `would_restore` | Replayed through the ordinary registration path |
+| `skipped` | Hostname already exists and `on_conflict=skip` |
+| `failed` | This device did not pass registration — **see `reason`** |
+
+**A `failed` device is usually correct behaviour, not a broken restore.** Restore replays
+each device through the real registration gates, so a device whose `base_url` the *current*
+egress policy forbids is refused — the archive cannot be used to reinstate what a fresh
+registration would reject (F-67). Check `reason`: if the policy tightened deliberately, the
+device should stay out; if not, fix `security.allow_private_targets` /
+`security.allowed_target_ports` and re-run.
+
+**A `409` means nothing was written at all.** The preflight decrypt-tests the whole archive
+— canary first, then every credential — before touching anything, so a wrong key or wrong
+passphrase aborts the entire restore rather than half-applying it across two key
+generations. The message names which:
+
+- *"encrypted under a different `MCP_SECRET_KEY`"* — restore into a stack sharing that key,
+  or use a portable archive.
+- *"needs the passphrase it was exported with"* — portable archive, add `passphrase`.
+
+Restored devices come back **unprovisioned**: registration re-fetches each spec and
+re-spawns each pod, so a device that is unreachable at restore time lands with a
+`spawn_error` and `reachable: false` (F-66) until it can be contacted. That is a device
+problem, not a restore failure.
+
+`include_deadletters: true` restores dead letters onto the **dead-letter stream**, not the
+live call stream — they stay inert until you explicitly replay them through the F-10 path.
+
+Every restore is audited (`backup.restore`), **including dry runs**: previewing is the
+natural reconnaissance step before a real one.
+
 ### Scale workers
 
 Each worker owns a disjoint set of devices (single-owner, D-2); scaling out triggers a

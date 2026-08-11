@@ -25,11 +25,13 @@ from device_mcp_gateway import __version__
 from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, AUDIT_OUTCOME_SUCCESS, audit_request
 from device_mcp_gateway.backup.envelope import ARCHIVE_KINDS, BackupError, KIND_CIPHERTEXT, KIND_PORTABLE
 from device_mcp_gateway.backup.export import build_archive
+from device_mcp_gateway.backup.restore import ON_CONFLICT_SKIP, restore_archive
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
 from device_mcp_gateway.rbac import (
     Principal,
     SCOPE_BACKUP_EXPORT_PORTABLE,
     SCOPE_BACKUP_READ,
+    SCOPE_BACKUP_WRITE,
     require_scope,
 )
 
@@ -156,3 +158,72 @@ async def export_backup_with_body(request: Request):
         passphrase=data.get("passphrase"),
         include_deadletters=bool(data.get("include_deadletters", False)),
     )
+
+
+@router.post(
+    "/admin/restore",
+    dependencies=[
+        Depends(require_scope(SCOPE_BACKUP_WRITE)),
+        Depends(rate_limit("10/minute", "backup_restore")),
+        Depends(rate_limit_principal("20/minute", "backup_restore")),
+    ],
+)
+async def restore_backup(request: Request):
+    """Replay an archive into this stack.
+
+    Body: ``{archive, passphrase?, dry_run?, on_conflict?, include_deadletters?}``.
+
+    ``dry_run`` defaults to **true** — the destructive direction is never the one you get
+    by omission. A dry run runs the same fail-closed preflight and the same per-device
+    gates as a real one, so its report predicts rather than guesses.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="body must be a JSON object containing an 'archive'")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    archive = data.get("archive")
+    if archive is None:
+        raise HTTPException(status_code=400, detail="body must contain 'archive' (the exported document)")
+
+    dry_run = bool(data.get("dry_run", True))
+    on_conflict = data.get("on_conflict") or ON_CONFLICT_SKIP
+
+    try:
+        report = await restore_archive(
+            raw_archive=archive,
+            registry=request.app.state.registry,
+            codec=request.app.state.codec,
+            config=request.app.state.config,
+            passphrase=data.get("passphrase"),
+            dry_run=dry_run,
+            on_conflict=on_conflict,
+            include_deadletters=bool(data.get("include_deadletters", False)),
+        )
+    except BackupError as exc:
+        # Includes every preflight failure — wrong key, wrong passphrase, missing canary.
+        # Audited: a failed restore attempt is as interesting to a responder as one that
+        # worked, and a dry run is the natural reconnaissance step before a real one.
+        audit_request(
+            request,
+            "backup.restore",
+            outcome=AUDIT_OUTCOME_DENIED,
+            target="registry",
+            dry_run=dry_run,
+            reason=type(exc).__name__,
+        )
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    audit_request(
+        request,
+        "backup.restore",
+        outcome=AUDIT_OUTCOME_SUCCESS,
+        target="registry",
+        dry_run=dry_run,
+        kind=report["kind"],
+        on_conflict=on_conflict,
+        **{f"count_{k}": v for k, v in report["counts"].items()},
+    )
+    return report

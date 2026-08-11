@@ -260,6 +260,10 @@ class AbstractRegistryBackend(ABC):
         rather than an error."""
         return []
 
+    async def dead_letter_import(self, hostname: str, entries: list[dict]) -> int:
+        """Restore archived dead letters (ADR-0011). No-op without a DLQ."""
+        return 0
+
 
 # ---------------------------------------------------------------------------
 # In-memory backend (embedded mode)
@@ -638,6 +642,38 @@ class RedisRegistryBackend(AbstractRegistryBackend):
             }
             for entry_id, fields in entries
         ]
+
+    async def dead_letter_import(self, hostname: str, entries: list[dict]) -> int:
+        """Write archived dead letters back onto a device's DLQ (ADR-0011 restore).
+
+        Restored entries are **inert**: they land on the dead-letter stream, not the live
+        call stream, so nothing re-executes until an operator explicitly replays them
+        through the existing F-10 path. Restoring straight onto the call stream would
+        re-run every failed tool call in the archive the moment a worker picked the device
+        up — for an archive taken mid-incident, that is the incident again.
+
+        Original entry ids are used where Redis accepts them (a fresh stack, ids
+        increasing), so a restored queue keeps its ordering and stays correlatable with the
+        incident it came from. Where it will not — the stream already holds a newer id —
+        the entry is appended with a server-assigned id rather than dropped: keeping the
+        call matters more than keeping its timestamp.
+        """
+        key = KEYS.device_calls_dead(hostname)
+        written = 0
+        for entry in entries:
+            fields = entry.get("fields") or {}
+            if not fields:
+                continue
+            try:
+                await self._r.xadd(key, fields, id=entry.get("id") or "*")
+            except Exception:
+                try:
+                    await self._r.xadd(key, fields)
+                except Exception:
+                    logger.warning(f"Failed to restore a dead-letter entry for {hostname}")
+                    continue
+            written += 1
+        return written
 
     async def dead_letter_replay(self, hostname: str, ids: list[str] | None = None, count: int = 50) -> int:
         """Re-publish DLQ entries onto the live call stream, then XDEL them.

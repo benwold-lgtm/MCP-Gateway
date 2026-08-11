@@ -3,15 +3,22 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """Device CRUD + tools/diagnostics routes.
 
-The register/update input helpers (`_parse_auth`, `_check_target_url`, validators)
-were hoisted out of the ``create_app`` closure in the router split: they now take
-``cfg``/``allow_private`` explicitly, with the handlers reading both from
-``request.app.state.config`` per request.
+The register/update input helpers were hoisted out of the ``create_app`` closure in the
+router split: they take ``cfg``/``allow_private`` explicitly, with the handlers reading
+both from ``request.app.state.config`` per request.
+
+The **validators** then moved again, to ``registry/validation.py`` (F-67). They had made
+the egress policy a property of this route rather than of registration itself, which held
+only while this route was registration's sole caller — restore is the second one. They are
+re-exported below under their original names, so this module reads as it did.
+
+``_parse_auth`` stays here: it turns a *request body* into an ``AbstractAuth``, which is an
+HTTP concern. Restore rebuilds its auth from an archived credential blob instead, via
+``_auth_from_config`` — the inverse of what persisted it.
 """
 
 from __future__ import annotations
 
-import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -35,116 +42,25 @@ from device_mcp_gateway.schemas import (
     ToolsDiffResponse,
 )
 from device_mcp_gateway.security.url_policy import (
-    UrlPolicyError,
     resolve_allow_private,
     resolve_allowed_ports,
-    validate_target_url,
+)
+
+# The registration gates live in the registry package, not here, so restore runs exactly
+# the ones this route does (F-67). Re-exported under their original private names because
+# they read as local helpers at every call site below — and because moving them must not
+# be an API change for anything that imports them.
+from device_mcp_gateway.registry.validation import (  # noqa: F401  (re-exported)
+    _check_target_url,
+    _parse_rate_limit,
+    _read_upstream,
+    _validate_hostname,
+    _validate_transport,
+    _validate_upstream,
+    validate_device_registration,
 )
 
 router = APIRouter()
-
-_HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$")
-
-
-def _validate_hostname(hostname: str) -> None:
-    if not hostname or len(hostname) > 253 or not _HOSTNAME_RE.match(hostname):
-        raise HTTPException(
-            status_code=400,
-            detail="hostname must be 1–253 characters, start and end with a letter or digit, "
-            "and contain only letters, digits, hyphens, or dots",
-        )
-
-
-def _validate_transport(transport: str) -> None:
-    if transport != "sse":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Transport '{transport}' is not supported in gateway mode; use 'sse'",
-        )
-
-
-_UPSTREAM_KINDS = ("openapi", "mcp")
-_UPSTREAM_TRANSPORTS = ("http", "sse")
-
-
-def _validate_upstream(kind: str, upstream_transport: str, spec_url: str | None, declared: set[str]) -> None:
-    """Validate the upstream discriminators (ADR-0009).
-
-    ``declared`` is the set of upstream keys the caller actually sent, so a value that was
-    merely defaulted is not held against them — only an explicit ``upstream_transport`` on
-    an OpenAPI device is an error.
-
-    The value space is fixed here even where the implementation is not, so the field never
-    has to widen later. One refusal is therefore "known but not yet built" rather than
-    "invalid", and it says so: a caller has to be able to tell a typo from a feature that
-    has not landed.
-    """
-    if kind not in _UPSTREAM_KINDS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"upstream_kind '{kind}' is not recognised; use one of {', '.join(_UPSTREAM_KINDS)}",
-        )
-    if upstream_transport not in _UPSTREAM_TRANSPORTS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"upstream_transport '{upstream_transport}' is not recognised; "
-                f"use one of {', '.join(_UPSTREAM_TRANSPORTS)}"
-            ),
-        )
-    if kind == "openapi" and "upstream_transport" in declared:
-        raise HTTPException(
-            status_code=400,
-            detail="upstream_transport applies only to upstream_kind 'mcp'; an OpenAPI device is reached over HTTP",
-        )
-    if kind == "mcp" and spec_url:
-        raise HTTPException(
-            status_code=400,
-            detail="spec_url does not apply to upstream_kind 'mcp'; a proxied MCP server has no OpenAPI document",
-        )
-    if kind == "mcp" and upstream_transport == "sse":
-        raise HTTPException(
-            status_code=400,
-            detail="upstream_transport 'sse' is not yet supported; use 'http' (Streamable HTTP)",
-        )
-
-
-def _read_upstream(data: dict, existing_kind: str = "openapi", existing_transport: str = "http") -> tuple[str, str]:
-    """Resolve the upstream discriminators from a request body, preserving stored values.
-
-    A PUT that says nothing about the upstream must not reset it to the default — the same
-    class of bug as the PUT-wipes-credentials regression.
-    """
-    return (
-        data.get("upstream_kind") or existing_kind,
-        data.get("upstream_transport") or existing_transport,
-    )
-
-
-def _parse_rate_limit(data: dict) -> float | None:
-    rps = data.get("rate_limit_rps")
-    if rps is None:
-        return None
-    try:
-        rps = float(rps)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="rate_limit_rps must be a positive number")
-    if rps <= 0:
-        raise HTTPException(status_code=400, detail="rate_limit_rps must be a positive number")
-    return rps
-
-
-def _check_target_url(url: str | None, field: str, allow_private: bool, allowed_ports: set[int] | None = None) -> None:
-    """SSRF policy for device target URLs (Tier-0 F-02). base_url/spec_url are fetched
-    server-side, so reject internal/loopback/link-local targets unless explicitly allowed
-    (security.allow_private_targets, or the MCP_ALLOW_PRIVATE_TARGETS env override), and
-    refuse non-HTTP service ports (security.allowed_target_ports)."""
-    if not url:
-        return
-    try:
-        validate_target_url(url, allow_private=allow_private, allowed_ports=allowed_ports)
-    except UrlPolicyError as exc:
-        raise HTTPException(status_code=400, detail=f"Rejected {field}: {exc}")
 
 
 def _parse_auth(
@@ -231,16 +147,23 @@ async def register_device(request: Request):
     if not hostname or not base_url:
         raise HTTPException(status_code=400, detail="hostname and base_url required")
     # All body validation happens before the existence check, so a malformed or
-    # unsupported request is rejected without a registry round-trip.
-    _validate_hostname(hostname)
-    _check_target_url(base_url, "base_url", allow_private, allowed_ports)
+    # unsupported request is rejected without a registry round-trip. The gates are the
+    # shared ones (F-67) — the same call restore makes, so neither path can drift.
     transport = data.get("transport") or cfg.get("transport", {}).get("default", "sse")
-    _validate_transport(transport)
     spec_url = data.get("spec_url")
-    _check_target_url(spec_url, "spec_url", allow_private, allowed_ports)
-    rate_limit_rps = _parse_rate_limit(data)
     upstream_kind, upstream_transport = _read_upstream(data)
-    _validate_upstream(upstream_kind, upstream_transport, spec_url, declared=set(data.keys()))
+    validate_device_registration(
+        hostname=hostname,
+        base_url=base_url,
+        spec_url=spec_url,
+        transport=transport,
+        upstream_kind=upstream_kind,
+        upstream_transport=upstream_transport,
+        declared=set(data.keys()),
+        allow_private=allow_private,
+        allowed_ports=allowed_ports,
+    )
+    rate_limit_rps = _parse_rate_limit(data)
     auth = _parse_auth(data, cfg, allow_private, allowed_ports)
 
     existing = await reg.get_device(hostname)
