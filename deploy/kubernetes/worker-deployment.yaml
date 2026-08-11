@@ -54,7 +54,7 @@ spec:
           # different bits from the gateway is a split-brain risk: they share the Redis
           # data model, so a version skew across a schema change is exactly what an
           # unpinned :latest used to allow one node at a time to drift into.
-          image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.3.1@sha256:a1aae77e669d57a323166e489dbee0340efdc412ff2c586ebd52c79802e90bc7
+          image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.3.2@sha256:ffeeff11b661268c6b3bf99f2d633197e109b02d329582106081ccfaa48a185e
           # Explicit, and matching the gateway. Previously unset, which with :latest meant
           # Kubernetes defaulted this pod to Always while the gateway used IfNotPresent —
           # the two could pull different builds of the same tag.
