@@ -10,6 +10,27 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **[ADR-0011](docs/adr/0011-backup-and-restore.md) — backup and restore** (Accepted).
+  Ciphertext archives by default; portable, passphrase-encrypted export behind its own
+  `backup:export-portable` scope. Restore replays through `register_device` so the egress
+  policy and spec bounds still apply, defaults to `dry_run=true`, and runs a fail-closed
+  decrypt preflight over the whole archive — made total by a canary token in the envelope, so
+  an archive of only unauthenticated devices can still be verified. Argon2id (`m=64 MiB, t=3,
+  p=4`) with a per-archive salt, parameters stored in the envelope. Written before any code.
+- **[ADR-0012](docs/adr/0012-federation-credential-model.md) — credential model for BFF
+  provider federation** (Proposed). Records that per-user OIDC relay is already shipped, so a
+  per-provider service token would be a regression rather than a new trade-off; makes BFF-side
+  hash-chained audit a prerequisite for federation instead of a parallel workstream.
+
+### Known issues
+
+- **F-66 / FMEA D10** — a device whose pod never spawns is never assigned to a worker, so the
+  health loop never checks it and `reachable` serves its dataclass default (`true`) forever
+  while `spawn_error` records the failure. Found during lab-cluster verification 2026-08-10.
+  For a device that has never come up, trust `spawn_error` and `last_check`, not `reachable`.
+
 ## [0.3.1] - 2026-08-10
 
 Two changes, both verified against a live Kubernetes cluster rather than only in the test
