@@ -6,6 +6,16 @@
 > a shared one. This document explains why, what that means operationally, and the
 > rules you must follow to keep tenants isolated.
 
+> 🔭 **Pending revision — read
+> [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md) alongside this.**
+> Everything below still holds for a tenant stack, which is the only thing this document
+> describes. What it does not yet cover is the **provider plane**: a manager-of-managers
+> console, above the stacks, with its own IdP and its own `provider:*` scopes, for the party
+> operating many tenants. ADR-0013 also makes single-tenant-per-stack **permanent** rather
+> than a deferral, and withdraws the "future `tenant` claim" seam this document inherits
+> from [ADR-0004](adr/0004-single-tenant-per-stack.md). This page is revised in full once
+> ADR-0013 is Accepted — deliberately not twice.
+
 A "tenant" here means a distinct trust/ownership boundary: a customer, a team, or
 any set of devices and credentials that must not be visible or controllable across
 the boundary.

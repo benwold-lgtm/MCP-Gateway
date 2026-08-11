@@ -1,6 +1,6 @@
 # ADR-0004: Single-tenant-per-stack
 
-- **Status:** Accepted
+- **Status:** Accepted — **extended by [ADR-0013](0013-two-plane-tenancy-and-the-provider-plane.md)** (see Amendment)
 - **Date:** 2026-06-11 (Decision D-1 in the findings register)
 - **Related findings:** F-01, F-30, F-32, F-33
 
@@ -35,6 +35,35 @@ enhancement, not an isolation gate).
   [ADR-0006](0006-fail-closed-distributed-defaults.md)).
 - **Follow-ups:** a future `tenant` claim on `Principal` is the seam if in-app tenancy is
   ever needed. Full rationale + deployment model in [multitenancy.md](../multitenancy.md).
+
+## Amendment (2026-08-11) — see [ADR-0013](0013-two-plane-tenancy-and-the-provider-plane.md)
+
+**The decision above is unchanged and is not superseded.** ADR-0013 extends it and settles
+what it left open. Recorded here rather than by editing the record, per the
+[register's rule](README.md) that an Accepted ADR is immutable.
+
+Two things change in how this record should be read:
+
+1. **Single-tenant-per-stack is now permanent, not provisional.** The Context above framed
+   in-app tenancy as "a large, migration-sensitive effort" — i.e. deferred on cost. ADR-0013
+   rejects it *on merit*: a tenant discriminator retrofitted through the registry, RBAC and
+   worker credential model would make every place one was forgotten a silent cross-tenant
+   leak, while the deployment boundary already gives a stronger guarantee. F-01/F-32/F-33
+   remain accepted, now on a stronger rationale than "not yet".
+
+2. **The "future `tenant` claim on `Principal`" follow-up is withdrawn.** That seam is not
+   the direction. Where a cross-tenant view is genuinely needed — a provider operating many
+   tenant stacks — ADR-0013 puts it in a **separate plane above the stacks** (a BFF with its
+   own IdP, its own `provider:*` scopes, and per-session immutable plane binding), never in
+   a tenant dimension inside one.
+
+One clause below is also refined by ADR-0013 §6. This record says identity "is **not**
+propagated as an isolation control to workers/upstreams… within a single-tenant trust
+boundary that is acceptable". Still true within a tenant. But a tenant gateway will now
+additionally trust the **provider's** IdP as a second issuer, so that provider actions land
+in the tenant's own hash-chained audit as named humans rather than as a shared admin key.
+That grants no access the provider did not already have as the operator of the stack; it
+makes existing access attributable.
 
 ## Alternatives considered
 
