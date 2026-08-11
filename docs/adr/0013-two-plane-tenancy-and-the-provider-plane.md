@@ -87,13 +87,58 @@ concept would leak a cross-tenant notion into the one component whose job is not
 that other tenants exist — and would compromise the property that a tenant stack is
 independently liftable, restorable ([ADR-0011](0011-backup-and-restore.md)) and migratable.
 
-**Provider scopes are BFF scopes.** They separate the two blast radii rather than granting
-one lump:
+**Provider scopes are BFF scopes.** They separate blast radii rather than granting one lump:
 
-| Scope | Grants |
-|---|---|
-| `provider:monitor` | Aggregate health and metrics across the estate. Read-only, no tenant data-plane access |
-| `provider:admin` | Administrative action within a named tenant, via the act-on-tenant flow above |
+| Scope | Grants | Notably does **not** grant |
+|---|---|---|
+| `provider:monitor` | Aggregate health and metrics across the estate. Read-only, no tenant data-plane access | Any tenant API access at all |
+| `provider:admin` | The everyday debugging grant within a named tenant: device read, configuration, governance and tool-change history, lease/claim management | `tools:call`; any credential-bearing read |
+| `provider:invoke` | **Elevated.** Invoke a tool against a named tenant's live device | — |
+| `provider:credentials` | **Elevated.** Credential-bearing access to a named tenant — in practice `backup:read` / `backup:export-portable` | — |
+
+### 5a. `provider:admin` does not map to gateway `admin`
+
+Mapping it onto the tenant gateway's full `admin` role would break §4 at the one point
+where it matters most. **Tool invocation is the most consequential thing the gateway does** —
+it is why the F-25 header denylist exists, why passthrough permanently excludes
+`x-mcp-header` ([ADR-0010](0010-tool-derived-request-headers.md)), and why the egress policy
+is guarded on every hop. A support engineer debugging a tenant's device configuration has an
+everyday need for reads, config, and governance history; they very rarely need to actuate
+the customer's physical hardware to do that job. Bundling the rare case into the common role
+means every routine debugging session silently carries standing authority to actuate real
+equipment.
+
+So the two **elevated** grants above are separate, each **time-boxed, individually
+justified, and emitting its own audit event** — distinct from the act-on-tenant record that
+opened the session's access to that tenant at all. This is not a new principle. It is §4's
+"named audited act, never ambient" applied one level down, to scope design rather than plane
+design; being inconsistent about it here is what would make the rest of this ADR's reasoning
+decorative.
+
+### 5b. Credential visibility is the same question as tool invocation
+
+`provider:credentials` exists because the naive answer — "the device API never returns
+credentials, so there is nothing to carve out" — is true and irrelevant. `auth_config` is
+indeed never projected into any response model. The exposure is
+[ADR-0011](0011-backup-and-restore.md) backup export, and for the **provider** it is worse
+than it looks for a tenant:
+
+> A ciphertext archive protects against someone who holds the archive but not the key. The
+> provider holds the key — `MCP_SECRET_KEY` lives in a Kubernetes secret they operate. So
+> **for the provider plane, `backup:read` and `backup:export-portable` are equally a
+> credential dump**, and the ciphertext/portable distinction that carries ADR-0011's safety
+> argument for tenants carries none of it here.
+
+Therefore no `backup:*` scope sits inside `provider:admin` at any level.
+
+**An honest limit on this carve-out.** `provider:admin` includes device configuration, and
+`devices:write` is transitively a credential-disclosure path on any stack: repoint a
+device's `base_url` at a host you control and the pod authenticates to it. That is a
+property of `devices:write` generally — a tenant's own admin can do it too — not something
+this split introduces. It does mean the carve-out **raises the bar and creates a signal
+rather than erecting a barrier**: the control that actually bites is the audit record, where
+a `base_url` change to an unfamiliar host is a detectable event. Stated here so the
+separation is not mistaken for a cryptographic guarantee.
 
 ### 6. A tenant gateway trusts the provider IdP as a second issuer
 
@@ -116,6 +161,26 @@ tenant cannot meaningfully hide from them, and designing as though they could pr
 the provider IdP as a second issuer does not create access that did not exist; it makes
 existing access attributable in the tenant's own audit chain.
 
+#### 6a. The issuer must gate scope eligibility **server-side**
+
+§3's plane-fixing happens in the BFF at login. That is a session-flow guarantee, **not an
+enforcement boundary**: once a provider-plane token is minted it can be replayed straight at
+a tenant gateway's API with the BFF nowhere in the path. So the gateway must independently
+bind **issuer identity → eligible scope set**, and refuse a provider-issuer token presented
+for tenant-scoped endpoints exactly as it refuses the converse. Login-time plane-fixing
+guides the UI; the gateway is what enforces it.
+
+This has a concrete implementation consequence. `gateway.oidc.group_roles` is a **single
+flat `dict[str, str]` today**, consulted for whichever token arrives. Kept flat across two
+issuers it is a confused-deputy and a direct privilege-escalation primitive:
+
+> A tenant's own IdP administrator creates a group named whatever the provider mapping keys
+> on, puts themselves in it, and is handed provider-level scopes by their own gateway.
+
+`group_roles` therefore becomes **per-issuer**, with no shared or fallback mapping — an
+unmapped (issuer, group) pair grants nothing. The elevated scopes of §5 must additionally be
+unreachable from *any* tenant-issuer group, whatever it is called.
+
 ### 7. Mass monitoring does not use the tenant API plane
 
 Cross-tenant fleet health is aggregated from the **existing Prometheus metrics plane**,
@@ -134,7 +199,15 @@ the tenant API, and only through a named, audited act.
 - **Negative / cost:**
   - A gateway change: `issuer`/`audience` become lists, with the multi-issuer JWKS handling
     and startup validation that implies. Fail-closed behaviour (ADR-0006) must be preserved
-    per issuer.
+    per issuer, and `group_roles` becomes per-issuer with no shared fallback (§6a).
+  - **⚠️ One provider issuer is trusted by every tenant gateway simultaneously, so a
+    compromised provider-plane account has a blast radius spanning the whole estate at
+    once.** The accountable-identity trade-off in §6 is still the right one — the
+    alternative is the same reach with no attribution — but it concentrates risk in the
+    provider IdP and raises the bar on protecting *provider-plane* sessions specifically:
+    shorter token lifetimes than the tenant plane, MFA, tighter concurrent-session limits.
+    Flagged rather than solved; it is a provider-plane hardening question, not a tenancy-model
+    one, and does not belong in this ADR's decision.
   - The BFF becomes a security-relevant component in a way it is not today. Its own audit
     (ADR-0012's prerequisite) is now non-negotiable and must record **which tenant** an
     action touched, not only who acted.
@@ -168,6 +241,12 @@ the tenant API, and only through a named, audited act.
 - **A `provider` role inside the gateway's existing RBAC:** rejected. It puts a
   cross-tenant concept inside the per-tenant isolation unit and breaks the property that a
   tenant stack is self-contained.
+- **`provider:admin` as an alias for the gateway's `admin` role:** rejected — §5a. Simplest
+  to implement and the one that would have quietly undone §4, since `admin` carries
+  `tools:call` and `backup:*`.
+- **Relying on the BFF's login-time plane-fixing as the enforcement point:** rejected —
+  §6a. It is a property of one code path, and a minted token does not have to travel that
+  path.
 - **Provider holds a per-tenant admin API key:** rejected — see §6. No gateway change, but
   no attribution either.
 - **Ambient cross-tenant authority on a provider session:** rejected. One compromised
@@ -178,13 +257,18 @@ the tenant API, and only through a named, audited act.
 
 Left open deliberately; this ADR is **Proposed** until they are settled.
 
-1. **Does `provider:admin` map to gateway `admin`, or to something narrower?** A provider
-   operator debugging a tenant may not need `tools:call` on that tenant's devices, and tool
-   invocation is the most sensitive thing the gateway does.
-2. **What is the time box on an act-on-tenant grant**, and does it re-authenticate (step-up)
-   or merely re-authorize?
-3. **Does a tenant see provider actions in their own audit view?** Recording them is
+1. **What is the time box** on an act-on-tenant grant and on each elevated grant (§5), and
+   do they re-authenticate (step-up) or merely re-authorize?
+2. **Does a tenant see provider actions in their own audit view?** Recording them is
    settled; surfacing them is a product decision with a real argument on both sides.
-4. **Tenant offboarding.** Deleting a stack is easy; what the provider plane retains
+3. **Tenant offboarding.** Deleting a stack is easy; what the provider plane retains
    afterwards — audit chain, backups ([ADR-0011](0011-backup-and-restore.md)), the tenant
    map entry — is not, and is partly a legal question.
+
+**Settled since first draft** (recorded so the reasoning is not re-litigated):
+
+- *"Does `provider:admin` map to gateway `admin`?"* — **No.** See §5a. It is a genuinely
+  narrower composite, and `tools:call` is carved out into its own elevated grant.
+- *"Does `provider:admin` ever see decrypted device credentials?"* — **No.** See §5b, and
+  note that for the provider a *ciphertext* archive is a credential dump too, because they
+  hold the key.
