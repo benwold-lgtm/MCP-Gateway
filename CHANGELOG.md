@@ -12,6 +12,25 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Added
 
+- **[ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) — two-plane
+  tenancy** (Proposed). Settles what [ADR-0004](docs/adr/0004-single-tenant-per-stack.md)
+  left open. Tenant stacks stay isolated and each keeps **its own IdP**; a tenant session is
+  bound to one tenant at login and cannot learn that another exists (404 rather than 403,
+  per-tenant hostnames so tenant selection is never an enumeration surface). Above them sits
+  a separate **provider plane** — a manager-of-managers console for the party operating the
+  platform, with its own IdP and its own `provider:monitor` / `provider:admin` scopes held
+  in the BFF, not in any tenant's gateway. The plane is fixed at login from *which IdP
+  authenticated* and is immutable for the session, and cross-tenant power is exercised as a
+  discrete audited act on a named tenant rather than held ambiently.
+
+  Two consequences to plan for: a tenant gateway will trust the **provider IdP as a second
+  issuer** (`gateway.oidc.issuer`/`audience` become lists) so provider actions land in the
+  tenant's own hash-chained audit as named humans instead of a shared admin key; and
+  cross-tenant *monitoring* is aggregated from the existing Prometheus metrics plane, so the
+  constant-use path holds no tenant API credentials at all. No code has changed yet —
+  ADR-0013 is Proposed, with four open questions named in it. `docs/multitenancy.md` carries
+  a pointer and is revised in full once it is Accepted.
+
 - **Backup export ([ADR-0011](docs/adr/0011-backup-and-restore.md))** — `GET /v1/admin/backup`
   returns a **ciphertext** archive of the device registry and its tool-change governance
   record, with credentials encrypted under this stack's `MCP_SECRET_KEY`. `POST` to the same
