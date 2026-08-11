@@ -159,13 +159,26 @@ rather than quietly downgraded — the archive would otherwise carry the safe la
 dangerous contents.
 
 **2. §4's guarantee did not hold as written.** "Restore replays through `register_device`,
-so the egress policy still applies" — it does not. `validate_target_url` is called by the
-*route handler* in `api/devices.py`, and `registry/server.py` never calls it. Nothing
-exploits this today because the handler is registration's only caller, but a restore built
-on that sentence would have been precisely the `backup:write` privilege-escalation
-primitive §4 exists to deny. Filed as **F-67** and closed by the restore PR, which hoists
-the handler's validation into one entry point both callers share. The decision stands; the
-code had to be made to match it.
+so the egress policy still applies" — it did not. `validate_target_url` was called by the
+*route handler* in `api/devices.py`, and `registry/server.py` never called it. Nothing
+exploited this while the handler was registration's only caller, but a restore built on
+that sentence would have been precisely the `backup:write` privilege-escalation primitive
+§4 exists to deny. Filed as **F-67** and closed with the restore build: the gates moved to
+`registry/validation.py` behind one `validate_device_registration(...)` that both callers
+use. The decision stands; the code had to be made to match it.
+
+Two consequences of §4 worth stating plainly, both visible once restore existed:
+
+- A restored device comes back **unprovisioned**. Registration re-fetches the spec and
+  re-spawns the pod, so a device unreachable at restore time lands with a `spawn_error` and
+  `reachable: false` (F-66) until it can be contacted. Restoring into a genuinely cold site
+  therefore reports success on devices that are not yet serving, which is honest but worth
+  saying in the runbook.
+- `tools_revision` and the last tool-change record cannot travel *through* `register_device`
+  — it starts a device at revision 0. They are written immediately after the replay, which
+  is sound because they are governance metadata *about* a registration rather than inputs
+  *to* one: the egress policy has nothing to say about them, so nothing is bypassed. Without
+  it a restored device reads to a polling client (F-41) as having rolled its tool set back.
 
 **3. "Argon2id makes export and restore visibly slow" is overstated.** At `m=64 MiB, t=3,
 p=4` a derivation measures ~0.12s, and it is performed **once per archive** — the whole

@@ -31,8 +31,43 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   configured**, because the alternative is an archive labelled ciphertext that contains
   plaintext credentials. And in **embedded mode** credentials are stored as plaintext in the
   device record (encryption happens in the SQLite layer), so export encrypts them on the way
-  out — the archive's security property is the same whichever mode produced it. Restore
-  lands next.
+  out — the archive's security property is the same whichever mode produced it.
+
+- **Backup restore ([ADR-0011](docs/adr/0011-backup-and-restore.md))** — `POST
+  /v1/admin/restore` (`backup:write`) replays an archive into the stack. **`dry_run`
+  defaults to `true`**: the destructive direction is never the one you get by omission, and
+  a dry run runs the same preflight and the same per-device gates as a real run, so its
+  report is a prediction rather than a parse. `on_conflict` is `skip` (default),
+  `overwrite`, or `fail` — nothing silently overwrites live configuration.
+
+  **Nothing is written until the whole archive has been decrypt-tested.** The preflight
+  opens the envelope canary and then every credential; any failure aborts everything with a
+  `409`, rather than leaving the registry half-applied across two key generations. The
+  message names the likely cause — wrong `MCP_SECRET_KEY` for a ciphertext archive, wrong
+  passphrase for a portable one.
+
+  Each device is replayed through the **ordinary registration path, gates included**, so a
+  device whose `base_url` the *current* egress policy forbids is refused. That is correct
+  behaviour and is reported per device (`failed` with a `reason`) while its neighbours
+  restore — a restore is not a way to reinstate what a fresh registration would reject.
+  `tools_revision` and the last tool-change record are carried across, so a restored device
+  does not read to a polling client as having rolled its tool set back. Restored dead
+  letters (`include_deadletters`) land on the dead-letter stream, **not** the live call
+  stream: they stay inert until explicitly replayed. Every restore is audited, dry runs
+  included.
+
+### Fixed
+
+- **F-67 — the egress policy is now enforced by registration, not by one route.** The URL
+  policy (F-02), hostname rules and upstream-discriminator checks lived in the
+  `POST /v1/devices` handler, so they were a property of *the HTTP path to registration*
+  rather than of registration itself — `Registry.register_device` never called
+  `validate_target_url`. Nothing exploited it while that handler was the only caller, but it
+  made [ADR-0011](docs/adr/0011-backup-and-restore.md) §4's guarantee ("restore replays
+  through `register_device`, so the egress policy still applies") untrue of the code, and a
+  restore built on it would have been a `backup:write` privilege-escalation primitive. The
+  gates now live in `registry/validation.py` behind one `validate_device_registration(...)`
+  that both callers use. No behaviour change for existing API clients.
 
 - **[ADR-0011](docs/adr/0011-backup-and-restore.md) — backup and restore** (Accepted).
   Ciphertext archives by default; portable, passphrase-encrypted export behind its own

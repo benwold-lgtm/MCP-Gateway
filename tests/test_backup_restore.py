@@ -1,0 +1,428 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (c) 2026 Ben Wold. All rights reserved.
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
+"""Backup restore — ADR-0011 PR 2.
+
+Three properties carry the design, and each is tested by the thing it would let through:
+
+**Fail-closed means nothing was written, not "it raised".** A wrong-key restore that threw
+an exception *after* applying half the archive would satisfy a naive test and leave a
+registry split across two key generations, with no record of where the boundary fell. So
+the tests assert the registry is untouched, not merely that an error came back.
+
+**The canary is what makes the preflight total.** An archive whose devices all use
+``auth_type: none`` has no credential ciphertext to test, so without it a wrong-key restore
+would pass preflight and fail at the far end.
+
+**Restore must not be a way to register what registration would refuse.** ADR-0011 §4 said
+the egress policy still applies because restore replays through ``register_device`` — which
+was not true of the code (F-67: the policy lived in the route handler). The test for that
+restores an archive containing a device whose ``base_url`` the current policy forbids and
+requires that it fails *while its neighbours succeed* — per-device, not per-batch.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
+
+from device_mcp_gateway.backup.export import build_archive
+from device_mcp_gateway.backup.restore import (
+    ON_CONFLICT_FAIL,
+    ON_CONFLICT_OVERWRITE,
+    OUTCOME_FAILED,
+    OUTCOME_RESTORED,
+    OUTCOME_SKIPPED,
+    OUTCOME_WOULD_RESTORE,
+    RestorePreflightError,
+    restore_archive,
+)
+from device_mcp_gateway.shared.crypto import CredentialCodec
+
+ADMIN_KEY = "a" * 40
+DEVICE_SECRET = "SUPER-SECRET-DEVICE-KEY-9f3a2b"
+CHEAP_KDF = {"argon2_memory_cost_kib": 8, "argon2_iterations": 1, "argon2_lanes": 1, "passphrase_min_length": 16}
+
+
+def _client(monkeypatch, *, secret_key: str, allow_private: bool = True):
+    monkeypatch.setenv("MCP_ADMIN_KEY", ADMIN_KEY)
+    monkeypatch.setenv("MCP_SECRET_KEY", secret_key)
+    monkeypatch.setenv("MCP_ALLOW_PRIVATE_TARGETS", "true" if allow_private else "false")
+    from device_mcp_gateway.main import create_app
+
+    return TestClient(create_app())
+
+
+def _auth():
+    return {"Authorization": f"Bearer {ADMIN_KEY}"}
+
+
+def _register(client, hostname, *, base_url="http://127.0.0.1:9", secret=None):
+    body = {"hostname": hostname, "base_url": base_url}
+    if secret:
+        body.update({"auth_type": "api_key", "auth": {"api_key": secret}})
+    resp = client.post("/v1/devices", headers=_auth(), json=body)
+    assert resp.status_code in (200, 201), resp.text
+    return resp
+
+
+def _restore(client, archive, **over):
+    body = {"archive": archive}
+    body.update(over)
+    return client.post("/v1/admin/restore", headers=_auth(), json=body)
+
+
+def _hostnames(client):
+    return {d["hostname"] for d in client.get("/v1/devices", headers=_auth()).json()["devices"]}
+
+
+# --- The round trip ---------------------------------------------------------
+
+
+def test_export_wipe_restore_returns_the_fleet_and_its_credentials(monkeypatch):
+    """The whole point of the feature, end to end, including the credential.
+
+    A restore that reinstates hostnames but loses credentials is the failure that looks
+    like success until the first tool call — so this decrypts the restored blob and
+    compares plaintext, rather than checking the device exists.
+    """
+    key = Fernet.generate_key().decode()
+    client = _client(monkeypatch, secret_key=key)
+    _register(client, "alpha", secret=DEVICE_SECRET)
+    _register(client, "beta")
+
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+    assert archive["counts"]["devices"] == 2
+
+    for host in ("alpha", "beta"):
+        assert client.delete(f"/v1/devices/{host}", headers=_auth()).status_code in (200, 204)
+    assert _hostnames(client) == set()
+
+    report = _restore(client, archive, dry_run=False)
+    assert report.status_code == 200, report.text
+    assert report.json()["counts"] == {OUTCOME_RESTORED: 2}
+    assert _hostnames(client) == {"alpha", "beta"}
+
+    restored = client.app.state.registry.get_profile("alpha").config
+    codec = CredentialCodec.from_secret(key)
+    stored = restored.auth_config
+    # Embedded mode stores plaintext; either way it must decrypt/parse to the original.
+    try:
+        recovered = json.loads(codec.decrypt(stored))
+    except Exception:
+        recovered = json.loads(stored)
+    assert recovered["api_key"] == DEVICE_SECRET, "the credential did not survive the round trip"
+
+
+def test_a_dry_run_predicts_the_real_run_and_writes_nothing(monkeypatch):
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    _register(client, "alpha")
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+    client.delete("/v1/devices/alpha", headers=_auth())
+
+    dry = _restore(client, archive).json()  # dry_run defaults to true
+    assert dry["dry_run"] is True
+    assert dry["counts"] == {OUTCOME_WOULD_RESTORE: 1}
+    assert _hostnames(client) == set(), "a dry run must not write"
+
+    wet = _restore(client, archive, dry_run=False).json()
+    assert wet["counts"] == {OUTCOME_RESTORED: 1}
+    assert [d["hostname"] for d in dry["devices"]] == [d["hostname"] for d in wet["devices"]]
+
+
+def test_dry_run_is_the_default_when_the_body_omits_it(monkeypatch):
+    """The destructive direction is never the one you get by omission."""
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    _register(client, "alpha")
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+    client.delete("/v1/devices/alpha", headers=_auth())
+
+    resp = client.post("/v1/admin/restore", headers=_auth(), json={"archive": archive})
+    assert resp.json()["dry_run"] is True
+    assert _hostnames(client) == set()
+
+
+# --- Fail-closed ------------------------------------------------------------
+
+
+def test_a_wrong_key_restore_writes_absolutely_nothing(monkeypatch):
+    """Not "it raised" — *nothing was applied*.
+
+    A preflight that ran per device would abort partway and leave the registry split
+    between two key generations, which is the outcome the whole fail-closed design exists
+    to prevent.
+    """
+    exporter = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    _register(exporter, "alpha", secret=DEVICE_SECRET)
+    _register(exporter, "beta", secret=DEVICE_SECRET)
+    _register(exporter, "gamma", secret=DEVICE_SECRET)
+    archive = exporter.get("/v1/admin/backup", headers=_auth()).json()
+
+    # A different stack, different key.
+    target = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    assert _hostnames(target) == set()
+
+    resp = _restore(target, archive, dry_run=False)
+    assert resp.status_code == 409
+    assert "MCP_SECRET_KEY" in resp.json()["detail"]
+    assert _hostnames(target) == set(), "a failed preflight must leave the registry untouched"
+
+
+def test_the_canary_catches_a_wrong_key_when_no_device_has_a_credential(monkeypatch):
+    """The archive with nothing to decrypt — the case a credential-only preflight misses."""
+    exporter = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    _register(exporter, "alpha")  # auth_type none: no ciphertext anywhere
+    _register(exporter, "beta")
+    archive = exporter.get("/v1/admin/backup", headers=_auth()).json()
+    assert all(d["auth_config"] is None for d in archive["devices"]), "premise: nothing else can be tested"
+
+    target = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    resp = _restore(target, archive, dry_run=False)
+    assert resp.status_code == 409
+    assert _hostnames(target) == set()
+
+
+@pytest.mark.asyncio
+async def test_preflight_opens_every_credential_not_just_the_first():
+    """One unreadable credential anywhere aborts the whole archive."""
+
+    class _Reg:
+        _backend = None
+
+        async def list_devices(self):
+            return []
+
+    codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
+    other = CredentialCodec.from_secret(Fernet.generate_key().decode())
+    archive = await build_archive(
+        registry=_Reg(),
+        codec=codec,
+        config={"backup": CHEAP_KDF},
+        gateway_version="test",
+        mode="embedded",
+    )
+    archive["devices"] = [
+        {"hostname": "good", "base_url": "http://good.example.com", "auth_config": codec.encrypt("{}")},
+        {"hostname": "bad", "base_url": "http://bad.example.com", "auth_config": other.encrypt("{}")},
+    ]
+
+    with pytest.raises(RestorePreflightError) as exc:
+        await restore_archive(
+            raw_archive=archive,
+            registry=_Reg(),
+            codec=codec,
+            config={},
+            dry_run=False,
+        )
+    assert "bad" in str(exc.value), "the failing device should be named"
+    assert "aborted" in str(exc.value)
+
+
+# --- The F-67 property: restore is not a policy bypass ----------------------
+
+
+def test_a_device_the_egress_policy_now_forbids_fails_while_its_neighbours_restore(monkeypatch):
+    """ADR-0011 §4, made real by F-67.
+
+    The archive is taken on a stack that allows private targets and restored into one that
+    does not — the ordinary "policy tightened since the backup" case, and the one a
+    `backup:write` holder would otherwise use to reinstate a forbidden target. The
+    forbidden device must fail *and the others must still land*: per-device, as the ADR
+    says, not a failed batch and not a silent success.
+    """
+    key = Fernet.generate_key().decode()
+    permissive = _client(monkeypatch, secret_key=key, allow_private=True)
+    _register(permissive, "private-one", base_url="http://127.0.0.1:9")
+    _register(permissive, "public-one", base_url="http://example.com")
+    archive = permissive.get("/v1/admin/backup", headers=_auth()).json()
+
+    strict = _client(monkeypatch, secret_key=key, allow_private=False)
+    report = _restore(strict, archive, dry_run=False).json()
+
+    outcomes = {d["hostname"]: d["outcome"] for d in report["devices"]}
+    assert outcomes["private-one"] == OUTCOME_FAILED, "restore must not reinstate a now-forbidden target"
+    reason = next(d["reason"] for d in report["devices"] if d["hostname"] == "private-one")
+    assert "base_url" in reason
+    assert outcomes["public-one"] == OUTCOME_RESTORED, "one refused device must not fail the batch"
+    assert _hostnames(strict) == {"public-one"}
+
+
+def test_the_dry_run_reports_the_policy_refusal_too(monkeypatch):
+    """So an operator learns before the real run, which is the point of previewing."""
+    key = Fernet.generate_key().decode()
+    permissive = _client(monkeypatch, secret_key=key, allow_private=True)
+    _register(permissive, "private-one", base_url="http://127.0.0.1:9")
+    archive = permissive.get("/v1/admin/backup", headers=_auth()).json()
+
+    strict = _client(monkeypatch, secret_key=key, allow_private=False)
+    report = _restore(strict, archive).json()
+    assert report["devices"][0]["outcome"] == OUTCOME_FAILED
+
+
+# --- Conflicts --------------------------------------------------------------
+
+
+def test_on_conflict_modes(monkeypatch):
+    key = Fernet.generate_key().decode()
+    client = _client(monkeypatch, secret_key=key)
+    _register(client, "alpha", base_url="http://original.example.com")
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+
+    # The live device now differs from the archived one.
+    client.put(
+        "/v1/devices/alpha",
+        headers=_auth(),
+        json={"hostname": "alpha", "base_url": "http://changed.example.com"},
+    )
+
+    skipped = _restore(client, archive, dry_run=False).json()  # skip is the default
+    assert skipped["counts"] == {OUTCOME_SKIPPED: 1}
+    live = client.get("/v1/devices/alpha", headers=_auth()).json()
+    assert live["base_url"] == "http://changed.example.com", "skip must not touch live configuration"
+
+    failed = _restore(client, archive, dry_run=False, on_conflict=ON_CONFLICT_FAIL).json()
+    assert failed["counts"] == {OUTCOME_FAILED: 1}
+
+    overwritten = _restore(client, archive, dry_run=False, on_conflict=ON_CONFLICT_OVERWRITE).json()
+    assert overwritten["counts"] == {OUTCOME_RESTORED: 1}
+    live = client.get("/v1/devices/alpha", headers=_auth()).json()
+    assert live["base_url"] == "http://original.example.com"
+
+
+def test_an_unknown_on_conflict_is_refused_rather_than_defaulted(monkeypatch):
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+    resp = _restore(client, archive, dry_run=False, on_conflict="clobber")
+    assert resp.status_code == 409
+    assert "on_conflict" in resp.json()["detail"]
+
+
+# --- Governance continuity --------------------------------------------------
+
+
+def test_the_tools_revision_survives_so_clients_do_not_read_a_rollback(monkeypatch):
+    """``register_device`` starts a device at revision 0. For a *restored* device that is
+    wrong: a client polling ``tools_revision`` (F-41) would read the reset as the tool set
+    having rolled back."""
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    _register(client, "alpha")
+    client.app.state.registry.get_profile("alpha").config.tools_revision = 5
+
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+    assert archive["devices"][0]["tools_revision"] == 5
+    client.delete("/v1/devices/alpha", headers=_auth())
+
+    _restore(client, archive, dry_run=False)
+    assert client.app.state.registry.get_profile("alpha").config.tools_revision == 5
+
+
+# --- Portable archives ------------------------------------------------------
+
+
+def test_a_portable_archive_restores_into_a_stack_with_a_different_key(monkeypatch):
+    """The migration path: the target's MCP_SECRET_KEY is unrelated to the exporter's."""
+    passphrase = "correct horse battery staple"
+    exporter = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    _register(exporter, "alpha", secret=DEVICE_SECRET)
+    archive = exporter.post(
+        "/v1/admin/backup", headers=_auth(), json={"kind": "portable", "passphrase": passphrase}
+    ).json()
+
+    target = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    report = _restore(target, archive, dry_run=False, passphrase=passphrase).json()
+    assert report["counts"] == {OUTCOME_RESTORED: 1}
+
+    stored = target.app.state.registry.get_profile("alpha").config.auth_config
+    codec = CredentialCodec.from_secret(None)
+    try:
+        recovered = json.loads(codec.decrypt(stored))
+    except Exception:
+        recovered = json.loads(stored)
+    assert recovered["api_key"] == DEVICE_SECRET
+
+
+def test_a_portable_archive_without_the_passphrase_is_refused(monkeypatch):
+    exporter = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    _register(exporter, "alpha")
+    archive = exporter.post(
+        "/v1/admin/backup", headers=_auth(), json={"kind": "portable", "passphrase": "z" * 20}
+    ).json()
+
+    target = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    no_pass = _restore(target, archive, dry_run=False)
+    assert no_pass.status_code == 409
+    assert "passphrase" in no_pass.json()["detail"]
+
+    wrong = _restore(target, archive, dry_run=False, passphrase="q" * 20)
+    assert wrong.status_code == 409
+    assert "passphrase" in wrong.json()["detail"]
+    assert _hostnames(target) == set()
+
+
+# --- Authorization ----------------------------------------------------------
+
+
+def test_restore_requires_backup_write_and_read_alone_is_not_enough(monkeypatch):
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+
+    from device_mcp_gateway.rbac import Principal, SCOPE_BACKUP_READ
+
+    reader = Principal(subject="key:ro", scopes=frozenset({SCOPE_BACKUP_READ}), auth_method="api_key")
+    client.app.state.authenticator._keys["r" * 40] = reader
+    resp = client.post("/v1/admin/restore", headers={"Authorization": f"Bearer {'r' * 40}"}, json={"archive": archive})
+    assert resp.status_code == 403
+
+
+def test_a_body_without_an_archive_is_a_400_not_a_500(monkeypatch):
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    assert client.post("/v1/admin/restore", headers=_auth(), json={}).status_code == 400
+    assert client.post("/v1/admin/restore", headers=_auth(), json={"archive": "nonsense"}).status_code == 409
+
+
+# --- Dead letters -----------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_restored_dead_letters_are_inert_until_replayed(real_redis):
+    """They land on the dead-letter stream, never the live call stream.
+
+    Restoring onto the call stream would re-execute every failed tool call in the archive
+    the moment a worker picked the device up — for an archive taken mid-incident, that is
+    the incident again.
+    """
+    from device_mcp_gateway.shared.keys import KEYS
+    from device_mcp_gateway.shared.registry_backend import RedisRegistryBackend
+
+    backend = RedisRegistryBackend(real_redis)
+    call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "reboot"}})
+    entries = [{"id": "1526919030474-0", "fields": {"request_id": "r1", "message": call, "reason": "timeout"}}]
+
+    written = await backend.dead_letter_import("dev", entries)
+    assert written == 1
+
+    assert await real_redis.exists(KEYS.device_calls("dev")) == 0, "nothing may reach the live call stream"
+    round_tripped = await backend.dead_letter_export("dev")
+    assert round_tripped[0]["fields"]["message"] == call
+    assert round_tripped[0]["id"] == "1526919030474-0", "original ids preserve incident correlation"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_dead_letter_import_keeps_the_call_when_an_id_cannot_be_reused(real_redis):
+    """A colliding/older id must not cost us the call — the payload matters more than the
+    timestamp, so the entry is appended rather than dropped."""
+    from device_mcp_gateway.shared.registry_backend import RedisRegistryBackend
+
+    backend = RedisRegistryBackend(real_redis)
+    await backend.dead_letter_import("dev", [{"id": "9999999999999-0", "fields": {"message": "newest"}}])
+    # An archived entry older than what the stream already holds: Redis refuses the id.
+    written = await backend.dead_letter_import("dev", [{"id": "1-0", "fields": {"message": "older"}}])
+
+    assert written == 1
+    messages = [e["fields"]["message"] for e in await backend.dead_letter_export("dev")]
+    assert "older" in messages, "the call must survive even when its id cannot"
