@@ -14,10 +14,12 @@ appears once, with all sources named. The per-review working notes are not kept:
 survived them is this table, the [ADRs](adr/), and the entries in
 [CHANGELOG.md](../CHANGELOG.md).
 
-**This is a closed record.** Everything below is resolved, accepted, or explicitly
-deferred; nothing here is a live work queue. New work is tracked in the changelog and in
-[testing-gaps.md](testing-gaps.md). Add a row only when a new review assigns a new `F-nn`,
-and never renumber — the IDs are cited from a dozen other files.
+**This is a record, not a work queue.** Nearly everything below is resolved, accepted, or
+explicitly deferred, and active work is tracked in the changelog and in
+[testing-gaps.md](testing-gaps.md). Two rows are still 🆕 open — F-63 (chaos harness) and
+F-66 (`reachable` default) — and they stay here because other documents cite them by ID.
+Add a row when a review or a verification run produces a finding that another document
+needs to reference, and never renumber — the IDs are cited from a dozen other files.
 
 Status: 🆕 open · 👀 triaged · 🛠️ in progress · ✅ done · 🔵 accepted (won't fix) · ⏸️ deferred
 
@@ -88,3 +90,4 @@ Status: 🆕 open · 👀 triaged · 🛠️ in progress · ✅ done · 🔵 acc
 | F-63 | 🟠 | **No chaos harness / fault-injection / game-day** — resilience designed but not demonstrated (extends F-22) | Chaos C-3 | 🆕 open |
 | F-64 | 🟡 | **False-positive bind-all warning** — F-53 "binding 0.0.0.0 (all interfaces)" warning reads `server.host` from config, ignoring the CLI `--host` override ⇒ cries wolf on a *security* warning when `--host 127.0.0.1` is passed | First-run smoke (2026-06-15) | ✅ done 2026-06-15 (Tier 1, Z5) — new `cfg.resolve_bind_host()` honors `MCP_BIND_HOST`; CLI exports the resolved host before importing the app so `warn_unsafe_settings` sees the effective bind. Real bind-all+no-auth still warns. Regression tests both directions |
 | F-65 | 🟡 | **Quickstart SSRF doc gap** — README embedded quickstart registers a private `base_url` (`192.168.1.42`) but the Tier-0 SSRF default (`allow_private_targets: false`, F-02) refuses it with `400`; quickstart didn't foreshadow the opt-in | First-run smoke (2026-06-15) | ✅ done 2026-06-15 (Tier 1, Z5) — README note after the register step: private/loopback/link-local refused by default; opt in with `MCP_ALLOW_PRIVATE_TARGETS=true` / `security.allow_private_targets: true` for a trusted LAN fleet. (Error message itself was already clear/actionable) |
+| F-66 | 🟡 | **`reachable: true` on a device that was never checked** — the health loop iterates only a worker's *assigned* devices, so a device whose pod never spawns is never assigned and nothing ever writes `reachable`; the dataclass default (`True`) is served indefinitely alongside a `spawn_error` saying it failed. The fleet listing and UI show it as healthy | Lab-cluster verification (2026-08-10, alongside R6/[#93](https://github.com/benwold-lgtm/MCP-Gateway/pull/93)) | 🆕 open — FMEA row D10. Candidate fix: make "never checked" a distinct state rather than a default (tri-state or `reachable` derived from `last_check`), so absence of a measurement can't read as a successful one |
