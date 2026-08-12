@@ -10,7 +10,6 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: device-mcp-gateway-pdb
-  namespace: mcp-gateway
 spec:
   minAvailable: 1
   selector:
@@ -25,7 +24,6 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: device-mcp-worker-pdb
-  namespace: mcp-gateway
 spec:
   minAvailable: 1
   selector:

@@ -6,7 +6,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: device-mcp-worker
-  namespace: mcp-gateway
 spec:
   replicas: 2
   selector:
@@ -94,6 +93,14 @@ spec:
                   name: gateway-secrets
                   key: secret-key
                   optional: true
+            # ⚠️ MUST match the gateway's value. In distributed mode the WORKER performs
+            # the spec fetch, the health check and every tool call, so this is the copy
+            # that decides whether a private-addressed device is reachable at all. Set on
+            # the gateway alone, registration succeeds and every subsequent call to the
+            # device fails — a split that looks like a device fault, not a config one.
+            # No RBAC role keys here: the worker serves no API and does no authorization.
+            - name: MCP_ALLOW_PRIVATE_TARGETS
+              value: "false"
             # Authenticated Redis URL incl. password (Tier-0 F-24) — see deployment.yaml.
             # The worker refuses to start against an unauthenticated Redis unless
             # redis.allow_insecure: true.

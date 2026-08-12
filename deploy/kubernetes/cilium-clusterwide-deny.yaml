@@ -1,0 +1,97 @@
+# Tier-2 cross-tenant deny — ADR-0014 §5. OPTIONAL, Cilium-only, NOT in kustomization.yaml.
+#
+#   kubectl apply -f deploy/kubernetes/cilium-clusterwide-deny.yaml
+#
+# ── Why this file exists ───────────────────────────────────────────────────────────
+#
+# Kubernetes NetworkPolicy is purely ADDITIVE-ALLOW: the effective rule is the union of
+# every policy selecting a pod, and nothing can revoke an allow that another policy
+# grants. So the default-deny in networkpolicy.yaml is undone by ANYONE who can create a
+# NetworkPolicy in a tenant namespace — and they do not even have to delete it, just add
+# a permissive policy alongside. Under Tier 1 the boundary is therefore held by RBAC (no
+# tenant-plane credential holds create/patch/delete on `networkpolicies`) and by GitOps
+# being the only writer. That is an RBAC guarantee, not a network one, and anyone who
+# obtains namespace-write has obtained the ability to open the boundary.
+#
+# Cilium's `ingressDeny`/`egressDeny` take PRECEDENCE over allows, and a
+# CiliumClusterwideNetworkPolicy is cluster-scoped — no namespace-local credential can
+# touch it. That is the revocation semantic vanilla NetworkPolicy lacks, and it is the
+# only mechanism here that holds against a tenant with full rights inside their own
+# namespace.
+#
+# It also closes the residual in networkpolicy.yaml's `ipBlock` egress rules: those match
+# raw addresses, so they depend on the pod CIDR being written correctly, and they cannot
+# separate tenants at all if the pod CIDR overlaps the range devices live on. Cilium
+# matches on workload IDENTITY (labels), so neither problem applies.
+#
+# ── Requirements ───────────────────────────────────────────────────────────────────
+#
+# Cilium with `enable-policy` not set to "never". Verify before trusting this file:
+#   kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.enable-policy}'
+#   kubectl get crd ciliumclusterwidenetworkpolicies.cilium.io
+#
+# Every tenant namespace must carry `mcp.gateway/plane: tenant` (see namespace.yaml) —
+# this policy is keyed on that label, so an unlabelled namespace is NOT covered. Labelling
+# namespaces is a provider-plane RBAC verb for exactly this reason.
+#
+# ⚠️ This denies tenant↔tenant only. It deliberately does not touch the monitoring scrape
+# (ADR-0013 §7 depends on it) or the ingress controller path, because neither is a tenant
+# namespace and neither is selected here.
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: mcp-tenant-cross-namespace-deny
+spec:
+  description: >-
+    Deny all traffic between MCP tenant namespaces, in both directions. Deny rules take
+    precedence over any allow, including one a tenant creates inside their own namespace.
+    ADR-0014 §5 (Tier 2).
+  endpointSelector:
+    matchLabels:
+      io.kubernetes.pod.namespace.labels.mcp.gateway/plane: tenant
+
+  # Ingress from any OTHER tenant namespace. `NotIn` on the namespace name is what keeps
+  # a tenant's own intra-namespace traffic working — without it this would deny the stack
+  # talking to itself, and gateway→Redis would break with no rule naming Redis.
+  ingressDeny:
+    - fromEndpoints:
+        - matchExpressions:
+            - key: io.kubernetes.pod.namespace.labels.mcp.gateway/plane
+              operator: In
+              values: ["tenant"]
+            - key: io.kubernetes.pod.namespace
+              operator: NotIn
+              values: []          # ← see note below
+
+  egressDeny:
+    - toEndpoints:
+        - matchExpressions:
+            - key: io.kubernetes.pod.namespace.labels.mcp.gateway/plane
+              operator: In
+              values: ["tenant"]
+            - key: io.kubernetes.pod.namespace
+              operator: NotIn
+              values: []          # ← see note below
+
+# ⚠️ The empty `values: []` above is NOT a working policy as written, and is left visible
+# rather than hidden because getting it wrong fails in the dangerous direction.
+#
+# A CiliumClusterwideNetworkPolicy is one object for the whole cluster, so it cannot say
+# "any tenant namespace other than the pod's own" — there is no self-reference in the
+# selector language. Two ways to resolve it, pick one:
+#
+#   (a) Per-namespace CiliumNetworkPolicy instead of clusterwide. Generate one per tenant
+#       with its own namespace in the NotIn list. Keeps deny precedence; loses the
+#       "tenant cannot touch it" property, since a CNP lives in the tenant's namespace —
+#       so it must be paired with the Tier-1 RBAC restriction extended to `cnp`.
+#
+#   (b) Keep this clusterwide object and fill `values:` with every tenant namespace,
+#       regenerating on each tenant add/remove. Keeps both properties, at the cost of an
+#       object that must be kept in step with the tenant list — and a tenant missing from
+#       the list is a tenant this policy denies traffic to from everyone, which fails
+#       CLOSED and is therefore the safe direction to get wrong.
+#
+# (b) is recommended for a provider-operated estate; the regeneration belongs in the same
+# provisioning path that creates the namespace. Whichever you choose, verify with the
+# TG-10 probe — a policy that selects nothing produces no error and no traffic change.

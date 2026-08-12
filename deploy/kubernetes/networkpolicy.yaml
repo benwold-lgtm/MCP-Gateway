@@ -1,10 +1,164 @@
+# NetworkPolicies — ADR-0014.
+#
+# ⚠️ READ THIS BEFORE EDITING. NetworkPolicy has two semantics that make "looks
+# restrictive" and "is restrictive" come apart, and both have bitten this file:
+#
+#   1. A rule with `ports:` and NO `from:`/`to:` means *any peer in the cluster* on
+#      those ports. It restricts PORTS, NOT PEERS. Until 2026-08-12 every rule here was
+#      that shape, and a pod in an unrelated namespace could reach the gateway on 8000
+#      and read /health — measured, not theorised (F-68).
+#   2. NetworkPolicy is POD-SELECTED, and a pod matched by no policy at all is
+#      default-allow in both directions. Policies naming `app: device-mcp-gateway` do
+#      nothing for any other pod that lands in this namespace.
+#
+# Hence the first policy below: `podSelector: {}` with no rules, which is what actually
+# closes the namespace. Everything after it re-opens exactly one path at a time.
+#
+# One more property worth knowing before you "fix" a connectivity problem here:
+# NetworkPolicy is purely ADDITIVE-ALLOW. The effective rule is the UNION of every
+# policy selecting a pod, and there is no way to write a policy that revokes an allow
+# granted by another one. Adding a permissive policy alongside these silently undoes
+# them — you do not have to delete anything. That is why the deny holding against a
+# tenant with namespace-write is an RBAC property (no tenant-plane credential holds
+# create/patch/delete on networkpolicies) or a CNI one (cilium-clusterwide-deny.yaml),
+# never a property of this file. ADR-0014 §5.
+#
+# ⚠️ AND: a CNI that does not implement NetworkPolicy accepts every object here and
+# enforces NONE of it. `kubectl get netpol` looks identical either way. Verify with the
+# probe in docs/testing-gaps.md TG-10 rather than by reading this file.
+
 ---
-# Gateway NetworkPolicy — restricts ingress and egress for gateway pods.
+# ── 1. Default deny, both directions, every pod ────────────────────────────────────
+# The only policy here that provides isolation rather than refining it. `podSelector: {}`
+# selects EVERY pod in the namespace — including sidecars, debug containers, and anything
+# an attacker lands — and the absence of any ingress/egress rule denies both directions.
+#
+# Cross-tenant denial is a CONSEQUENCE of this default, not a rule anyone maintains.
+# There is no "deny tenant B" clause to forget to update when tenant C arrives, and
+# per ADR-0014 §6 there is deliberately no override mechanism to open one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# ── 2. DNS ─────────────────────────────────────────────────────────────────────────
+# ⚠️ Without this, EVERYTHING breaks, and it does not present as a network problem — it
+# presents as an application that cannot resolve anything: Redis by Service name, device
+# hostnames, the OIDC issuer. This is the first thing to check when a default-deny
+# namespace misbehaves.
+#
+# Scoped to kube-system by namespace label rather than left open. `kubernetes.io/metadata.name`
+# is applied automatically by Kubernetes (GA since 1.21), so it cannot be forged by
+# omitting a label at namespace creation time. If your cluster runs CoreDNS elsewhere
+# (some managed distributions do), change the name here — a wrong value here is a total
+# outage, so verify it: kubectl get svc -A -l k8s-app=kube-dns
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# ── 3. Intra-namespace ─────────────────────────────────────────────────────────────
+# The stack talking to itself: gateway → Redis, worker → Redis, and the reverse paths.
+# `podSelector: {}` under `from:`/`to:` (rather than at the rule's top level) means
+# "any pod in THIS namespace" — it does not reach across the namespace boundary.
+#
+# This is deliberately whole-namespace rather than per-workload. The per-workload
+# policies (5, 6) express which pod may reach which; this one establishes that the
+# namespace is a connected unit, and keeps a new in-namespace component from being
+# broken by the default deny before anyone has written a policy for it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+
+---
+# ── 4. Monitoring scrape ───────────────────────────────────────────────────────────
+# The ONLY standing cross-namespace path in the design, and it is load-bearing:
+# ADR-0013 §7 aggregates cross-tenant fleet health from the metrics plane precisely so
+# the provider's constant-use read path holds no tenant API credential. Deny this and
+# the provider console's entire read path breaks — so it is an explicit, named exception
+# rather than something to tighten away.
+#
+# Note the direction: monitoring reaches IN. No tenant namespace is granted egress to
+# another tenant namespace by any policy in this file.
+#
+# ⚠️ Set the namespace name to wherever YOUR Prometheus runs. `monitoring` is the
+# kube-prometheus-stack default and is a guess about your cluster; the metrics endpoint
+# is unauthenticated (F-36), so leaving this open cluster-wide re-exposes it to every
+# namespace. If you scrape by pod annotation rather than by ServiceMonitor, this rule
+# still applies — the scraper's namespace is what matters, not the discovery mechanism.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-scrape
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 9100
+          protocol: TCP
+
+---
+# ── 5. Gateway ─────────────────────────────────────────────────────────────────────
+# The tenant API, reachable only from the ingress controller's namespace. This is the
+# only route into the stack from outside it.
+#
+# ⚠️ `ingress-nginx` is the common default and is a guess about your cluster. If you run
+# Traefik, Contour, Gateway API, or a cloud LB controller, change it — and if you expose
+# the Service directly (NodePort/LoadBalancer, no controller), this rule does not cover
+# that path and you will need one naming the source it actually arrives from.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: device-mcp-gateway
-  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-gateway
 spec:
   podSelector:
     matchLabels:
@@ -14,38 +168,58 @@ spec:
     - Egress
 
   ingress:
-    - ports:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
         - port: 8000
-          protocol: TCP
-    # Prometheus scrape of the dedicated metrics port. Scope this with a
-    # namespaceSelector for your monitoring namespace in production rather than
-    # leaving it open to the whole cluster.
-    - ports:
-        - port: 9100
           protocol: TCP
 
   egress:
-    - ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
-    # Redis (shared state)
-    - ports:
-        - port: 6379
-          protocol: TCP
-    # Downstream device APIs.
+    # Downstream device APIs, and any external OIDC issuer / JWKS endpoint.
     #
-    # ⚠️ THIS IS AN ALLOWLIST YOU ARE EXPECTED TO EXTEND. It covers the common HTTP
-    # ports only. A device on any other port — a BMC on 623, Prism on 9440, a vendor
-    # appliance on 8006 — is simply unreachable until you add it here, and the symptom
-    # is a connection timeout at health-check time rather than anything naming this
-    # policy. Add a port to BOTH this policy and the worker one below: in distributed
-    # mode the worker does the fetching, so the gateway's copy alone is not enough.
+    # ⚠️ THIS IS AN ALLOWLIST YOU ARE EXPECTED TO EXTEND — and it now needs BOTH halves.
+    # A device on another port (a BMC on 623, Prism on 9440, a vendor appliance on 8006)
+    # is unreachable until you add the port; a device outside the CIDR block below is
+    # unreachable until you widen the block. The symptom of either is a connection
+    # timeout at health-check time, naming nothing in this file.
     #
-    # The gateway's own egress guard (security.allowed_target_ports) is a separate,
-    # narrower control — satisfying one does not satisfy the other.
-    - ports:
+    # Add it to BOTH this policy and the worker one: in distributed mode the WORKER does
+    # the fetching, so the gateway's copy alone is not enough.
+    #
+    # The `except` list is what keeps this from being an SSRF hole (F-02) and what keeps
+    # it from being a cross-tenant hole: an `ipBlock` is evaluated on raw addresses and
+    # does NOT respect namespace selectors, so a bare 0.0.0.0/0 would reach every other
+    # tenant's pods by pod IP no matter what the rest of this file says.
+    #
+    # ⚠️ Note what is NOT excluded: general RFC-1918 space. Devices legitimately live on
+    # the private LAN — that is this product's normal deployment — so blanket-blocking
+    # 10/8, 172.16/12 and 192.168/16 would break the common case and train operators to
+    # replace the whole thing with 0.0.0.0/0. What is excluded is the CLUSTER'S OWN
+    # address space, which is where other tenants are, plus link-local and loopback.
+    #
+    # ⚠️ VERIFY THESE TWO AGAINST YOUR CLUSTER — they are the isolation boundary, and the
+    # values below are the kind/kubeadm defaults, i.e. a guess about your cluster:
+    #   kubectl cluster-info dump | grep -E 'cluster-cidr|service-cluster-ip-range'
+    # If your pod CIDR is wrong here, cross-tenant egress by pod IP is open and nothing
+    # will report it. If your pod CIDR overlaps the range your devices are on, `ipBlock`
+    # cannot separate them at all — that is the case where the cluster-wide Cilium deny
+    # in cilium-clusterwide-deny.yaml is not optional, because it matches on workload
+    # identity rather than on address.
+    #
+    # In-cluster devices are reached by the intra-namespace policy (3) when they are in
+    # this namespace. A device in a DIFFERENT namespace needs a narrow rule naming that
+    # namespace — never a widened `except` list.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16      # ⚠️ POD CIDR — verify against your cluster
+              - 10.96.0.0/16       # ⚠️ SERVICE CIDR — verify against your cluster
+              - 169.254.0.0/16     # link-local, incl. cloud metadata at 169.254.169.254
+              - 127.0.0.0/8        # loopback
+      ports:
         - port: 80
           protocol: TCP
         - port: 443
@@ -56,12 +230,17 @@ spec:
           protocol: TCP
 
 ---
-# Worker NetworkPolicy — workers need Redis + downstream device API access.
+# ── 6. Worker ──────────────────────────────────────────────────────────────────────
+# Workers accept no API traffic at all — their only ingress is the scrape, granted by
+# policy 4. In distributed mode THIS is the policy that governs whether a device is
+# reachable, because the worker performs the spec fetch, the health check and every
+# tool call. Same allowlist and the same caveats as the gateway above.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: device-mcp-worker
-  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: device-mcp-worker
 spec:
   podSelector:
     matchLabels:
@@ -70,28 +249,16 @@ spec:
     - Ingress
     - Egress
 
-  # Workers accept no API traffic — only Prometheus scraping of the metrics port.
-  # Scope this with a namespaceSelector for your monitoring namespace in production.
-  ingress:
-    - ports:
-        - port: 9100
-          protocol: TCP
-
   egress:
-    - ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
-    # Redis (shared state + tool call streams)
-    - ports:
-        - port: 6379
-          protocol: TCP
-    # Downstream device APIs. Same allowlist as the gateway policy above, and the same
-    # caveat: extend it for any device on a port not listed here. In distributed mode
-    # THIS is the policy that governs whether a device is reachable at all, because the
-    # worker performs the spec fetch, the health check and every tool call.
-    - ports:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.244.0.0/16      # ⚠️ POD CIDR — verify; keep in step with the gateway policy
+              - 10.96.0.0/16       # ⚠️ SERVICE CIDR — verify; keep in step with the gateway policy
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
         - port: 80
           protocol: TCP
         - port: 443
@@ -102,18 +269,23 @@ spec:
           protocol: TCP
 
 ---
-# Redis NetworkPolicy — Redis only accepts connections from gateway/worker pods.
+# ── 7. Redis ───────────────────────────────────────────────────────────────────────
+# Redis accepts connections only from gateway and worker pods in this namespace. This
+# is narrower than policy 3 and is the statement that matters: the control plane holds
+# every device credential (encrypted) and every call stream.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: redis
-  namespace: mcp-gateway
+  labels:
+    app.kubernetes.io/name: redis
 spec:
   podSelector:
     matchLabels:
       app: redis
   policyTypes:
     - Ingress
+    - Egress
 
   ingress:
     - from:

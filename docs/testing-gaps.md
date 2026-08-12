@@ -26,6 +26,7 @@ confidence: link the run, the baseline, or the recording that closed it.
 | ~~[TG-7](#tg-7--disaster-recovery-restore-into-a-genuinely-fresh-stack--closed)~~ | ~~DR: restore into a genuinely fresh stack~~ | **CLOSED 2026-08-11** — walked end to end; see below | — |
 | [TG-8](#tg-8--backup-and-restore-at-fleet-scale) | Backup/restore at fleet scale | A fleet in the hundreds with workers under real assignment pressure | Export is one synchronous response over the whole registry; it may time out precisely on the fleets where the archive matters most |
 | [TG-9](#tg-9--backup-across-a-key-rotation-on-a-live-distributed-stack) | Backup across a live key rotation | A rolling restart with overlapping `MCP_SECRET_KEY` sets | Double-encrypted credentials in an archive that verifies clean; surfaces only when a restored device authenticates upstream |
+| [TG-10](#tg-10--network-isolation-on-a-cni-that-is-not-cilium) | Network isolation on a CNI that is not Cilium | A cluster with a different CNI (or one that ignores NetworkPolicy) | A non-enforcing CNI accepts every policy and enforces none; `kubectl get netpol` looks identical either way |
 
 ---
 
@@ -406,6 +407,69 @@ credentials decrypt to plaintext rather than to ciphertext — assert on the dec
 **Risk if the design is wrong.** Silent and delayed. The archive verifies, the restore
 reports success, and the damage only surfaces when a restored device tries to authenticate
 upstream — by which point the archive is the sole remaining copy.
+
+---
+
+## TG-10 — Network isolation on a CNI that is not Cilium
+
+**What is unvalidated.** That the [ADR-0014](adr/0014-tenant-namespace-naming-and-network-isolation.md)
+policies are *enforced* on a cluster whose CNI is not Cilium — and, more sharply, that
+anyone deploying them would find out if they were not.
+
+**A CNI that does not implement NetworkPolicy accepts every object in
+`deploy/kubernetes/networkpolicy.yaml` and enforces none of it.** The API server stores
+them, `kubectl get netpol` lists all seven, `kubectl describe` prints the rules, and
+traffic flows exactly as if the file did not exist. There is no error, no event, and no
+status field distinguishing "enforced" from "inert". This is the F-68 failure shape one
+level down: a control that looks present and measures as absent, where reading the
+manifest cannot tell you which.
+
+**What has been verified**, on `mcp-gw` (kind + Cilium v1.19.5, `enable-k8s-networkpolicy:
+true`), 2026-08-12 — recorded so this row is not read as "network isolation is untested":
+
+| Probe | Result |
+|---|---|
+| Pod in another namespace → gateway `:8000` | **blocked** (was `HTTP 200` before — the F-68 measurement) |
+| Pod in another namespace → metrics `:9100` | **blocked** |
+| Pod in another namespace → Redis `:6379` | **blocked** |
+| Worker-labelled pod → neighbour tenant's **pod IP** `:80` | **blocked** (the `ipBlock` pod-CIDR `except`) |
+| Worker-labelled pod → LAN device `:9440` | allowed |
+| Worker-labelled pod → internet `:443` | allowed |
+| `monitoring` namespace → `:9100` | allowed — ADR-0013 §7 read path intact |
+| `monitoring` namespace → `:8000` | **blocked** — the scrape exception is metrics-only |
+| Gateway `/health`, both devices, live health loop | healthy; `last_check_age_seconds` advancing, so checks are live rather than stale |
+
+**Why we cannot test the rest here.** Only one CNI is available. The behaviours that differ
+across CNIs are exactly the ones that matter: whether NetworkPolicy is enforced at all,
+whether `ipBlock` `except` is honoured for pod-to-pod traffic (implementations vary — some
+evaluate policy before SNAT, some after), and whether an `Egress` policy with no matching
+rule fails closed. Calico, Flannel-without-Canal, kindnet, AWS VPC CNI and Cilium do not
+agree on all three, and the project ships CNI-neutral manifests.
+
+**Two residuals this leaves, both inside the Tier-1 design rather than the test:**
+
+- **The `ipBlock` `except` list is address-based**, so it depends on the pod and service
+  CIDRs being written correctly for the cluster. The shipped values are the kind/kubeadm
+  defaults. Get them wrong and cross-tenant egress by pod IP is open, with nothing
+  reporting it. Where the pod CIDR overlaps the range devices live on, `ipBlock` cannot
+  separate them at all.
+- **Tier 1 is an RBAC guarantee, not a network one** (ADR-0014 §5). NetworkPolicy is
+  additive-allow, so a tenant who can create a policy in their own namespace re-opens the
+  boundary by *adding* one — no deletion needed. Untested here because it needs a real
+  provider/tenant RBAC split, not a policy.
+
+**What would close it.** Apply the bundle to a cluster on a different CNI and re-run the
+probe table above, asserting the same verdicts. The single most valuable assertion is the
+first: **a cross-namespace connection must fail**, because that is the one a non-enforcing
+CNI silently inverts. Also worth closing the Tier-2 path — the
+`CiliumClusterwideNetworkPolicy` in `deploy/kubernetes/cilium-clusterwide-deny.yaml` ships
+with an unresolved selector (documented in the file) and has not been applied anywhere.
+
+**Risk if the design is wrong.** Total and silent for the isolation property. Every
+document, dashboard and review would report tenant isolation as present; a probe would show
+it absent. This is the class of gap that gets discovered by an auditor or an incident rather
+than by the suite — and unlike most rows here, the mitigation is cheap: one pod, one curl,
+five minutes, on any cluster you actually deploy to.
 
 ---
 

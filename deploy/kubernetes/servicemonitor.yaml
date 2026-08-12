@@ -14,14 +14,15 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: device-mcp-gateway
-  namespace: mcp-gateway
   labels:
     app.kubernetes.io/name: device-mcp-gateway
     release: kube-prometheus-stack   # match your Operator's serviceMonitorSelector
 spec:
-  namespaceSelector:
-    matchNames:
-      - mcp-gateway
+  # No `namespaceSelector` on purpose. An omitted selector means "this ServiceMonitor's
+  # own namespace", which is always the right answer and is the only form that survives
+  # a namespace change: `namespaceSelector.matchNames` is a CRD field, and kustomize's
+  # `namespace:` transformer does NOT rewrite it. Pinning the namespace here would leave
+  # a per-tenant deployment scraping whichever namespace this file was written against.
   selector:
     matchLabels:
       app.kubernetes.io/name: device-mcp-gateway
@@ -34,14 +35,15 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: device-mcp-worker
-  namespace: mcp-gateway
   labels:
     app.kubernetes.io/name: device-mcp-worker
     release: kube-prometheus-stack   # match your Operator's serviceMonitorSelector
 spec:
-  namespaceSelector:
-    matchNames:
-      - mcp-gateway
+  # No `namespaceSelector` on purpose. An omitted selector means "this ServiceMonitor's
+  # own namespace", which is always the right answer and is the only form that survives
+  # a namespace change: `namespaceSelector.matchNames` is a CRD field, and kustomize's
+  # `namespace:` transformer does NOT rewrite it. Pinning the namespace here would leave
+  # a per-tenant deployment scraping whichever namespace this file was written against.
   selector:
     matchLabels:
       app.kubernetes.io/name: device-mcp-worker
