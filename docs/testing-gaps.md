@@ -23,7 +23,7 @@ confidence: link the run, the baseline, or the recording that closed it.
 | ~~[TG-4](#tg-4--the-kubernetes-manifests-on-a-real-cluster--closed)~~ | ~~The k8s manifests on a real cluster~~ | **CLOSED 2026-08-06** — see below | — |
 | [TG-5](#tg-5--the-arm64-image-on-real-arm64-hardware) | arm64 image on real arm64 hardware | A Pi / arm64 host | QEMU-built arm64 layers can pass build and still fail at runtime |
 | [TG-6](#tg-6--hash-reading-redis-paths-in-the-unit-tier) | Hash-reading Redis paths in the unit tier | A fakeredis fix, or moving the test to the real-Redis tier | Unit tests cannot exercise any `hgetall` consumer. **Demonstrated 2026-08-10** — the R6 defect was exactly this class, and reached a live cluster |
-| [TG-7](#tg-7--disaster-recovery-restore-into-a-genuinely-fresh-stack) | DR: restore into a genuinely fresh stack | A second disposable stack — own Redis, own pods, own `MCP_SECRET_KEY` | Backup's whole purpose is unproven; a half-working restore is found under incident pressure, with the original stack already gone |
+| ~~[TG-7](#tg-7--disaster-recovery-restore-into-a-genuinely-fresh-stack--closed)~~ | ~~DR: restore into a genuinely fresh stack~~ | **CLOSED 2026-08-11** — walked end to end; see below | — |
 | [TG-8](#tg-8--backup-and-restore-at-fleet-scale) | Backup/restore at fleet scale | A fleet in the hundreds with workers under real assignment pressure | Export is one synchronous response over the whole registry; it may time out precisely on the fleets where the archive matters most |
 | [TG-9](#tg-9--backup-across-a-key-rotation-on-a-live-distributed-stack) | Backup across a live key rotation | A rolling restart with overlapping `MCP_SECRET_KEY` sets | Double-encrypted credentials in an archive that verifies clean; surfaces only when a restored device authenticates upstream |
 
@@ -263,7 +263,48 @@ So the gap is still open, and it is now known to be load-bearing rather than mer
 inconvenient. Anything that reads a device config from Redis needs a test in the
 integration tier; the unit tier cannot see it fail.
 
-## TG-7 — Disaster recovery: restore into a genuinely fresh stack
+## TG-7 — Disaster recovery: restore into a genuinely fresh stack ✅ CLOSED
+
+**Closed 2026-08-11.** Walked end to end on a second physical host: a single-node kind
+cluster with its own Redis, its own pods and a **different `MCP_SECRET_KEY`**, restoring a
+**portable** archive exported from the lab cluster. Both devices restored, both provisioned,
+and — the assertion that matters — a `tools/call` on the restored `prism` device returned
+live upstream data (HTTP 200, real cluster inventory) using a credential that was encrypted
+under one key, re-wrapped to a passphrase, and decrypted under another. The runbook written
+from the walk is in [runbook.md](runbook.md#rebuild-a-stack-from-nothing-disaster-recovery).
+
+**The restore itself was not the hard part.** Preflight, replay, manifest rebuild and
+`tools_revision` carry-over all behaved exactly as [ADR-0011](adr/0011-backup-and-restore.md)
+described. Three *environmental* dependencies broke it first, and all three are the same
+shape: **things the archive does not carry and the design never claimed it would.**
+
+1. **Per-device TLS material.** `security.mtls.devices.prism.ca_bundle` points into
+   `/etc/mcp/tls`, backed by a ConfigMap that is neither in the archive nor in
+   `deploy/kubernetes/`. The gateway **fails closed at startup** without it —
+   `CrashLoopBackOff`, `ValueError: ... cannot build TLS context — [Errno 2]`. Correct
+   behaviour, and unrecoverable-looking if you have not seen it before.
+2. **Three environment variables that exist only as hand-applied additions** on the source
+   cluster: `MCP_ALLOW_PRIVATE_TARGETS`, `MCP_ADMIN_KEY`, `MCP_VIEWER_KEY`. The repo
+   manifests wire none of them. Missing the first makes restore refuse every private-address
+   device **and report it as a correct policy refusal** — a configuration gap that reads,
+   in the response body, exactly like the system working as designed. Missing the second
+   means no admin credential at all: 401, not 403.
+3. **Non-Kubernetes DNS.** `prism.nutanix.local` resolves via a CoreDNS `hosts` block on the
+   source cluster. Kubernetes service DNS in `base_url`/`spec_url` needed **no** archive
+   editing — it resolves unchanged in any cluster with the same service names in the same
+   namespace, which is worth knowing — but anything outside Kubernetes must be recreated.
+
+**What this changes.** The gap was written expecting the archive format to be the risk. It
+was not. The risk is the **out-of-band dependency set**, which was undocumented because
+nobody had ever rebuilt from nothing. That list is now a table in the runbook, and it belongs
+in the same breath as "back up `MCP_SECRET_KEY` separately."
+
+**Not closed by this:** [TG-8](#tg-8--backup-and-restore-at-fleet-scale) (2 devices proves
+nothing about 500) and [TG-9](#tg-9--backup-across-a-key-rotation-on-a-live-distributed-stack)
+(no rotation was in flight). The DR stack built here is the natural place to run both.
+
+<details>
+<summary>Original entry, kept for the record</summary>
 
 **What is unvalidated.** The claim backup exists to support: that an
 [ADR-0011](adr/0011-backup-and-restore.md) archive can rebuild a **lost** stack. Not that it
@@ -299,6 +340,8 @@ runbook is worth more than the design doc.
 exercised on the worst day. A restore that half-works turns a recoverable outage into a
 manual rebuild, and the failure is discovered under incident pressure with the original stack
 already gone.
+
+</details>
 
 ## TG-8 — Backup and restore at fleet scale
 

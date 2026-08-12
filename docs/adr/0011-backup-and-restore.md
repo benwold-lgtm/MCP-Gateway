@@ -188,17 +188,35 @@ operationally visible, so it should not be cited as a reason to avoid the portab
 ### What is still unverified (2026-08-11, after v0.3.2)
 
 The Follow-ups above name a DR runbook "verified by restoring into a genuinely fresh stack."
-That is now tracked as **[TG-7](../testing-gaps.md#tg-7--disaster-recovery-restore-into-a-genuinely-fresh-stack)**,
+That is now tracked as **[TG-7](../testing-gaps.md#tg-7--disaster-recovery-restore-into-a-genuinely-fresh-stack--closed)**,
 together with two neighbouring gaps the build surfaced —
 **[TG-8](../testing-gaps.md#tg-8--backup-and-restore-at-fleet-scale)** (everything here is
 tested at 2–3 devices; export is one synchronous response over the whole registry) and
 **[TG-9](../testing-gaps.md#tg-9--backup-across-a-key-rotation-on-a-live-distributed-stack)**
 (export and restore mid key-rotation, the scenario the `is_current()` trap came from).
 
-A live dry run on the lab cluster (v0.3.2) confirmed the decrypt preflight against real
-ciphertext and that `dry_run` defaults to true. It proved nothing about recovery: every
-device came back `skipped / already registered`, so no restore path was executed. **Backup is
-implemented and unit-tested; it is not yet demonstrated to do the job it exists for.**
+**TG-7 is now closed (2026-08-11).** A portable archive was restored into a genuinely fresh
+stack on separate hardware — new Redis, new pods, a **different `MCP_SECRET_KEY`** — and a
+`tools/call` on a restored device returned live upstream data using the restored credential.
+The follow-up above ("a DR runbook, verified by restoring into a genuinely fresh stack") is
+discharged; the runbook is
+[runbook.md § Rebuild a stack from nothing](../runbook.md#rebuild-a-stack-from-nothing-disaster-recovery).
+
+**What the walk changed about this ADR.** Nothing in the archive format or the restore
+algorithm — preflight, replay through the registration gates, manifest rebuild and
+`tools_revision` carry-over all behaved as designed. What it exposed is that this ADR framed
+the recovery story around the *archive*, and the archive turned out not to be the hard part.
+Three things it deliberately does not carry each stopped a rebuild before any restore ran:
+per-device TLS trust material (the gateway fails closed at startup without it), three
+environment variables that live only as hand-applied additions to the source cluster, and
+non-Kubernetes DNS resolution. §6's "back up `MCP_SECRET_KEY` out-of-band" was right in kind
+but too narrow — it is a *set* of out-of-band dependencies, now tabulated in the runbook.
+
+The sharpest of them is worth repeating here: without `MCP_ALLOW_PRIVATE_TARGETS`, restore
+refuses every private-address device and reports a **correct policy refusal**. The response
+body cannot distinguish "your new stack is misconfigured" from "the policy legitimately
+rejects this device" — which is a direct consequence of §4 replaying through the real gates,
+and the price of that decision rather than a defect in it.
 
 ## Alternatives considered
 
