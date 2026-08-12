@@ -458,12 +458,21 @@ agree on all three, and the project ships CNI-neutral manifests.
   boundary by *adding* one — no deletion needed. Untested here because it needs a real
   provider/tenant RBAC split, not a policy.
 
+**Tier 2 is now verified** (2026-08-12), so it is no longer part of this gap. With policies
+from `tools/tenant_isolation_policy.py generate` applied to two labelled namespaces:
+cross-tenant blocked in both directions, intra-namespace and internet egress intact, and —
+the claim that matters — a tenant that created its own `podSelector: {}` allow-all
+NetworkPolicy in its own namespace **still** could not reach the neighbouring tenant. The
+coverage checker was confirmed to exit 1 on a deliberately deleted policy. Three earlier
+policy shapes applied cleanly and enforced the wrong thing or nothing at all; see
+[ADR-0014](adr/0014-tenant-namespace-naming-and-network-isolation.md) § Implementation notes.
+
 **What would close it.** Apply the bundle to a cluster on a different CNI and re-run the
 probe table above, asserting the same verdicts. The single most valuable assertion is the
 first: **a cross-namespace connection must fail**, because that is the one a non-enforcing
-CNI silently inverts. Also worth closing the Tier-2 path — the
-`CiliumClusterwideNetworkPolicy` in `deploy/kubernetes/cilium-clusterwide-deny.yaml` ships
-with an unresolved selector (documented in the file) and has not been applied anywhere.
+CNI silently inverts. Note that this affects Tier 1 only — per ADR-0014 §8 a
+provider-operated estate requires Tier 2, which pins the CNI to one with deny-rule
+semantics, so the CNI-portability question is a single-tenant concern.
 
 **Risk if the design is wrong.** Total and silent for the isolation property. Every
 document, dashboard and review would report tenant isolation as present; a probe would show

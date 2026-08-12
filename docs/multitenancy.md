@@ -75,6 +75,22 @@ Concretely, a per-tenant stack is the unit of isolation when each tenant gets:
   identical either way. One pod and one `curl` settle it; see
   [testing-gaps.md TG-10](testing-gaps.md) for the probe and the verdicts to expect.
 
+  ⚠️ **Operating an estate additionally requires Tier 2** ([ADR-0014](adr/0014-tenant-namespace-naming-and-network-isolation.md) §8).
+  A default-deny NetworkPolicy is undone by a tenant who *creates* a permissive policy in
+  their own namespace — no deletion needed, because NetworkPolicy is additive-allow — so on
+  its own the boundary is an RBAC guarantee, not a network one. That is fine for a single
+  tenant and the wrong shape of guarantee for a customer boundary. Generate the cluster-wide
+  deny policies per tenant and check coverage:
+
+  ```bash
+  python3 tools/tenant_isolation_policy.py generate --from-cluster | kubectl apply -f -
+  python3 tools/tenant_isolation_policy.py check          # exits 1 on an uncovered tenant
+  ```
+
+  Regenerate from the same path that creates the namespace. A missed regeneration exposes
+  only the uncovered tenant — each policy isolates its own tenant in both directions — but
+  that is a bound on the damage, not an excuse to skip `check`.
+
 ## Best practices (the rules)
 
 1. **Never co-host tenants in one stack.** This is the load-bearing rule. Sharing a

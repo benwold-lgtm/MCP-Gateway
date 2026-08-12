@@ -12,6 +12,39 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Security
 
+- **[ADR-0014](docs/adr/0014-tenant-namespace-naming-and-network-isolation.md) is now
+  Accepted**, resolving its open question: **Tier 2 is a precondition for operating a
+  provider-operated multi-tenant estate; a single-tenant deployment needs Tier 1 alone.**
+
+  The tiers do not differ in depth — they differ in *who the boundary holds against*. Under
+  Tier 1 a tenant re-opens cross-tenant reachability by **creating** a permissive
+  NetworkPolicy in their own namespace, without deleting anything, because NetworkPolicy is
+  additive-allow. Tier 1's guarantee is therefore RBAC-shaped, which is an acceptable
+  internal control for one tenant and the wrong shape of guarantee for a customer boundary.
+
+  New **`tools/tenant_isolation_policy.py`** generates the Tier-2 policies — one
+  `CiliumClusterwideNetworkPolicy` per tenant, since a single cluster-scoped object has no
+  self-reference in its selector language and cannot express "any tenant namespace other
+  than the pod's own". `generate --from-cluster` discovers namespaces by label; `check`
+  exits non-zero on an uncovered tenant.
+
+  Verified on a live cluster: cross-tenant traffic blocked in both directions,
+  intra-namespace and internet egress intact, and a tenant's own `podSelector: {}` allow-all
+  NetworkPolicy **did not** restore cross-tenant reach — the specific claim Tier 1 cannot
+  make.
+
+  ⚠️ **A correction to the ADR as first published.** Its earlier draft proposed one
+  cluster-wide object listing every tenant in `NotIn`, and stated that a tenant missing from
+  that list would fail *closed*. Both were wrong. `matchExpressions` are ANDed, so "in a
+  tenant-plane namespace" AND "not in any tenant namespace" matches the empty set: the
+  object applies without error and enforces nothing, failing **open**. Two further shapes
+  also applied cleanly and did the wrong thing — a deny-only policy flips the endpoint into
+  default-deny unless `enableDefaultDeny` is false for both directions (which blocked the
+  tenant's own intra-namespace traffic), and the namespace-label selector key is
+  `io.cilium.k8s.namespace.labels.<label>`, not `io.kubernetes.pod.namespace.labels.<label>`,
+  which matches nothing silently. All three were found by measurement, not review, and are
+  recorded in the ADR's implementation notes and pinned by tests.
+
 - **Tenant network isolation — the Kubernetes NetworkPolicies were peer-blind (F-68).**
   Every ingress rule carried `ports:` with **no `from:`**, and every egress rule `ports:`
   with no `to:` — which in NetworkPolicy semantics means *any peer in the cluster*. The
