@@ -128,7 +128,7 @@ prerequisite. The codebase still contains no PKCS#7/S-MIME/CMS and no `x509.veri
 
 If that API is ever adopted deliberately — for per-device trust or anything else — this coupling
 comes back, and `>=49` becomes a hard prerequisite. The reasoning lives at the finding itself in
-[testing-gaps.md](testing-gaps.md#tg-4--the-kubernetes-manifests-on-a-real-cluster).
+[testing-gaps.md](testing-gaps.md#tg-4--the-kubernetes-manifests-on-a-real-cluster--closed).
 
 ## Re-verification — 2026-08-11 (backup/restore, and lifting the cap)
 

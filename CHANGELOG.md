@@ -10,6 +10,21 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **TG-7, TG-8 and TG-9 in [docs/testing-gaps.md](docs/testing-gaps.md)** — the backup and
+  restore shipped in 0.3.2 is implemented and unit-tested, but has not been demonstrated to do
+  the job it exists for, and the register now says so. **TG-7** is disaster recovery proper:
+  restoring into a genuinely fresh stack, with its own Redis and its own `MCP_SECRET_KEY`. The
+  live dry run on the lab cluster does not count — every device came back
+  `skipped / already registered`, which exercises the decrypt preflight and nothing else.
+  **TG-8** is scale: export is a single synchronous response over the whole registry and
+  restore replays devices one at a time, both only ever tested at 2–3 devices. **TG-9** is
+  export and restore *mid key-rotation*, the scenario the `is_current()` double-encryption trap
+  came from — a failure that raises nothing and surfaces only when a restored device
+  authenticates upstream. [ADR-0011](docs/adr/0011-backup-and-restore.md) gains a pointer to
+  all three; its decision text is unchanged.
+
 ## [0.3.2] - 2026-08-11
 
 Backup and restore ([ADR-0011](docs/adr/0011-backup-and-restore.md)), two fixes that only a

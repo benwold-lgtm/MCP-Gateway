@@ -20,9 +20,12 @@ confidence: link the run, the baseline, or the recording that closed it.
 | [TG-1](#tg-1--chaos--fault-injection-f-63) | Chaos / fault injection (E1–E10) | A live multi-node platform + fault injector | Documented failure-mode mitigations may not behave as written under real faults |
 | [TG-2](#tg-2--scale-and-performance-baseline) | Scale + performance baseline | Multi-node cluster, a realistic upstream, sustained load capacity | No capacity model; HPA thresholds and pool sizes are educated guesses |
 | [TG-3](#tg-3--ha-redis-failover) | HA Redis failover behaviour | A real Sentinel/Cluster deployment able to promote a replica | The retry/health-check settings may not cover a real election window |
-| ~~[TG-4](#tg-4--the-kubernetes-manifests-on-a-real-cluster)~~ | ~~The k8s manifests on a real cluster~~ | **CLOSED 2026-08-06** — see below | — |
+| ~~[TG-4](#tg-4--the-kubernetes-manifests-on-a-real-cluster--closed)~~ | ~~The k8s manifests on a real cluster~~ | **CLOSED 2026-08-06** — see below | — |
 | [TG-5](#tg-5--the-arm64-image-on-real-arm64-hardware) | arm64 image on real arm64 hardware | A Pi / arm64 host | QEMU-built arm64 layers can pass build and still fail at runtime |
 | [TG-6](#tg-6--hash-reading-redis-paths-in-the-unit-tier) | Hash-reading Redis paths in the unit tier | A fakeredis fix, or moving the test to the real-Redis tier | Unit tests cannot exercise any `hgetall` consumer. **Demonstrated 2026-08-10** — the R6 defect was exactly this class, and reached a live cluster |
+| [TG-7](#tg-7--disaster-recovery-restore-into-a-genuinely-fresh-stack) | DR: restore into a genuinely fresh stack | A second disposable stack — own Redis, own pods, own `MCP_SECRET_KEY` | Backup's whole purpose is unproven; a half-working restore is found under incident pressure, with the original stack already gone |
+| [TG-8](#tg-8--backup-and-restore-at-fleet-scale) | Backup/restore at fleet scale | A fleet in the hundreds with workers under real assignment pressure | Export is one synchronous response over the whole registry; it may time out precisely on the fleets where the archive matters most |
+| [TG-9](#tg-9--backup-across-a-key-rotation-on-a-live-distributed-stack) | Backup across a live key rotation | A rolling restart with overlapping `MCP_SECRET_KEY` sets | Double-encrypted credentials in an archive that verifies clean; surfaces only when a restored device authenticates upstream |
 
 ---
 
@@ -259,6 +262,107 @@ the write path still creates it — see
 So the gap is still open, and it is now known to be load-bearing rather than merely
 inconvenient. Anything that reads a device config from Redis needs a test in the
 integration tier; the unit tier cannot see it fail.
+
+## TG-7 — Disaster recovery: restore into a genuinely fresh stack
+
+**What is unvalidated.** The claim backup exists to support: that an
+[ADR-0011](adr/0011-backup-and-restore.md) archive can rebuild a **lost** stack. Not that it
+parses, and not that it declines to overwrite a stack that already has the devices — that a
+new stack, with new Redis and new pods and no prior knowledge of the fleet, ends up serving
+the same devices with working credentials.
+
+**Why we cannot test it here.** It needs a second, disposable stack: its own Redis, its own
+gateway and worker deployments, its own `MCP_SECRET_KEY`, and no shared state with the
+original. Restoring into `mcp-gw` cannot prove it — that stack already holds the devices, so
+every path that matters is skipped rather than exercised. **Do not rehearse this on `mcp-gw`.**
+
+**What exists instead.** Two partial checks, and it is worth being precise about what each
+does *not* prove.
+
+- A unit-tier export → wipe → restore roundtrip
+  ([tests/test_backup_restore.py](../tests/test_backup_restore.py)) covering the wrong-key
+  abort, the canary, `on_conflict`, the egress-policy refusal and `tools_revision` carry-over.
+  It runs against a backend fixture, not a stack: nothing spawns a pod or calls a tool.
+- A live dry run on `mcp-gw` (2026-08-11, v0.3.2) that returned both devices as
+  `skipped / already registered`. That exercised the decrypt preflight against real
+  ciphertext and confirmed `dry_run` defaults to true — and **nothing else**. Not one device
+  was written. It is evidence about the preflight, not about recovery.
+
+**What would close it.** Stand up an empty stack with a *different* `MCP_SECRET_KEY`, restore
+a portable archive taken from another stack, and then verify the fleet **works** rather than
+merely appears: pods spawn, the manifest rebuilds, a tool call against a restored device
+succeeds using the restored credential. Write the runbook from what actually happened, and
+record the step that was wrong the first time — there is always one, and it is the reason the
+runbook is worth more than the design doc.
+
+**Risk if the design is wrong.** Highest consequence on this list, because it is only ever
+exercised on the worst day. A restore that half-works turns a recoverable outage into a
+manual rebuild, and the failure is discovered under incident pressure with the original stack
+already gone.
+
+## TG-8 — Backup and restore at fleet scale
+
+**What is unvalidated.** Every backup number at a realistic device count. Export builds the
+whole registry into a **single synchronous response**, and restore replays devices through
+the ordinary registration path one at a time. Both are only ever exercised at 2–3 devices,
+where nothing that scales is visible.
+
+**Why we cannot test it here.** A meaningful run needs a fleet in the hundreds and workers
+under real assignment pressure. A synthetic registry of 500 rows would measure the encoder,
+not the system: the interesting part is restore replaying registrations **while workers are
+running**, which needs the workers.
+
+**What exists instead.** Correctness tests at small N, and one measured figure — Argon2id at
+`m=64 MiB, t=3, p=4` costs ~0.12s, **once per archive**. That cost is independent of fleet
+size and is therefore the one number that does *not* need this gap closed. The per-credential
+Fernet work, the response size, and the replay time all scale with N and are unmeasured.
+
+**What would close it.** Export and restore a fleet of ~500 devices against a live stack and
+record: archive size, export wall time, peak gateway memory, whether the request survives the
+ingress/client timeout, restore wall time, and whether a bulk restore triggers a spawn storm
+or trips admission control. If export cannot complete inside a normal HTTP timeout, that is a
+design finding, not a tuning one — it means the endpoint shape is wrong.
+
+**Risk if the design is wrong.** Backup silently becomes unavailable exactly where it matters
+most: the larger the fleet, the more valuable the archive and the more likely the request
+times out. A DR procedure that only works on small fleets is worse than none, because it was
+tested and believed.
+
+**Prerequisite.** [TG-2](#tg-2--scale-and-performance-baseline) — the same reason chaos needs
+it. Restore timings are uninterpretable without a baseline for what the stack does when idle.
+
+## TG-9 — Backup across a key rotation on a live distributed stack
+
+**What is unvalidated.** How export and restore behave **mid-rotation**, when a stack holds
+more than one `MCP_SECRET_KEY` and a rolling restart means gateway and worker pods can be
+running different key configuration at the same moment.
+
+**Why we cannot test it here.** The scenario is a rolling restart across two deployments with
+overlapping key sets — a pod-scheduling behaviour, not a code path. A single process cannot
+be in two key configurations at once, so the suite can only simulate the outcome it already
+expects.
+
+**What exists instead.** Codec-level unit tests
+([tests/test_secret_rotation.py](../tests/test_secret_rotation.py)) covering `MultiFernet`
+primary/secondary decryption, re-encryption under the new primary, and the SQLite and
+real-Redis credential rotation paths. They establish that the *codec* is correct. They say
+nothing about a stack that is half-rotated while an export runs.
+
+This gap is recorded because the design already tripped over it once. Detecting
+"already encrypted" with `codec.is_current()` is **wrong** mid-rotation: a credential under
+the older key reads as plaintext and is encrypted a second time, producing an archive that
+looks perfect and restores credentials that decrypt to ciphertext. The implementation uses a
+`decrypt()` attempt instead — the point is that the naive check was plausible, and only the
+live scenario distinguishes them.
+
+**What would close it.** Run an export during a rolling `MCP_SECRET_KEY` rotation, and a
+restore into a stack whose primary key has moved on since the archive was written. Verify
+credentials decrypt to plaintext rather than to ciphertext — assert on the decrypted
+*value*, not on the absence of an error, because double-encryption raises nothing.
+
+**Risk if the design is wrong.** Silent and delayed. The archive verifies, the restore
+reports success, and the damage only surfaces when a restored device tries to authenticate
+upstream — by which point the archive is the sole remaining copy.
 
 ---
 

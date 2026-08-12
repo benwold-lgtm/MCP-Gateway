@@ -185,6 +185,21 @@ p=4` a derivation measures ~0.12s, and it is performed **once per archive** — 
 body is sealed under one derived key — not once per credential. The cost is real but not
 operationally visible, so it should not be cited as a reason to avoid the portable kind.
 
+### What is still unverified (2026-08-11, after v0.3.2)
+
+The Follow-ups above name a DR runbook "verified by restoring into a genuinely fresh stack."
+That is now tracked as **[TG-7](../testing-gaps.md#tg-7--disaster-recovery-restore-into-a-genuinely-fresh-stack)**,
+together with two neighbouring gaps the build surfaced —
+**[TG-8](../testing-gaps.md#tg-8--backup-and-restore-at-fleet-scale)** (everything here is
+tested at 2–3 devices; export is one synchronous response over the whole registry) and
+**[TG-9](../testing-gaps.md#tg-9--backup-across-a-key-rotation-on-a-live-distributed-stack)**
+(export and restore mid key-rotation, the scenario the `is_current()` trap came from).
+
+A live dry run on the lab cluster (v0.3.2) confirmed the decrypt preflight against real
+ciphertext and that `dry_run` defaults to true. It proved nothing about recovery: every
+device came back `skipped / already registered`, so no restore path was executed. **Backup is
+implemented and unit-tested; it is not yet demonstrated to do the job it exists for.**
+
 ## Alternatives considered
 
 - **Redis `BGSAVE`/RDB snapshots only:** rejected as the answer, though still worth running.
