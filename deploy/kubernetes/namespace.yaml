@@ -1,3 +1,17 @@
+# The stack's namespace.
+#
+# ⚠️ Do NOT edit the name here. `namespace:` in kustomization.yaml is the single source
+# of truth — kustomize's namespace transformer rewrites BOTH this object's name and the
+# `metadata.namespace` of every resource in the bundle, so editing one place is enough
+# and editing two is how they drift apart. See ADR-0014 §1 for the naming convention.
+#
+# Single-tenant (the default): `mcp-gateway` is fine.
+#
+# Multi-tenant estates: the name is a PSEUDONYM, never the customer's name —
+# `mcp-t-<16 hex>`, derived deterministically with tools/tenant_namespace.py. A namespace
+# name is not encrypted, so a customer name here survives the crypto-shred that
+# ADR-0013 §10 exists to provide, and leaks into every metric label, alert and dashboard
+# in the estate. See ADR-0014 §1.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -5,3 +19,24 @@ metadata:
   labels:
     app.kubernetes.io/name: device-mcp-gateway
     app.kubernetes.io/managed-by: kustomize
+
+    # ── Policy selectors (ADR-0014 §2) ────────────────────────────────────────────
+    # NetworkPolicy selects on LABELS, not on names, so a naming convention alone is
+    # unenforceable. These are the handles every policy in networkpolicy.yaml — and the
+    # optional cluster-wide deny in cilium-clusterwide-deny.yaml — actually key on.
+    #
+    # `plane: tenant` marks this as a namespace that must not reach, or be reached by,
+    # any other tenant namespace. Keep it even on a single-tenant install: it costs
+    # nothing, and it means adding a second stack later does not require remembering to
+    # label the first one.
+    #
+    # Namespace labels must be provider-writable only. A namespace that can relabel
+    # itself can escape a deny keyed on `plane: tenant`, or attract traffic by claiming
+    # to be a tenant it is not — so `create`/`patch` on namespaces is a provider-plane
+    # RBAC verb, never a tenant-plane one.
+    mcp.gateway/plane: tenant
+
+    # Set this to the namespace pseudonym in a multi-tenant estate; it is what
+    # per-tenant policies and dashboards group by. Left as `default` for a
+    # single-tenant install, where there is no second tenant to distinguish from.
+    mcp.gateway/tenant: default

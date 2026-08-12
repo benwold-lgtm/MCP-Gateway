@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: device-mcp-gateway
-  namespace: mcp-gateway
   labels:
     app.kubernetes.io/name: device-mcp-gateway
 spec:
@@ -94,6 +93,40 @@ spec:
                   name: gateway-secrets
                   key: secret-key
                   optional: true
+            # Break-glass RBAC role keys. `optional: true` so a stack running purely on
+            # OIDC (ADR-0007) needs no static keys at all — but note the gateway warns
+            # when OIDC is enabled with no break-glass key, because an IdP outage then
+            # locks you out of your own gateway.
+            #
+            # ⚠️ Secret keys here are the lowercase-hyphenated Secret KEY names, not the
+            # env var names. `key: MCP_ADMIN_KEY` returns an empty string, which base64
+            # decodes happily and produces a `Bearer ` with no token — presenting as a
+            # 401 rather than as a manifest error.
+            - name: MCP_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: admin-key
+                  optional: true
+            - name: MCP_VIEWER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: viewer-key
+                  optional: true
+            # SSRF policy override (F-02). "false" here is a no-op that matches the
+            # config default — `resolve_allow_private` ORs config with this env var, so
+            # setting it false does NOT switch off `security.allow_private_targets: true`
+            # in the ConfigMap. It is declared so the knob is visible in the manifest
+            # rather than being a setting you have to already know exists.
+            #
+            # ⚠️ Set "true" if your devices live on private addresses — which is the
+            # normal case for a cluster-internal or LAN fleet. Without it, registration
+            # fails with "resolves to a blocked address", which is correct behaviour and
+            # reads exactly like a bug. Set it on the WORKER too: in distributed mode the
+            # worker performs the fetch.
+            - name: MCP_ALLOW_PRIVATE_TARGETS
+              value: "false"
             # Authenticated Redis URL incl. password (Tier-0 F-24), e.g.
             # redis://:<password>@redis:6379/0 (or rediss://… for TLS). Kept in the
             # secret so the password isn't in the manifest. The gateway refuses to

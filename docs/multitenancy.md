@@ -59,8 +59,21 @@ Concretely, a per-tenant stack is the unit of isolation when each tenant gets:
   means either tenant's stack can decrypt the other's secrets. One key per tenant.
 - **Its own RBAC keys.** Because scopes are global within a stack, the API keys you
   issue authorize everything in *that* stack — and nothing in another.
-- **Its own network boundary / namespace.** In Kubernetes, a namespace per tenant
-  with NetworkPolicies; see [docs/kubernetes-architecture.md](kubernetes-architecture.md).
+- **Its own network boundary / namespace.** In Kubernetes, a namespace per tenant with a
+  **default-deny** NetworkPolicy in both directions, so cross-tenant denial is a
+  consequence of the default rather than a rule anyone maintains. The namespace is named
+  as a *pseudonym* (`mcp-t-<16 hex>`, via `tools/tenant_namespace.py`) and never after the
+  customer — a namespace name is not encrypted, so a customer name there survives the
+  crypto-shred of [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md) §10 and
+  leaks into every metric label and dashboard in the estate. There is deliberately **no
+  mechanism to open a path between two tenants**. See
+  [ADR-0014](adr/0014-tenant-namespace-naming-and-network-isolation.md) and
+  [docs/kubernetes-architecture.md](kubernetes-architecture.md).
+
+  ⚠️ **Verify enforcement rather than assuming it.** A CNI that does not implement
+  NetworkPolicy accepts every policy and enforces none — `kubectl get netpol` looks
+  identical either way. One pod and one `curl` settle it; see
+  [testing-gaps.md TG-10](testing-gaps.md) for the probe and the verdicts to expect.
 
 ## Best practices (the rules)
 

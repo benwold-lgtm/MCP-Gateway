@@ -2,7 +2,6 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: device-mcp-gateway
-  namespace: mcp-gateway
   labels:
     app.kubernetes.io/name: device-mcp-gateway
   annotations:

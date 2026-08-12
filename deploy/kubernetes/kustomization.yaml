@@ -1,6 +1,22 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# ── The namespace: THE single source of truth ──────────────────────────────────────
+# Kustomize's namespace transformer rewrites both the `metadata.namespace` of every
+# resource in this bundle AND the name of the Namespace object in namespace.yaml, so
+# changing this one line retargets the whole stack. No resource file carries a hardcoded
+# namespace any more — do not add one back, or the two will drift.
+#
+# ⚠️ It does NOT rewrite CRD fields. `namespaceSelector` in servicemonitor.yaml is the
+# one that bites; that file omits it deliberately (an omitted selector means "my own
+# namespace", which is correct under any name).
+#
+# Multi-tenant estates: one namespace per tenant, named as a PSEUDONYM rather than after
+# the customer — `mcp-t-<16 hex>`, computed with tools/tenant_namespace.py. Deploy each
+# tenant from an overlay that sets this field and the `mcp.gateway/tenant` label; see
+# ADR-0014 §1–§2 and docs/multitenancy.md. A namespace name is not encrypted, so a
+# customer name here survives the crypto-shred of ADR-0013 §10 and leaks into every
+# metric label and dashboard in the estate.
 namespace: mcp-gateway
 
 resources:

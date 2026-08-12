@@ -10,6 +10,79 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Security
+
+- **Tenant network isolation — the Kubernetes NetworkPolicies were peer-blind (F-68).**
+  Every ingress rule carried `ports:` with **no `from:`**, and every egress rule `ports:`
+  with no `to:` — which in NetworkPolicy semantics means *any peer in the cluster*. The
+  architecture doc described the result as "Restricts ingress to port 8000", which was
+  accurate and is exactly what made the gap invisible: it restricted **ports, not peers**.
+  Measured on a live cluster rather than inferred — a pod in an unrelated namespace reached
+  the gateway's `/health` and got `HTTP 200` with the full payload.
+
+  Compounding it, NetworkPolicy is **pod-selected** and a pod matched by no policy is
+  default-allow: the three policies named only the gateway, worker and Redis pods, so
+  anything else landing in the namespace had unrestricted ingress *and* egress.
+
+  `deploy/kubernetes/networkpolicy.yaml` is rewritten around a `default-deny-all`
+  (`podSelector: {}`, both directions), with narrow allows re-opening one path at a time:
+  DNS to kube-system, intra-namespace, the monitoring scrape to `:9100`, the ingress
+  controller to `:8000`, and device egress now scoped by **peer as well as port**. The
+  egress `ipBlock` excludes the cluster's own pod and service CIDRs — where other tenants
+  live — while deliberately *not* excluding general RFC-1918 space, because devices
+  legitimately live on the private LAN and blanket-blocking it would train operators to
+  replace the rule with `0.0.0.0/0`.
+
+  ⚠️ **This is a behaviour change on upgrade.** A device on a port outside the
+  80/443/8080/8443 allowlist, or an ingress controller outside `ingress-nginx`, or a
+  Prometheus outside `monitoring`, will stop working until the corresponding rule names it.
+  The pod/service CIDR values are kind/kubeadm defaults and **must be verified** against
+  your cluster. And verify enforcement itself: a CNI that does not implement NetworkPolicy
+  accepts all seven objects and enforces none — see
+  [testing-gaps.md TG-10](docs/testing-gaps.md).
+
+### Added
+
+- **[ADR-0014](docs/adr/0014-tenant-namespace-naming-and-network-isolation.md) — tenant
+  namespace naming and default-deny network isolation** (Proposed). The namespace is a
+  **pseudonym**, `mcp-t-<16 hex>`, derived by keyed HMAC via the new
+  `tools/tenant_namespace.py`: keyed rather than hashed because a bare hash of a tenant
+  identifier is reversible by dictionary attack, and pseudonymous because a namespace name
+  is not encrypted and would therefore survive the crypto-shred that ADR-0013 §10 exists to
+  provide. Deterministic, so GitOps, a rebuild and an ADR-0011 restore all recompute it —
+  but provisioning still asserts non-existence, because a truncated-digest collision means
+  two tenants sharing a namespace.
+
+  Policy selects on **labels** (`mcp.gateway/plane`, `mcp.gateway/tenant`), since a naming
+  convention alone is unenforceable. **There is no inter-tenant exception mechanism** — an
+  earlier draft designed one and it was dropped for want of a single concrete use case;
+  the reasoning is recorded in §6 so it is not re-litigated, and a real case gets its own ADR.
+
+  An optional Tier-2 `CiliumClusterwideNetworkPolicy` is included for estates that need the
+  deny to hold against a tenant with namespace-write, because Kubernetes NetworkPolicy is
+  purely additive-allow: nothing can revoke an allow another policy grants, so under vanilla
+  policy the boundary is held by RBAC rather than by the network.
+
+- `deploy/overlays/tenant-example/` — a per-tenant kustomize overlay. The namespace is now
+  parameterized from `kustomization.yaml` alone (kustomize renames the `Namespace` object
+  *and* retargets every resource), and no resource file hardcodes it any more.
+
+### Fixed
+
+- **`deploy/kubernetes/` never wired `MCP_ADMIN_KEY`, `MCP_VIEWER_KEY` or
+  `MCP_ALLOW_PRIVATE_TARGETS`** — they existed only as hand-applied additions on the lab
+  cluster, so a stack built from the manifests alone came up without break-glass RBAC keys
+  and refused every private-addressed device with "resolves to a blocked address", which is
+  correct behaviour that reads exactly like a bug. Found during the TG-7 disaster-recovery
+  walk. `MCP_ALLOW_PRIVATE_TARGETS` is wired on **both** the gateway and the worker: in
+  distributed mode the worker performs the fetch, so setting it on the gateway alone lets
+  registration succeed while every subsequent call fails.
+
+- `servicemonitor.yaml` pinned `namespaceSelector.matchNames` to `mcp-gateway`. That is a
+  CRD field, which kustomize's `namespace:` transformer does **not** rewrite, so a
+  retargeted deployment would have scraped the wrong namespace. The selector is now omitted
+  — an omitted selector means "my own namespace", which is correct under any name.
+
 ### Changed
 
 - **[ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) is now Accepted**,

@@ -1,0 +1,65 @@
+# Per-tenant overlay — ADR-0014. COPY THIS PER TENANT; do not deploy it as-is.
+#
+#   cp -r deploy/overlays/tenant-example deploy/overlays/<pseudonym>
+#   kubectl apply -k deploy/overlays/<pseudonym>
+#
+# Two values change per tenant, and they must agree:
+#
+#   1. `namespace:` below — the full name, `mcp-t-<pseudonym>`.
+#   2. the `mcp.gateway/tenant` label — the pseudonym alone, without the prefix.
+#
+# Compute both at once, so they cannot drift:
+#
+#   export MCP_TENANT_NAMESPACE_KEY="$(pass show mcp/tenant-namespace-key)"
+#   python3 tools/tenant_namespace.py <tenant-id> --label
+#
+# The tenant identifier is internal and is never derived from anything the tenant chooses
+# — a pseudonym over an attacker-chosen input is not a pseudonym. See ADR-0014 §1 for why
+# the namespace is not simply named after the customer.
+#
+# ⚠️ Each tenant also needs its OWN Redis password, MCP_SECRET_KEY and RBAC keys in a
+# `gateway-secrets` Secret in ITS namespace. This overlay does not create them and cannot:
+# a shared secret across tenants defeats the isolation the namespace split provides
+# (ADR-0004, docs/multitenancy.md § Best practices). Create them per namespace before
+# applying, or the pods stay unready with a Secret-not-found event.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../kubernetes
+
+# Retargets every resource AND renames the Namespace object itself.
+namespace: mcp-t-0000000000000000
+
+labels:
+  # `includeSelectors: false` is load-bearing. With it true, kustomize would add this
+  # label to every Deployment's `spec.selector.matchLabels` — an immutable field — so the
+  # first apply would succeed and every subsequent one would fail with a selector-change
+  # error. It also must not leak into Service selectors, which would silently match no
+  # pods after a rename.
+  - includeSelectors: false
+    pairs:
+      mcp.gateway/tenant: "0000000000000000"
+
+# ── Things you will probably also need ─────────────────────────────────────────────
+#
+# The image digest is inherited from the base. Pin it there once for the whole estate,
+# rather than per tenant, so a fleet upgrade is one edit — see the base kustomization.
+#
+# If this tenant's devices are on private addresses (the normal case), patch both
+# workloads. Setting it on the gateway alone lets registration succeed while every
+# subsequent call fails, which looks like a device fault rather than a config one:
+#
+# patches:
+#   - target:
+#       kind: Deployment
+#       name: device-mcp-(gateway|worker)
+#     patch: |-
+#       - op: replace
+#         path: /spec/template/spec/containers/0/env/[email protected]=="MCP_ALLOW_PRIVATE_TARGETS")]/value
+#         value: "true"
+#
+# If this tenant's devices listen on a port outside the base allowlist (a BMC on 623,
+# Prism on 9440, a vendor appliance on 8006), extend BOTH NetworkPolicies — the worker's
+# copy is the one that decides reachability in distributed mode. The symptom of missing
+# it is a connection timeout naming nothing in the policy.

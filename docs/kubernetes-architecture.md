@@ -370,7 +370,7 @@ If the UI runs as a gateway-pod sidecar, do **not** make it depend on tailing `l
 
 | Kind | Name | Purpose |
 |------|------|---------|
-| `Namespace` | `mcp-gateway` | Isolates all resources |
+| `Namespace` | `mcp-gateway` | Isolates all resources. Set from `namespace:` in `kustomization.yaml`, the single source of truth — no resource file hardcodes it. In a multi-tenant estate this is **one namespace per tenant**, named as a pseudonym rather than after the customer ([ADR-0014](adr/0014-tenant-namespace-naming-and-network-isolation.md) §1) |
 | `ConfigMap` | `gateway-config` | Non-secret `config.yaml` (mode: distributed, Redis URL, registry settings) |
 | `Secret` | `gateway-secrets` | `api-key`, `secret-key`, `redis-password`, `redis-url` — injected as env vars; **never in ConfigMap**. Distributed mode requires the api-key (F-23) and an authenticated `redis-url` (F-24). |
 | `StatefulSet` | `redis` | Single Redis 7 instance with AOF persistence |
@@ -380,7 +380,13 @@ If the UI runs as a gateway-pod sidecar, do **not** make it depend on tailing `l
 | `Deployment` | `device-mcp-worker` | Stateful workers — scale independently; liveness via Redis heartbeat key |
 | `Service` | `device-mcp-gateway` | ClusterIP on port 8000; target of the Ingress |
 | `Ingress` | `device-mcp-gateway` | External HTTPS entry; TLS termination |
-| `NetworkPolicy` | `device-mcp-gateway` | Restricts ingress to port 8000 |
+| `NetworkPolicy` | `default-deny-all` | **Denies all ingress and egress for every pod in the namespace.** The policy that actually provides isolation; the rest re-open one path each. Selects `podSelector: {}`, because NetworkPolicy is pod-selected and a pod matched by no policy is default-allow (F-68) |
+| `NetworkPolicy` | `allow-dns-egress` | Egress to kube-system DNS. Without it *everything* breaks, presenting as an application that cannot resolve rather than as a network fault |
+| `NetworkPolicy` | `allow-intra-namespace` | The stack talking to itself (gateway ↔ Redis ↔ worker). Scoped to this namespace only |
+| `NetworkPolicy` | `allow-monitoring-scrape` | Ingress from the monitoring namespace to `:9100` only. The **one** standing cross-namespace path, and load-bearing for [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md) §7 |
+| `NetworkPolicy` | `device-mcp-gateway` | Ingress from the ingress-controller namespace to `:8000`; egress to device APIs by port **and peer** |
+| `NetworkPolicy` | `device-mcp-worker` | No API ingress; egress to device APIs. In distributed mode this is the policy that decides whether a device is reachable |
+| `NetworkPolicy` | `redis` | Ingress on `:6379` from gateway and worker pods only |
 | `PodDisruptionBudget` | `device-mcp-gateway-pdb` | `minAvailable: 1` for gateway |
 | `PodDisruptionBudget` | `device-mcp-worker-pdb` | `minAvailable: 1` for worker |
 | `PersistentVolumeClaim` | `gateway-data` | **Optional.** Embedded-mode only — SQLite persistence for gateway pod. Not applied by default. |
@@ -461,12 +467,36 @@ kubectl create secret generic gateway-secrets \
   --from-literal=api-key=$(openssl rand -hex 32) \
   --from-literal=secret-key=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())") \
   --from-literal=redis-password="$REDIS_PW" \
-  --from-literal=redis-url="redis://:$REDIS_PW@redis:6379/0"   # use rediss:// when Redis terminates TLS
+  --from-literal=redis-url="redis://:$REDIS_PW@redis:6379/0" \
+  --from-literal=admin-key=$(openssl rand -hex 32) \
+  --from-literal=viewer-key=$(openssl rand -hex 32)   # use rediss:// when Redis terminates TLS
+#    admin-key / viewer-key are the break-glass RBAC role keys (MCP_ADMIN_KEY /
+#    MCP_VIEWER_KEY). They are wired `optional: true`, so a stack running purely on OIDC
+#    needs neither — but the gateway warns if OIDC is enabled with no break-glass key,
+#    because an IdP outage would otherwise lock you out of your own gateway.
+#    ⚠️ These are Secret KEY names, not env var names. Asking for `{.data.MCP_ADMIN_KEY}`
+#    returns an empty string that base64-decodes happily into a `Bearer ` with no token,
+#    which then presents as a 401 rather than as your own mistake.
 #    The Ingress also needs a TLS secret (mcp-gateway-tls) — issue it via cert-manager
 #    or create one manually (`kubectl create secret tls mcp-gateway-tls ...`).
 
 # 3. Deploy everything
 kubectl apply -k deploy/kubernetes/
+
+#    ⚠️ The bundle is default-deny in both directions (ADR-0014). If your devices are on
+#    a port outside 80/443/8080/8443, your ingress controller is not in `ingress-nginx`,
+#    or Prometheus is not in `monitoring`, edit networkpolicy.yaml before this step — and
+#    verify the pod/service CIDRs in its egress rules against YOUR cluster:
+#      kubectl cluster-info dump | grep -E 'cluster-cidr|service-cluster-ip-range'
+
+# 3a. Verify the policies are actually ENFORCED — a CNI that does not implement
+#     NetworkPolicy accepts all of them and enforces none, and `kubectl get netpol`
+#     looks identical either way. This must print 000/BLOCKED, never a 200:
+kubectl create namespace netpol-check
+kubectl run probe -n netpol-check --rm -i --restart=Never --image=curlimages/curl:8.11.1 -- \
+  curl -s -o /dev/null -w '%{http_code}\n' --max-time 8 \
+  http://device-mcp-gateway.mcp-gateway.svc.cluster.local:8000/health
+kubectl delete namespace netpol-check
 
 # 4. Watch rollouts
 kubectl rollout status deployment/device-mcp-gateway -n mcp-gateway
