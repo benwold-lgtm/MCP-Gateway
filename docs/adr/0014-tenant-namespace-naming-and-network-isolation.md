@@ -1,7 +1,7 @@
 # ADR-0014: Tenant namespace naming, and default-deny network isolation between tenants
 
-- **Status:** Proposed (implemented — see *Implementation notes*)
-- **Date:** 2026-08-12
+- **Status:** Accepted
+- **Date:** 2026-08-12 (Proposed) · 2026-08-12 (Accepted, on resolving §8)
 - **Related findings:** F-68 (NetworkPolicies are peer-blind — *not yet filed*, see Context),
   F-01 (no in-app tenant isolation), F-02 (SSRF / wide NetworkPolicy egress),
   F-33 (cross-API isolation is process-shared), F-36 (metrics exposition unauthenticated)
@@ -195,17 +195,19 @@ This is honest about what it is: **an RBAC guarantee, not a network guarantee.**
 obtains namespace-write in a tenant namespace has also obtained the ability to undo the
 boundary.
 
-**Tier 2 — hardened, optional, recommended for any provider-operated estate.** A
-`CiliumClusterwideNetworkPolicy` carrying explicit `ingressDeny`/`egressDeny` between
-namespaces labelled `mcp.gateway/plane: tenant`. It is cluster-scoped, so no namespace-local
-credential can touch it, and Cilium's deny rules take precedence over allows — which is
-exactly the revocation semantic vanilla NetworkPolicy lacks. The primary lab cluster runs
-Cilium v1.19.5 with the `ciliumclusterwidenetworkpolicies` CRD present, so this is testable
-today rather than theoretical.
+**Tier 2 — a network guarantee. Required for a provider-operated multi-tenant estate
+(§8).** `CiliumClusterwideNetworkPolicy` objects carrying explicit `ingressDeny`/`egressDeny`
+between namespaces labelled `mcp.gateway/plane: tenant`. They are cluster-scoped, so no
+namespace-local credential can touch them, and Cilium's deny rules take precedence over
+allows — exactly the revocation semantic vanilla NetworkPolicy lacks.
 
-Cilium is **not** made a hard requirement: the shipped manifests are deliberately CNI-neutral
-and must keep applying to a stock cluster. Tier 2 ships as an optional overlay, with the
-difference in guarantee documented rather than blurred.
+**Verified, not argued:** with the generated policies applied, a tenant that created its own
+`podSelector: {}` allow-all NetworkPolicy in its own namespace still could not reach the
+neighbouring tenant. That is the specific claim Tier 1 cannot make.
+
+Cilium is **not** a hard requirement of the *product*: the shipped manifests stay CNI-neutral
+and must keep applying to a stock cluster, and a single-tenant deployment needs Tier 1 alone.
+It is a requirement of *operating an estate* — see §8.
 
 ### 6. There is no inter-tenant exception mechanism
 
@@ -338,12 +340,37 @@ detail rather than merely realising it.
   loopback. This is the weakest part of Tier 1: `ipBlock` matches addresses, so it depends
   on those CIDRs being correct, and cannot separate tenants at all where the pod CIDR
   overlaps the device range. Tier 2 matches on identity and has neither problem.
-- **The Tier-2 Cilium policy ships with an unresolved selector, deliberately visible.** A
-  `CiliumClusterwideNetworkPolicy` is one cluster-scoped object and the selector language
-  has no self-reference, so it cannot express "any tenant namespace other than the pod's
-  own". The file documents both resolutions and recommends regenerating the namespace list
-  from the provisioning path — a tenant missing from that list fails *closed*, which is the
-  safe direction to get it wrong.
+- **The Tier-2 policies are generated, by `tools/tenant_isolation_policy.py`** — one
+  `CiliumClusterwideNetworkPolicy` per tenant, because a single cluster-scoped object has no
+  self-reference in its selector language and so cannot express "any tenant namespace other
+  than the pod's own". `generate --from-cluster` discovers namespaces by label; `check`
+  exits non-zero on an uncovered tenant.
+
+  ⚠️ **An earlier draft of this ADR proposed the wrong shape and reasoned wrongly about it.**
+  It suggested one cluster-wide object listing every tenant namespace in `NotIn`, and claimed
+  a tenant missing from that list would fail *closed*. Both are false, and measurement is
+  what showed it. `matchExpressions` are ANDed, so "source is in a tenant-plane namespace"
+  AND "source is not any tenant namespace" matches the **empty set** — the object applies
+  without error and enforces nothing. It fails **open**. Recorded here rather than quietly
+  corrected, because the mistake is the kind that survives review: the YAML is valid, the
+  apply succeeds, and `kubectl get ccnp` lists a policy that does nothing.
+
+  Two further behaviours, each of which also produced a policy that applied cleanly and did
+  the wrong thing:
+
+  - **A deny-only policy flips the endpoint into default-deny** unless `enableDefaultDeny`
+    is false for both directions. With it omitted, cross-tenant traffic *was* blocked — and
+    so was the tenant's own intra-namespace traffic and all its egress, because deny rules
+    allow nothing. The first "success" here was default-deny, not the rule matching.
+  - **The namespace-label selector key is `io.cilium.k8s.namespace.labels.<label>`**, not
+    `io.kubernetes.pod.namespace.labels.<label>`. The wrong key matches nothing, silently.
+
+- **Coverage is bounded but not free.** Each generated policy carries both an `ingressDeny`
+  and an `egressDeny`, so it isolates its tenant in both directions on its own — a covered
+  tenant stays isolated even from a tenant that has no policy, verified. A gap therefore
+  exposes only the *uncovered* tenant, and only to other uncovered tenants. That bounds the
+  blast radius of a missed regeneration; it does not remove it, which is why `check` exists
+  and why regeneration belongs in the provisioning path rather than in a runbook step.
 - **Verified on `mcp-gw`** (kind + Cilium v1.19.5): cross-namespace access to `:8000`,
   `:9100` and `:6379` all blocked where `:8000` previously returned `HTTP 200`; egress to a
   neighbouring namespace's pod IP blocked while the LAN device on `:9440` and the public
@@ -351,13 +378,35 @@ detail rather than merely realising it.
   `:8000`; the stack healthy with health checks still live. Full probe table in
   [testing-gaps.md TG-10](../testing-gaps.md), which also records what this does *not* prove.
 
-## Open questions
+## Resolved question
 
-One remains, and it blocks **Accepted**, in the shape ADR-0013 used.
+The one question this ADR was Proposed pending is settled below (2026-08-12), which is what
+moves it to Accepted.
 
-### A. Is Tier 1 sufficient for GA, or is Tier 2 required for provider-operated estates?
+### 8. Tier 2 is a precondition for a provider-operated estate; Tier 1 alone for single-tenant
 
-Tier 1 is portable and honest but RBAC-shaped. Tier 2 is a real network guarantee and
-narrows supported CNIs. The question is whether a provider-operated multi-tenant estate may
-ship on Tier 1 alone, or whether Tier 2 becomes a documented precondition for operating one —
-distinct from the single-tenant product, which needs neither.
+**A single-tenant deployment needs Tier 1 only.** The default-deny plus RBAC is the whole
+requirement, because there is no second tenant to be isolated from. Nothing about the
+single-tenant product changes, and no CNI requirement is imposed on it.
+
+**A provider-operated multi-tenant estate requires Tier 2.** This is a documented
+precondition for *operating* an estate, not a dependency of the software.
+
+The reasoning is that the two tiers do not differ in depth — they differ in **who the
+boundary holds against**, and only one of them holds against the party the boundary exists
+to constrain. Under Tier 1 a tenant re-opens cross-tenant reachability by *creating* a
+permissive NetworkPolicy in their own namespace; they need not delete anything, because
+NetworkPolicy is additive-allow. Tier 1's guarantee is therefore RBAC-shaped: it holds
+exactly as long as no tenant-plane credential acquires namespace-write, and a namespace-write
+compromise silently becomes a cross-tenant one. For a single tenant that is an acceptable
+internal control. For an estate it is the wrong shape of guarantee for the risk, since the
+whole premise of ADR-0004 is that the deployment boundary — not correct configuration inside
+it — is what separates customers.
+
+Tier 2 was measured holding against precisely that attack (§5), which is what makes this a
+decision about evidence rather than preference.
+
+**Consequences accepted with it:** a provider-operated estate is committed to a CNI with
+deny-rule semantics (Cilium today), the deny policies become generated artefacts that must
+be regenerated per tenant change, and coverage becomes an operational check rather than a
+property of a static file — see the implementation notes.
