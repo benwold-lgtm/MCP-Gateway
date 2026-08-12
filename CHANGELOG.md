@@ -10,6 +10,41 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Changed
+
+- **[ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) is now Accepted**,
+  with its three open questions resolved. `docs/multitenancy.md` is revised against it, and
+  the "future `tenant` claim on `Principal`" seam is formally withdrawn — in-app tenancy is
+  rejected **on merit**, not deferred on cost.
+
+  **Grant lifetimes are absolute, never sliding**, because a sliding window never expires for
+  an attacker who keeps working. act-on-tenant runs 60 minutes and re-authorizes, and a
+  session holds it for **one tenant at a time** — concurrent grants would rebuild ambient
+  estate-wide authority by accumulation. The two elevated grants **step up** (re-prove
+  identity): `provider:invoke` at 15 minutes, `provider:credentials` single-use. Those are
+  where a stolen provider session gets cashed out; act-on-tenant is the everyday motion, and
+  step-up there would fire often enough to train reflexive approval. Renewal is a new audited
+  act rather than an extension, and a grant gates *initiation*, not completion.
+
+  **A tenant sees every act by a human provider principal in their own audit** — including
+  reads, since "has someone been in my system" is exactly the question, while automated
+  platform operations are not provider acts. The actor is pseudonymized **at write time**,
+  which is a constraint on the audit writer rather than the UI: the record lands in the
+  tenant's hash-chained audit, so anything written in the clear is readable by whoever can
+  read the chain, and a hash-chained record cannot be redacted afterwards without breaking
+  verification.
+
+  **Offboarding uses per-tenant content keys.** Destroying a departed tenant's key leaves the
+  provider-side chain verifiable while making the content unrecoverable, so immutability and
+  erasure stop competing. ADR-0011 archives of that tenant are inside the shred — a backup on
+  an independent expiry schedule would be a hole straight through the decision — and a
+  per-tenant hostname is **never reissued**, so stale DNS or cached tokens cannot resolve onto
+  a new tenant's stack.
+
+  **This unblocks BFF audit logging, and constrains it:** the writer must pseudonymize at
+  write time and encrypt per-tenant content under a per-tenant key from its very first record.
+  Neither can be retrofitted into a hash chain.
+
 ### Added
 
 - **A disaster-recovery runbook, written from an actual rebuild** —

@@ -23,7 +23,7 @@ register were reconstructed from the codebase, the evaluation findings register,
 | [0010](0010-tool-derived-request-headers.md) | Tool-derived request headers — adopt SEP-2243 for OpenAPI, exclude passthrough permanently | Accepted |
 | [0011](0011-backup-and-restore.md) | Backup/restore — ciphertext archives by default, portable export behind its own scope | Accepted |
 | [0012](0012-federation-credential-model.md) | Credential model for BFF provider federation — preserve per-user relay, BFF audit first | Proposed |
-| [0013](0013-two-plane-tenancy-and-the-provider-plane.md) | Two-plane tenancy — isolated tenant stacks, and a provider plane above them | Proposed |
+| [0013](0013-two-plane-tenancy-and-the-provider-plane.md) | Two-plane tenancy — isolated tenant stacks, and a provider plane above them | Accepted |
 
 When you add an ADR: copy the template, take the next number, set status `Proposed`, and
 add a row here. Flip to `Accepted` when merged.
