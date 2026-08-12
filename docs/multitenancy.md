@@ -6,15 +6,13 @@
 > a shared one. This document explains why, what that means operationally, and the
 > rules you must follow to keep tenants isolated.
 
-> 🔭 **Pending revision — read
-> [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md) alongside this.**
-> Everything below still holds for a tenant stack, which is the only thing this document
-> describes. What it does not yet cover is the **provider plane**: a manager-of-managers
-> console, above the stacks, with its own IdP and its own `provider:*` scopes, for the party
-> operating many tenants. ADR-0013 also makes single-tenant-per-stack **permanent** rather
-> than a deferral, and withdraws the "future `tenant` claim" seam this document inherits
-> from [ADR-0004](adr/0004-single-tenant-per-stack.md). This page is revised in full once
-> ADR-0013 is Accepted — deliberately not twice.
+> **Settled by [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md) (Accepted,
+> 2026-08-11).** Single-tenant-per-stack is **permanent**, not a deferral: in-app tenancy is
+> rejected *on merit* rather than on cost — see [Why not in-app
+> multitenancy](#why-not-in-app-multitenancy). Above the stacks sits a **provider plane** for
+> the party operating many tenants; see [The provider
+> plane](#the-provider-plane-operating-many-tenants). The "future `tenant` claim on
+> `Principal`" seam this document used to describe has been **withdrawn**.
 
 A "tenant" here means a distinct trust/ownership boundary: a customer, a team, or
 any set of devices and credentials that must not be visible or controllable across
@@ -114,16 +112,60 @@ need to secure each stack. Independent of tenancy, every deployment must still:
 
 See the [Security section of the README](../README.md#security) for the full list.
 
-## Future direction
+## The provider plane (operating many tenants)
 
-In-application multitenancy (a tenant dimension on the registry, per-resource
-authorization, and per-tenant credential isolation in the worker) is a possible
-future extension, not a current capability. The intended seam is the existing
-`authenticate() → Principal{subject, scopes}` boundary: a `tenant` claim on the
-principal plus tenant-scoped registry keys and authorization would layer on without
-re-architecting the routes. Until that exists, **run one stack per tenant.**
+Running one stack per tenant raises an obvious question: who operates the estate, and how,
+without a god account that can reach every tenant at once? [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md)
+answers it with a **second plane** rather than a hole in the first.
 
-### What the cost of that retrofit currently is
+- **Two populations, two IdPs.** Tenant users authenticate to their tenant's IdP; provider
+  staff authenticate to the provider's. **Which IdP authenticated you fixes your plane**, and
+  the plane is immutable for the life of the session. There is no "switch to provider mode".
+- **Provider scopes live in the BFF, never in a tenant's gateway.** The gateway is the
+  per-tenant isolation unit; teaching it a cross-tenant concept would leak tenancy into the
+  one component whose job is not knowing other tenants exist.
+- **Cross-tenant power is exercised, not held.** Acting on a tenant is a discrete, audited,
+  time-boxed act against a *named* tenant — never ambient authority over the estate.
+- **`provider:admin` is not the gateway's `admin`.** Tool invocation (`provider:invoke`) and
+  credential access (`provider:credentials`) are carved out into separate **elevated** grants,
+  because routine debugging should not silently carry standing authority to actuate a
+  customer's hardware or walk off with their secrets.
+
+**Grant lifetimes are absolute, never sliding** — a sliding window never expires for an
+attacker who keeps working:
+
+| Grant | Window | Re-entry |
+|---|---|---|
+| act-on-tenant | 60 min | Re-authorize; **one tenant at a time** — acquiring another drops the first |
+| `provider:invoke` | 15 min | **Step-up** (re-prove identity) |
+| `provider:credentials` | Single use | **Step-up** |
+
+**Tenants see provider activity in their own audit.** Every act by a *human* provider
+principal is surfaced — including reads, because "has someone been looking at my system"
+is exactly the question being asked — with the actor **pseudonymized at write time** as a
+stable handle. Automated platform operations are not provider acts and are not surfaced.
+
+**Offboarding uses per-tenant content keys.** A departed tenant's provider-side audit content
+is encrypted under a key unique to them; destroying that key at offboarding leaves the hash
+chain verifiable while making the content unrecoverable. ADR-0011 backups are inside the
+shred, and a per-tenant hostname is **never reissued** — a tombstone refuses the name forever
+so stale DNS or cached tokens cannot land on a new tenant's stack.
+
+Cross-tenant *monitoring* aggregates from Prometheus, so the constant-use read path holds no
+tenant API credentials at all.
+
+## Why not in-app multitenancy
+
+This was **rejected on merit, not deferred on cost** (ADR-0013). Retrofitting a tenant
+dimension would take the property that makes this design defensible — a tenant boundary you
+can point at, which is also a Redis instance, a key, and a namespace — and replace it with a
+correctness argument spread across every query, cache key and session. The failure mode
+changes from "impossible" to "silent until it isn't."
+
+That said, the price was itemised before the decision was taken, and it is what the decision
+weighed:
+
+### What the retrofit would have cost
 
 The expensive part is not the authorization seam — it is the **flat `hostname` namespace**:
 the identity that Redis keys, the SQLite primary key, the `/v1/devices/{hostname}` route
@@ -132,16 +174,24 @@ per-device metric label are all built from. [ADR-0009](adr/0009-mcp-passthrough.
 the itemised register, kept current as features land, so the price is known rather than
 rediscovered.
 
-Two things have already been done to keep it from growing:
+Two things were done to keep that price from growing while the question was open, and both
+remain worth having now that it is closed — they are good hygiene independent of tenancy:
 
 - **`shared/keys.py`.** Every Redis key shape and the `device://` URI come from one
-  `KeyBuilder` whose `prefix` is `""` today. Adding a tenant prefix is one change instead of
-  roughly twenty, each of which could otherwise orphan live control-plane data. The prefix is
-  an explicit constructor argument — no ambient or request-scoped scoping, because implicit
+  `KeyBuilder` whose `prefix` is `""`. One place to reason about key shape beats roughly
+  twenty, each of which could otherwise orphan live control-plane data. The prefix is an
+  explicit constructor argument — no ambient or request-scoped scoping, because implicit
   scoping is the part that is hard to audit.
 - **MCP passthrough reuses the device entity** rather than adding a second flat-keyed one.
-  A remote MCP server is a `DeviceConfig` with a discriminator field, so a future tenant
-  dimension threads through one set of keys, routes and metrics rather than two.
+  A remote MCP server is a `DeviceConfig` with a discriminator field, so keys, routes and
+  metrics have one shape rather than two.
+
+> **Where cross-tenant leakage would actually show up.** Now that isolation is delivered by
+> the provider plane rather than by in-app scoping, the risk moves with it: the likely defect
+> is a **cache or session key in the BFF missing a tenant discriminator**. That is the same
+> shape as F-66, the zombie device hash and the manifest-cache lease — code assuming
+> something about a key — and it fails *silently*. It needs a test from the first commit of
+> the federation work, not a review at the end.
 
 Outbound credentials are also, deliberately, not a tenancy problem: the gateway calls an
 upstream with **its own stored per-server credential** and `AbstractAuth.apply()` takes no

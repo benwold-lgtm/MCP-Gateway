@@ -1,7 +1,7 @@
 # ADR-0013: Two-plane tenancy — isolated tenant stacks, and a provider plane above them
 
-- **Status:** Proposed
-- **Date:** 2026-08-11
+- **Status:** Accepted
+- **Date:** 2026-08-11 (Proposed) · 2026-08-11 (Accepted, on resolving §8–§10)
 - **Related findings:** F-01 (no in-app tenant isolation), F-30 (end-to-end identity),
   F-32 (global RBAC scopes), F-57 (hash-chained audit)
 - **Builds on:** [ADR-0004](0004-single-tenant-per-stack.md) (one stack per tenant),
@@ -214,14 +214,28 @@ the tenant API, and only through a named, audited act.
   - Per-tenant hostnames mean per-tenant DNS and certificates — real operational fan-out,
     on top of N stacks to upgrade, N secrets to rotate, N backup schedules.
   - Soft multi-tenancy is permanently out of reach. Accepted; it was never the target.
+  - **Grant lifetimes (§8) are machinery, not a policy file.** Absolute expiry, a step-up
+    flow the IdP must actually support, single-use semantics for `provider:credentials`, and
+    enforcement that a session holds exactly one act-on-tenant grant. The last of those is
+    the easiest to omit and the one that silently restores what §4 forbids.
+  - **Pseudonymization at write time (§9) constrains the audit writer's shape**, not its
+    presentation layer: the mapping from provider principal to stable handle has to exist
+    before the first record is written, because the chain cannot be rewritten afterwards.
+  - **Per-tenant content keys (§10) add a key-management surface** whose failure mode is
+    losing readability of your own audit. Destroying the wrong key is unrecoverable by
+    design, which is the property being bought — and the reason it needs the same care as
+    `MCP_SECRET_KEY`.
 - **Follow-ups:**
   - **BFF audit logging first.** It is a prerequisite for the provider plane, not a
-    parallel track.
+    parallel track — and §9 and §10 are prerequisites of *it*: the writer must pseudonymize
+    at write time and encrypt per-tenant content under a per-tenant key from its first
+    record. Retrofitting either into a hash chain is not possible.
   - Cross-tenant leakage will most likely appear as a **cache or session key missing a
     tenant discriminator** — the same shape as F-66, the zombie device hash, and the
     manifest-cache lease: code assuming something about a key. This needs a test from the
     first commit of the federation work, because the failure is silent.
-  - [multitenancy.md](../multitenancy.md) is revised against this ADR once it is Accepted.
+  - ~~[multitenancy.md](../multitenancy.md) is revised against this ADR once it is
+    Accepted.~~ ✅ Done on acceptance.
   - The BFF's own registry becomes the **tenant map**, which raises the priority of the
     BFF backup story ADR-0011 deferred.
 
@@ -253,17 +267,88 @@ the tenant API, and only through a named, audited act.
   session would become an estate-wide incident, and the audit would show a session rather
   than a decision to act on a particular tenant.
 
-## Open questions
+## Resolved questions
 
-Left open deliberately; this ADR is **Proposed** until they are settled.
+The three questions this ADR was Proposed pending are settled below (2026-08-11), which is
+what moves it to Accepted.
 
-1. **What is the time box** on an act-on-tenant grant and on each elevated grant (§5), and
-   do they re-authenticate (step-up) or merely re-authorize?
-2. **Does a tenant see provider actions in their own audit view?** Recording them is
-   settled; surfacing them is a product decision with a real argument on both sides.
-3. **Tenant offboarding.** Deleting a stack is easy; what the provider plane retains
-   afterwards — audit chain, backups ([ADR-0011](0011-backup-and-restore.md)), the tenant
-   map entry — is not, and is partly a legal question.
+### 8. Grant lifetimes are absolute, and the elevated grants step up
+
+**All windows are absolute, never sliding.** A sliding window renews on activity, so a
+stolen session that keeps working never expires — which is exactly an attacker's behaviour
+profile. Absolute windows bound the damage independently of how busy the thief is.
+
+| Grant | Window | Re-entry |
+|---|---|---|
+| act-on-tenant | 60 min, absolute | **Re-authorize** — assert the tenant and a justification; no re-proof of identity |
+| `provider:invoke` | 15 min, absolute | **Step-up** — re-prove identity |
+| `provider:credentials` | **Single use** — one operation | **Step-up** |
+
+Durations are configuration, not constants; the *relationships* are the decision.
+
+**Step-up only where a stolen session gets cashed out.** The two elevated grants are the
+points where a compromised provider session converts into real damage: actuating a
+customer's hardware, or walking away with their credentials. Act-on-tenant is the everyday
+motion of support work, and putting step-up there would fire so often it would train people
+to approve reflexively — destroying the signal precisely where it needs to mean something.
+
+Three rules without which the table above is decorative:
+
+- **One tenant at a time.** A session holds act-on-tenant for exactly one tenant; acquiring
+  another drops the first. Concurrent grants would rebuild ambient estate-wide authority by
+  accumulation, which is §4 defeated in detail rather than honoured.
+- **Renewal is a new act, not an extension** — new justification, new audit record. A
+  renewal that merely pushes the expiry out is a sliding window with extra steps.
+- **The grant gates initiation, not completion.** A tool call that outlives its window
+  finishes; it simply cannot start another. Killing work in flight would make operators
+  avoid short windows, and the window is the control.
+
+### 9. A tenant sees every *human* provider act, with the actor pseudonymized
+
+Recording was never in question (§4, §6). Surfacing is, and the answer is yes — with the
+dividing line drawn between **human and automated**, not between read and write.
+
+A customer asking "has anyone at the provider been in my system?" means a person. Routine
+health polling by the platform is not a provider act and does not belong in a tenant's audit
+view. Conversely, a *read* by a human support engineer is exactly what they are asking
+about, so a read/write split would omit the thing that matters while still admitting noise.
+Elevated acts are highlighted; routine ones collapse by default — noise is a presentation
+problem, not a reason to withhold.
+
+**The actor is pseudonymized at *write* time, and this is not a UI concern.** The record
+lands in the tenant's own hash-chained audit (§6), so anything written in the clear is
+readable by anyone who can read the chain, whatever a console chooses to render — and a
+hash-chained record cannot be retroactively redacted without breaking verification for
+everything after it. A stable per-person handle (consistent across acts, so a tenant can see
+"the same engineer, three times") satisfies the transparency need without exposing
+individual staff to customer targeting, which is not a decision that can be walked back once
+it is in an immutable chain.
+
+**This binds the BFF audit writer**, which therefore cannot be built before this decision —
+it is a prerequisite of that work, not a follow-up to it.
+
+### 10. Offboarding: crypto-shred the content, tombstone the name
+
+A departed tenant's own chain dies with their stack, which is easy. The hard part is the
+**provider-side** chain, which necessarily spans tenants: removing one tenant's entries
+breaks verification for every entry after them.
+
+**Per-tenant content keys resolve this without choosing between the two goods.** Each
+tenant's provider-side audit content is encrypted under a key unique to that tenant; at
+offboarding the key is destroyed. The hashes are untouched, so the chain still verifies end
+to end, while the content is unrecoverable. Immutability and erasure stop being in tension.
+
+Two consequences to implement deliberately:
+
+- **[ADR-0011](0011-backup-and-restore.md) archives of a departed tenant are still that
+  tenant's credentials** and belong *inside* the shred. A backup expiring on its own
+  independent schedule is a hole straight through this decision.
+- **A per-tenant hostname is never reissued.** Stale DNS, cached tokens and bookmarked
+  consoles from the departed tenant would otherwise resolve onto a *new* tenant's stack.
+  Retain a tombstone — enough to refuse the name forever, and nothing else.
+
+The retention period before the key is destroyed, and its interaction with legal hold,
+builds on **F-58** and is a contractual question rather than an architectural one.
 
 **Settled since first draft** (recorded so the reasoning is not re-litigated):
 
