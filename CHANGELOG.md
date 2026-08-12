@@ -12,6 +12,29 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Added
 
+- **A disaster-recovery runbook, written from an actual rebuild** —
+  [runbook.md § Rebuild a stack from nothing](docs/runbook.md#rebuild-a-stack-from-nothing-disaster-recovery).
+  A portable archive was restored into a genuinely fresh stack on separate hardware — new
+  Redis, new pods, a **different `MCP_SECRET_KEY`** — and verified by a `tools/call` on a
+  restored device returning live upstream data. That closes **TG-7** and discharges
+  [ADR-0011](docs/adr/0011-backup-and-restore.md)'s outstanding follow-up.
+
+  **The archive was never the hard part.** Preflight, replay, manifest rebuild and
+  `tools_revision` carry-over all behaved as designed. What stopped the rebuild three times
+  was the **out-of-band dependency set** — things a backup deliberately does not carry, which
+  had never been written down because nobody had rebuilt from nothing. The runbook now
+  tabulates them: per-device TLS trust material (without it the gateway **fails closed at
+  startup**), `MCP_ALLOW_PRIVATE_TARGETS` / `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY` (which the
+  `deploy/kubernetes/` manifests do not wire — they exist only as hand-applied additions), and
+  DNS for any non-Kubernetes name in a `base_url`.
+
+  The trap worth knowing: **without `MCP_ALLOW_PRIVATE_TARGETS`, restore refuses every
+  private-address device and reports a correct policy refusal.** The response cannot
+  distinguish a misconfigured new stack from a policy that legitimately rejects the device —
+  a direct consequence of restore replaying through the real registration gates. Conversely,
+  Kubernetes service DNS in `base_url`/`spec_url` needs **no** archive editing: it resolves
+  unchanged in any cluster with the same service names in the same namespace.
+
 - **TG-7, TG-8 and TG-9 in [docs/testing-gaps.md](docs/testing-gaps.md)** — the backup and
   restore shipped in 0.3.2 is implemented and unit-tested, but has not been demonstrated to do
   the job it exists for, and the register now says so. **TG-7** is disaster recovery proper:

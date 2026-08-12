@@ -428,6 +428,64 @@ live call stream — they stay inert until you explicitly replay them through th
 Every restore is audited (`backup.restore`), **including dry runs**: previewing is the
 natural reconnaissance step before a real one.
 
+### Rebuild a stack from nothing (disaster recovery)
+
+Restoring into a stack that still exists is the easy half. This is the other half: the
+original is gone and you are rebuilding onto new infrastructure.
+
+**Walked end to end on 2026-08-11** against a genuinely fresh cluster — new Redis, new pods,
+a *different* `MCP_SECRET_KEY` — closing [TG-7](testing-gaps.md). The steps below are what
+actually worked, including the three that failed first.
+
+**The archive is not a stack.** It carries devices, credentials and governance history. It
+does **not** carry the things below, and the gateway will not start — or will refuse every
+device — without them. Back these up with, and *separately from*, the archive:
+
+| Not in the archive | Symptom if missing | Where it lives |
+|---|---|---|
+| `MCP_SECRET_KEY` | 409 preflight abort on a ciphertext archive | your secret store; a **portable** archive removes this dependency |
+| Per-device TLS material (`security.mtls.devices.<host>.ca_bundle`) | **CrashLoopBackOff at startup** — `ValueError: security.mtls.devices.<host>: cannot build TLS context — [Errno 2]` | mounted volume, e.g. a `prism-ca` ConfigMap at `/etc/mcp/tls` |
+| `MCP_ALLOW_PRIVATE_TARGETS`, `MCP_ADMIN_KEY`, `MCP_VIEWER_KEY` | every device `failed` with a policy `reason`; or 401 with no admin credential at all | deployment env — **not wired by `deploy/kubernetes/` manifests** |
+| Non-Kubernetes DNS names used in `base_url` | devices restore, then never become reachable | the CoreDNS `hosts` block, or your resolver |
+
+> **The trap worth naming.** A stack rebuilt from the repo manifests alone has no
+> `MCP_ALLOW_PRIVATE_TARGETS`, so a restore refuses every private-address device and reports
+> it as a **correct policy refusal** — indistinguishable, in the response, from a deliberately
+> tightened policy. You will read a configuration gap as the system working as designed.
+> Check the env before concluding the archive is at fault.
+
+**Order of operations:**
+
+1. **Stand up an empty stack** and let it reach `healthy` with `registered_devices: 0`
+   *before* restoring. A stack that cannot start is not a restore problem, and diagnosing
+   both at once wastes the outage.
+2. **Reproduce the upstream-reachability environment.** `base_url` and `spec_url` are
+   replayed verbatim. Kubernetes service DNS
+   (`svc.mcp-gateway.svc.cluster.local`) resolves **unchanged** in a new cluster provided the
+   same service names exist in the same namespace — so recreate those services and the
+   archive needs no editing. Anything outside Kubernetes needs its resolution recreated.
+3. **Preview, then apply** — as above. A portable archive needs `"passphrase"`.
+4. **Verify the fleet works, not that it appears.** This is the step that separates a real
+   recovery from a green report:
+
+```bash
+# Devices present and provisioned — reachable AND pod_active, no spawn_error.
+curl -s -H "Authorization: Bearer $KEY" "$GW/v1/devices" | jq '.devices[]|{hostname,reachable,pod_active,spawn_error}'
+
+# The manifest rebuilt from the restored spec_url — tool_count > 0, has_manifest true.
+curl -s -H "Authorization: Bearer $KEY" "$GW/v1/devices/<host>/diagnostics" | jq '{tool_count,has_manifest,tools_revision}'
+
+# THE assertion: a tools/call on a device with a restored credential.
+# Nothing before this proves the credential decrypted to a usable secret.
+```
+
+A restored credential that decrypts to the *wrong* value fails only here — every check above
+it passes. If you verify one thing, verify this.
+
+**What a good result looks like:** every device `restored`, then `reachable: true` and
+`pod_active: true` with `has_manifest: true`, `tools_revision` carried across (not reset to
+0), and a `tools/call` returning real upstream data.
+
 ### Scale workers
 
 Each worker owns a disjoint set of devices (single-owner, D-2); scaling out triggers a
