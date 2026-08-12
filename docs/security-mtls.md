@@ -165,7 +165,7 @@ back on one trust set, which is the limitation this design removes.
 > verifiers): doing so would make `PYSEC-2026-3553` (path-building DoS) and
 > `PYSEC-2026-3554` (a wildcard SAN escaping `permittedSubtrees`) reachable on exactly
 > this path — and a name-constraint escape is precisely the failure this feature exists
-> to prevent. See [testing-gaps.md](testing-gaps.md#tg-4--the-kubernetes-manifests-on-a-real-cluster)
+> to prevent. See [testing-gaps.md](testing-gaps.md#tg-4--the-kubernetes-manifests-on-a-real-cluster--closed)
 > and [dependency-advisories.md](dependency-advisories.md).
 
 ## Scope & limitations

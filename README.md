@@ -991,7 +991,7 @@ Phase-0 / governance artifacts for reviewers and operators:
 | [docs/findings-register.md](docs/findings-register.md) | Every `F-nn` cited in these docs, defined once — severity, what it was, how it was resolved. A closed record of the completed review programme |
 | [docs/adr/](docs/adr/) | Architecture Decision Records — the load-bearing decisions (dual-mode, Redis control plane, single-owner, single-tenant, at-least-once+idempotency, fail-closed defaults, federated identity/RBAC) |
 | [docs/load-testing.md](docs/load-testing.md) | Load-baseline methodology + the runnable harness in [tools/loadtest/](tools/loadtest/) |
-| [docs/testing-gaps.md](docs/testing-gaps.md) | **What we have not empirically validated** and why — chaos/fault injection, scale baseline, HA Redis failover, live-cluster and arm64 verification. Read this before treating a resilience claim as proven |
+| [docs/testing-gaps.md](docs/testing-gaps.md) | **What we have not empirically validated** and why — chaos/fault injection, scale baseline, HA Redis failover, arm64 verification, and disaster recovery (restore into a fresh stack, at fleet scale, across a key rotation). Read this before treating a resilience claim as proven |
 | [docs/multitenancy.md](docs/multitenancy.md) | Single-tenant-per-stack deployment model (D-1) |
 | [docs/runbook.md](docs/runbook.md) | On-call runbook — per-alert playbooks, symptom troubleshooting, standard procedures |
 | [docs/upgrade.md](docs/upgrade.md) | Upgrade guide — versioning/compat policy, rolling procedure, breaking gates, rollback |
