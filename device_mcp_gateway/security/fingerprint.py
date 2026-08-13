@@ -156,6 +156,27 @@ def compare(stored: Observation, seen: Observation) -> str:
     return VERDICT_DECLARED_CHANGED if declared_changed else VERDICT_UNCHANGED
 
 
+def _declared_backfill(stored: Observation, seen: Observation) -> dict[str, Any]:
+    """Declared values the stored record lacks, so a first sighting is recorded.
+
+    Deliberately **not** routed through ``compare`` as a "declared changed" verdict.
+    Learning a name for the first time is not evidence that the endpoint became something
+    else, and treating it as one would let ``key_and_declared_changed`` — the strongest
+    signal this module can raise (ADR-0015 §3) — fire on a device that merely acquired an
+    inventory label in the same cycle its key rotated. The verdict stays honest; only the
+    record is completed.
+
+    Self-limiting, so it costs one write and not a per-cycle churn: once the value is
+    stored, ``stored.declared_*`` is truthy and this returns nothing.
+    """
+    fields: dict[str, Any] = {}
+    if seen.declared_name and not stored.declared_name:
+        fields["declared_name"] = seen.declared_name
+    if seen.declared_version and not stored.declared_version:
+        fields["declared_version"] = seen.declared_version
+    return fields
+
+
 def _declared_changed(stored: Observation, seen: Observation) -> bool:
     """True only when the upstream reported something *different*, not when it reported
     nothing. A probe that skipped the handshake has no declared fields, and treating that
@@ -191,7 +212,14 @@ def plan_update(
     verdict = compare(stored, seen)
 
     if verdict == VERDICT_UNCHANGED:
-        return verdict, {}
+        # Nothing moved — but the record may still be missing a declared value the probe
+        # can now supply, so fill it rather than writing nothing. This is the ordinary
+        # state of any device pinned before its declared source existed: an OpenAPI device
+        # upgraded onto a gateway that reads `info`, or one whose first pin came from
+        # registration pre-pinning. Without the fill it stays blank forever, because
+        # `_declared_changed` compares only when BOTH sides have a value, so None → "Acme"
+        # is not a change and the informational branch below is never reached.
+        return verdict, _declared_backfill(stored, seen)
 
     if verdict == VERDICT_FIRST_PIN:
         # Trust on first use: this establishes a baseline, it does not validate anything.

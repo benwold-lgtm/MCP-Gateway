@@ -218,6 +218,25 @@ registered device therefore shows no declared identity until its first spec poll
 can raise a false alarm — a cycle with nothing observed compares as "learned nothing", and
 a change needs both a stored and a seen value.
 
+**The fix for that gap had the same shape as the gap, and the cluster caught it too.**
+Capturing the value was not enough to record it. `_declared_changed` compares only when
+*both* the stored and seen values are present, so on an already-pinned device
+`None → "Acme Array"` was not a change, the verdict stayed `unchanged`, and `plan_update`
+wrote nothing — the field stayed blank through every probe. The new unit tests passed
+throughout because they all began from a device with **no pin at all**, which takes the
+`first_pin` path and writes every field. The state that actually exists on a running
+fleet — pinned, with no declared value yet — was never constructed. `plan_update` now
+backfills a declared value the record lacks, deliberately as a *fill* rather than a
+`declared_changed` verdict: learning a label for the first time is not evidence the
+endpoint became something else, and routing it through the verdict would let
+`key_and_declared_changed` (§3's strongest signal) fire on a device that merely acquired
+an inventory name in the same cycle its key rotated. The fill is self-limiting, so it
+costs one write per device and not a per-cycle churn.
+
+A device sitting at `pending_approval` does not backfill, because that branch returns
+early to avoid churn while a human decides; it fills on the cycle after approval. Verified
+on the cluster rather than assumed.
+
 **§7 held in practice, not just on paper.** The plain-HTTP upstream recorded a declared
 identity and no authenticated dimension, and stayed visibly distinct from the TLS-pinned
 devices in the API response.
