@@ -192,6 +192,55 @@ proposing it:
   `public_key().public_bytes(DER, SubjectPublicKeyInfo)`; subject, issuer and `not_valid_after`
   come from the same object for the contextual fields.
 
+## Implementation notes (verified on a live cluster, 2026-08-13)
+
+The whole decision was exercised against a real fleet before release: a Nutanix appliance
+on its own certificate, an in-cluster MCP upstream over plain HTTP, and a purpose-built
+TLS endpoint whose **server key was rotated under an unchanged CA** — the §2 scenario that
+must alarm, isolated from any trust change. Every pinned and pending value was checked
+against an independently computed digest rather than against the gateway's own report.
+
+**The declared dimension was half-implemented, and only a live probe showed it.** The MCP
+half worked from the start: `serverInfo` is read off the `initialize` handshake on every
+reachability check. The **OpenAPI half did not exist** — nothing read the document's
+`info` block, so an OpenAPI device (the *default* `upstream_kind`) had no declared
+identity at all. The unit suite could not see it: every test of the declared dimension
+supplied an `Observation` directly, so the comparison logic was correct and thoroughly
+covered while nothing ever populated it for that kind of device. The consequences were
+quiet ones — `key_and_declared_changed` (§3's strongest signal) could never fire for an
+OpenAPI device, degrading silently to `key_changed`, and the inventory motive in the
+Context above went unmet for most of a fleet.
+
+It is now captured during the spec poll, which is the only point in the health loop
+holding a parsed document. Two consequences worth stating rather than discovering: the
+value is compared on the *following* cycle rather than the same one, and a newly
+registered device therefore shows no declared identity until its first spec poll. Neither
+can raise a false alarm — a cycle with nothing observed compares as "learned nothing", and
+a change needs both a stored and a seen value.
+
+**The fix for that gap had the same shape as the gap, and the cluster caught it too.**
+Capturing the value was not enough to record it. `_declared_changed` compares only when
+*both* the stored and seen values are present, so on an already-pinned device
+`None → "Acme Array"` was not a change, the verdict stayed `unchanged`, and `plan_update`
+wrote nothing — the field stayed blank through every probe. The new unit tests passed
+throughout because they all began from a device with **no pin at all**, which takes the
+`first_pin` path and writes every field. The state that actually exists on a running
+fleet — pinned, with no declared value yet — was never constructed. `plan_update` now
+backfills a declared value the record lacks, deliberately as a *fill* rather than a
+`declared_changed` verdict: learning a label for the first time is not evidence the
+endpoint became something else, and routing it through the verdict would let
+`key_and_declared_changed` (§3's strongest signal) fire on a device that merely acquired
+an inventory name in the same cycle its key rotated. The fill is self-limiting, so it
+costs one write per device and not a per-cycle churn.
+
+A device sitting at `pending_approval` does not backfill, because that branch returns
+early to avoid churn while a human decides; it fills on the cycle after approval. Verified
+on the cluster rather than assumed.
+
+**§7 held in practice, not just on paper.** The plain-HTTP upstream recorded a declared
+identity and no authenticated dimension, and stayed visibly distinct from the TLS-pinned
+devices in the API response.
+
 ## Alternatives considered
 
 - **Pin the full certificate:** rejected — §2. Fires on every routine renewal, which trains

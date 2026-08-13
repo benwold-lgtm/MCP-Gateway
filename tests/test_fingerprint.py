@@ -307,3 +307,63 @@ class TestQuarantineReason:
         fingerprint."""
         reason = fp.quarantine_reason(fp.STATE_PENDING, "enforce", None, "tools/call")
         assert "fingerprint" in reason.lower() and "approve" in reason.lower()
+
+
+class TestDeclaredBackfill:
+    """A pinned device that has never recorded a declared identity.
+
+    This state is not exotic — it is what every TLS device looks like after an upgrade to
+    a gateway that reads the OpenAPI `info` block, and what registration pre-pinning
+    (ADR-0015 §8) produces on day one. It was missed because the tests that covered the
+    declared dimension all started from a device with NO pin at all, which takes the
+    `first_pin` path and writes every field. A cluster found it: the device stayed
+    `declared_name: null` through every probe while reporting `unchanged`.
+    """
+
+    PINNED_NO_DECLARED = fp.Observation(tls_spki_sha256="K1", tls_cert_sha256="C1")
+
+    def test_a_declared_value_appearing_for_the_first_time_is_recorded(self):
+        seen = fp.Observation(
+            tls_spki_sha256="K1", tls_cert_sha256="C1", declared_name="Acme Array", declared_version="7.2.1"
+        )
+        verdict, fields = fp.plan_update(self.PINNED_NO_DECLARED, fp.STATE_PINNED, None, seen, now=1.0)
+
+        assert fields["declared_name"] == "Acme Array"
+        assert fields["declared_version"] == "7.2.1"
+        # Learning a name is not evidence the endpoint became something else.
+        assert verdict == fp.VERDICT_UNCHANGED
+
+    def test_the_backfill_is_self_limiting(self):
+        """Once stored, it must stop writing — the loop runs every ~30s per device and the
+        whole reason plan_update returns an empty dict is to avoid that churn."""
+        stored = fp.Observation(
+            tls_spki_sha256="K1", tls_cert_sha256="C1", declared_name="Acme Array", declared_version="7.2.1"
+        )
+        seen = fp.Observation(
+            tls_spki_sha256="K1", tls_cert_sha256="C1", declared_name="Acme Array", declared_version="7.2.1"
+        )
+        assert fp.plan_update(stored, fp.STATE_PINNED, None, seen, now=1.0)[1] == {}
+
+    def test_a_partial_first_sighting_fills_only_what_is_missing(self):
+        stored = fp.Observation(tls_spki_sha256="K1", tls_cert_sha256="C1", declared_name="Acme Array")
+        seen = fp.Observation(
+            tls_spki_sha256="K1", tls_cert_sha256="C1", declared_name="Acme Array", declared_version="7.2.1"
+        )
+        assert fp.plan_update(stored, fp.STATE_PINNED, None, seen, now=1.0)[1] == {"declared_version": "7.2.1"}
+
+    def test_backfill_never_promotes_a_key_change_to_the_strongest_verdict(self):
+        """The reason this is a backfill and not a `declared_changed` verdict. A device
+        whose key rotated in the same cycle it first reported a name must read as
+        `key_changed`, not as `key_and_declared_changed` — ADR-0015 §3's strongest signal
+        means "this is a different thing", and merely learning a label is not that."""
+        seen = fp.Observation(
+            tls_spki_sha256="K2", tls_cert_sha256="C2", declared_name="Acme Array", declared_version="7.2.1"
+        )
+        verdict, _ = fp.plan_update(self.PINNED_NO_DECLARED, fp.STATE_PINNED, None, seen, now=1.0)
+        assert verdict == fp.VERDICT_KEY_CHANGED
+
+    def test_an_absent_declared_value_still_never_reads_as_a_change(self):
+        """The inverse guard: a probe that reported nothing must not blank a stored value."""
+        stored = fp.Observation(tls_spki_sha256="K1", tls_cert_sha256="C1", declared_name="Acme Array")
+        seen = fp.Observation(tls_spki_sha256="K1", tls_cert_sha256="C1")
+        assert fp.plan_update(stored, fp.STATE_PINNED, None, seen, now=1.0) == (fp.VERDICT_UNCHANGED, {})

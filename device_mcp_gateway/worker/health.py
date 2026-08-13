@@ -216,6 +216,13 @@ class WorkerHealthLoop:
                 return
 
             is_proxy = getattr(cfg, "upstream_kind", "openapi") == "mcp"
+            # ADR-0015 / F-69: an OpenAPI device's DECLARED identity lives in the document's
+            # `info` block — the spec analogue of the `serverInfo` an MCP upstream returns
+            # from `initialize`. Recorded here because this is the only point in the loop
+            # holding a parsed spec, and before the hash comparison below so that the
+            # unchanged-spec path (the overwhelmingly common one) still refreshes it.
+            if not is_proxy:
+                self._record_declared_from_spec(cfg.hostname, spec)
             new_hash = spec_fingerprint(spec, is_proxy=is_proxy)
             if new_hash == cfg.spec_hash:
                 # Unchanged spec — the overwhelmingly common case, and the one that used
@@ -418,6 +425,33 @@ class WorkerHealthLoop:
         seen = observation_from_client(self._client(hostname))
         if seen is not None and seen.has_tls():
             self._last_seen[hostname] = seen
+
+    def _record_declared_from_spec(self, hostname: str, spec: Any) -> None:
+        """Stash an OpenAPI document's ``info`` identity for the next comparison (ADR-0015).
+
+        Self-reported and therefore spoofable, exactly like MCP's ``serverInfo``: this is
+        the DECLARED dimension only — inventory that doubles as a change signal, never
+        evidence of identity.
+
+        Consumed by ``_update_fingerprint`` on the *following* cycle rather than this one,
+        because the spec poll runs after the comparison and on a slower cadence. That is
+        soon enough for inventory data and cannot raise a false alarm in the meantime: a
+        cycle with nothing stashed compares as "learned nothing", and ``_declared_changed``
+        only fires when both the stored and seen values are present. The cost is that a
+        newly registered device shows no declared identity until its first spec poll.
+
+        Never raises on a malformed document — a spec that survived fetching but carries a
+        junk ``info`` block must not break the health loop for that device.
+        """
+        info = spec.get("info") if isinstance(spec, dict) else None
+        if not isinstance(info, dict):
+            return
+        title, version = info.get("title"), info.get("version")
+        if title or version:
+            self._last_declared[hostname] = (
+                str(title) if title else None,
+                str(version) if version else None,
+            )
 
     async def _fetch_spec(self, cfg: Any) -> dict | None:
         if getattr(cfg, "upstream_kind", "openapi") == "mcp":
