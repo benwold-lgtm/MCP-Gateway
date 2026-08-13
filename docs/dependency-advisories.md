@@ -207,6 +207,48 @@ pip install -e ".[dev]" && pip install -r requirements.txt   # -r last, so exact
 pip freeze | sort   # then diff against requirements.txt; normalise _ vs - in names
 ```
 
+## Re-verification — 2026-08-13 (endpoint fingerprinting adds real `x509` usage)
+
+Re-checked rather than re-read, for the third time and the same reason: an input moved. The
+previous two entries both rest on the sentence *"the codebase contains no PKCS#7/S-MIME/CMS and
+no `x509.verification` usage at all"* — and half of that premise stopped being true in 0.3.3.
+[ADR-0015](adr/0015-endpoint-fingerprinting.md) parses a certificate off every live TLS probe,
+so `cryptography.x509` is now reached on a hot path, with **attacker-influenced input**. Left
+unchecked, the next reader would inherit a verdict whose stated reason no longer held.
+
+What 0.3.3 actually added, in full — `security/fingerprint.py` only:
+
+```
+x509.load_der_x509_certificate(der)          # parse the peer certificate
+cert.public_key().public_bytes(DER, SPKI)    # derive the pinned digest
+cert.issuer.rfc4514_string() / not_valid_after_utc   # context fields
+```
+
+That is **parsing and field access, not verification**. `x509.verification` — the
+chain-building API `-3553` and `-3554` live in — is still not called anywhere; the only match
+in the tree is the comment in `security/mtls.py` explaining why it must not be. Trust decisions
+remain OpenSSL through the stdlib, per-device `SSLContext` as before. `-3552` is the
+`pkcs7_decrypt_*` Bleichenbacher oracle, and there is still no PKCS#7/S-MIME/CMS anywhere.
+
+**Verdict unchanged: none reachable**, and `cryptography 50.0.0` stays an optional bump rather
+than a prerequisite for 0.3.3.
+
+Two things worth stating rather than leaving implicit, because "we parse hostile DER now" is
+the kind of change that deserves more than a shrug:
+
+- The DER we parse has **already been through OpenSSL's own parser and the handshake's
+  verification** — it comes from `getpeercert(True)` on a connection that completed against the
+  device's trust profile. It is not raw input from an unauthenticated peer, and its size is
+  bounded by what the TLS stack accepted. That is what keeps the "huge-input ASN.1" items in
+  the bundled-OpenSSL advisory (GHSA-537c-gmf6-5ccf) out of reach.
+- `observe_tls` catches **every** exception and yields an empty observation, by design: a
+  fingerprint that cannot be read must not break the request it rode in on. So a parser defect
+  reached through this path degrades to "learned nothing this cycle" rather than to a failed
+  probe — which `compare()` treats as absence of evidence, not evidence of change.
+
+If certificate *verification* ever migrates into `cryptography`, the coupling in the entries
+above comes straight back and `>=49` becomes a hard prerequisite.
+
 ## When you do upgrade
 
 `mcp` and `starlette` are upper-bounded for reasons written into `pyproject.toml`, and both
