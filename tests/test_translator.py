@@ -799,3 +799,60 @@ class TestRefResolutionInContainers:
         t = self._translator_with_thing()
         resolved = t._resolve_schema({"type": "object", "additionalProperties": False})
         assert resolved["additionalProperties"] is False
+
+
+class TestInvalidSpecsAreReportedNotRaised:
+    """Every caller of the translator catches `ValueError` to report a spec rejection —
+    `spawn_error` on the registration path, a warning-and-skip in the health loop. So the
+    contract is not "reject bad specs", it is **reject them as a `ValueError`**.
+
+    That contract was broken for the ordinary cases. The guard named
+    `OpenAPISpecValidatorError`, which is on a different branch of the library hierarchy
+    from `OpenAPIValidationError`:
+
+        OpenAPISpecValidatorError -> OpenAPIError    -> Exception   (version detection)
+        OpenAPIValidationError    -> ValidationError -> _Error      (the actual checks)
+
+    Only the first was caught, so "cannot determine the OpenAPI version" converted cleanly
+    while a malformed `info`, a missing required field or a wrong type — the cases an
+    operator actually hits — escaped as an unhandled traceback past every handler written
+    to deal with them.
+    """
+
+    # Both branches, so a future re-narrowing of the guard cannot pass this class.
+    INVALID = {
+        "info is not an object": {"openapi": "3.0.0", "info": "not-an-object"},
+        "missing info and paths": {"openapi": "3.0.0"},
+        "paths is the wrong type": {"openapi": "3.0.0", "info": {"title": "t", "version": "1"}, "paths": "x"},
+        "version undetectable": {},
+        "unrecognised openapi version": {"openapi": "nope", "info": {"title": "t", "version": "1"}, "paths": {}},
+        # Reaches `enforce_operation_count`, which runs BEFORE the validator and outside
+        # its guard. It used to call .values() on whatever `paths` held, so a string raised
+        # AttributeError — escaping the same handlers, one function earlier.
+        "paths is a string": {"openapi": "3.0.0", "info": {"title": "t", "version": "1"}, "paths": "nope"},
+        "spec is not an object": [],
+    }
+
+    def test_every_invalid_spec_raises_value_error(self):
+        import pytest
+
+        for label, spec in self.INVALID.items():
+            with pytest.raises(ValueError) as caught:
+                SpecTranslator().translate(spec, "dev")
+            assert "Invalid OpenAPI spec" in str(caught.value), label
+
+    def test_the_original_error_survives_for_diagnosis(self):
+        """An operator reading `spawn_error` needs to know *what* was wrong with the
+        document, so the underlying type and message are preserved rather than flattened
+        into a generic rejection."""
+        import pytest
+
+        with pytest.raises(ValueError) as caught:
+            SpecTranslator().translate({"openapi": "3.0.0", "info": "not-an-object"}, "dev")
+        assert "OpenAPIValidationError" in str(caught.value)
+        assert caught.value.__cause__ is not None, "the chain must be kept for the traceback"
+
+    def test_a_valid_spec_still_translates(self):
+        """The guard is broad; it must not swallow a working document."""
+        manifest = SpecTranslator().translate(fresh_spec(), "dev")
+        assert manifest.hostname == "dev"

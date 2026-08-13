@@ -157,6 +157,31 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Fixed
 
+- **F-70 — an invalid OpenAPI spec escaped the `ValueError` contract every caller depends
+  on.** The translator's guard named `OpenAPISpecValidatorError`, which sits on a *different*
+  branch of the library's hierarchy from the errors ordinary validation raises:
+  `OpenAPISpecValidatorError → OpenAPIError` covers version *detection*, while the actual
+  checks raise `OpenAPIValidationError → ValidationError → _Error`. Only the first was
+  caught — so "cannot determine which OpenAPI version this is" converted cleanly, while a
+  malformed `info`, a missing required field or a wrong type propagated uncaught.
+
+  Every caller downstream catches `(SpecTooLargeError, ValueError)` to *report* a rejection —
+  `spawn_error` at registration, a warning-and-skip in the health loop — so the escape
+  bypassed all of it. A spec poll ended in an unhandled traceback instead of the warning the
+  code was written to produce. Not an outage (the worker's per-device catch-all keeps the loop
+  alive and the lock is released in `finally`), but the operator lost the reason.
+
+  A second instance of the same shape sat one function earlier: `enforce_operation_count`
+  runs **before** the validator and outside its guard, and called `.values()` on whatever
+  `paths` held — so a `paths` that was not an object raised `AttributeError` past the same
+  handlers. It now defers such a document to the validator, which is the thing that knows how
+  to say *why* it is unusable.
+
+  The guard now wraps the single validator call and converts **any** exception to
+  `ValueError`, preserving the original type and message. Re-enumerating the two branches
+  would have fixed today's failure and left the same trap for the next library release.
+  Found while live-verifying ADR-0015 on a cluster.
+
 - **`deploy/kubernetes/` never wired `MCP_ADMIN_KEY`, `MCP_VIEWER_KEY` or
   `MCP_ALLOW_PRIVATE_TARGETS`** — they existed only as hand-applied additions on the lab
   cluster, so a stack built from the manifests alone came up without break-glass RBAC keys

@@ -257,3 +257,29 @@ def test_a_title_without_a_version_is_still_worth_recording():
     loop = WorkerHealthLoop("w", MemoryRegistryBackend(), None, interval=30)
     loop._record_declared_from_spec("dev1", {"info": {"title": "Acme Array"}})
     assert loop._last_declared["dev1"] == ("Acme Array", None)
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_spec_does_not_break_the_health_loop(monkeypatch):
+    """The escape, at the layer that made it matter.
+
+    `_check_device` catches `(SpecTooLargeError, ValueError)` to log the rejection and
+    leave the manifest cache alone. An invalid document used to raise
+    `OpenAPIValidationError` (or, one function earlier, `AttributeError`) straight past
+    that handler — so the device's spec poll ended in an unhandled traceback rather than
+    the warning the code was written to produce.
+    """
+    loop, _backend, _calls = await _make_loop(monkeypatch)
+
+    for junk in (
+        {"openapi": "3.0.0", "info": "not-an-object", "paths": {}},
+        {"openapi": "3.0.0", "info": {"title": "t", "version": "1"}, "paths": "nope"},
+        {"openapi": "3.0.0"},
+    ):
+
+        async def _fetch(_cfg, _j=junk):
+            return _j
+
+        monkeypatch.setattr(loop, "_fetch_spec", _fetch)
+        loop._last_spec_check["dev1"] = time.time() - 301
+        await loop._check_device("dev1")  # must not raise
