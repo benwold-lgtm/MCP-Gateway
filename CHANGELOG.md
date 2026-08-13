@@ -12,6 +12,58 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Security
 
+- **[ADR-0015](docs/adr/0015-endpoint-fingerprinting.md) — endpoint fingerprinting (F-69).**
+  Registering a device established **where** the gateway may talk, never **what** it was
+  talking to. The URL policy, per-hop redirect re-validation and `base_url` pinning all
+  constrain the *address*; nothing noticed when the thing at that address became a different
+  thing — DNS repointed, a host rebuilt, an appliance replaced. The gateway kept sending
+  credentials to it and never mentioned the change.
+
+  A fingerprint is now recorded per device and compared on every reachability check, across
+  **three dimensions that are never collapsed into one "verified" flag**: the TLS **SPKI**
+  digest (cryptographic), the upstream's *declared* `serverInfo` / OpenAPI `info`
+  (self-reported, therefore spoofable — inventory that doubles as a change signal, and data
+  the probe already fetched and discarded), and the existing `tools_revision`. A single badge
+  over the top would lend the declared fields weight they do not have.
+
+  **The pin is the SPKI, not the certificate**, and that one choice decides whether the
+  control is signal or noise: a routine renewal re-issues against the same key, so nothing
+  fires. Pinning the certificate would alarm every 60–90 days per device across the fleet,
+  and a control that fires constantly trains reflexive approval — the ADR-0013 §8 argument,
+  unchanged. **The default is `warn` and the device keeps serving**; `security.fingerprint_policy:
+  enforce` (per device, because the risk is not uniform) **quarantines** it instead —
+  `tools/call` **and `resources/read`** are refused, while probes, diagnostics and
+  `GET /v1/devices` keep working, so a quarantined device stays distinguishable from a dead
+  one. Clearing the flag needs `devices:write` on `POST /v1/devices/{hostname}/fingerprint/approve`
+  and is audited as the trust decision it is. Registration optionally accepts an
+  `expected_tls_spki_sha256`, which converts trust-on-first-use into real verification by
+  **pre-pinning** — no separate check, no TOFU window.
+
+  ⚠️ **First use is TOFU and is labelled as such.** It establishes a baseline; it does not
+  validate anything. If the endpoint was already wrong at registration, the wrong value is
+  what gets pinned. A plain-`http://` upstream has **no** authenticated dimension at all.
+
+- **ADR-0011 archives now carry the endpoint pins, and a restore never re-pins.** Without
+  this every device silently re-TOFU'd on restore and the control was void from the first
+  disaster recovery onward — precisely when an operator is least able to notice, and with
+  nothing in any response to show for it. The archive gains a `fingerprint` block per device;
+  `POST /v1/admin/restore` reports a per-device `fingerprint_warning` plus a top-level
+  `fingerprint_warnings` count, which is also written to the audit record.
+
+  Two findings from the build, neither anticipated by the ADR. **`on_conflict=overwrite`
+  wiped the live pin even when the archive agreed with it** — `replace_device` rebuilds the
+  record from registration inputs alone, so writing the fingerprint back is load-bearing
+  rather than a no-op. And **`fingerprint_state` / `pending_tls_spki_sha256` have to travel
+  too**, or a device exported mid-`pending_approval` returns `pinned` and restore becomes a
+  route around the approval requirement.
+
+  Where the archive and a live record disagree, **the live pin stays and the disagreement is
+  reported** rather than applied: the archived value is historical, while the live one was
+  established against the endpoint as it is now, quite possibly by an audited approval.
+  Overwriting it would undo that decision silently and then, under `enforce`, quarantine a
+  device nothing was wrong with. Archives written before this change still restore, and are
+  **reported** as carrying no pin instead of passing as an unqualified success.
+
 - **[ADR-0014](docs/adr/0014-tenant-namespace-naming-and-network-isolation.md) is now
   Accepted**, resolving its open question: **Tier 2 is a precondition for operating a
   provider-operated multi-tenant estate; a single-tenant deployment needs Tier 1 alone.**

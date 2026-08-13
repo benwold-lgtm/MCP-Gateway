@@ -25,6 +25,15 @@ device the current egress policy forbids. It follows that a restore can legitima
 *on a device*, and those failures are reported per device rather than swallowed or
 escalated into a failed batch.
 
+**A restore re-establishes endpoint fingerprints but never re-pins one** (ADR-0015).
+Registration starts a device unpinned, and an unpinned device trusts whatever answers
+first — so without the archived pin every device would silently re-TOFU on restore and the
+control would be void from the first disaster recovery onward, precisely when nobody is in
+a position to notice. Where the archive and a live record disagree, the live pin stays and
+the disagreement is reported: the archived value is historical, while the live one was
+established against the endpoint as it is now, quite possibly by an audited human approval.
+See :func:`plan_fingerprint_restore`.
+
 ``dry_run=True`` is the default. The destructive direction is never the one you get by
 omission — and a dry run runs the same preflight and the same per-device gates, so its
 report is a real prediction rather than a parse.
@@ -60,6 +69,26 @@ OUTCOME_RESTORED = "restored"
 OUTCOME_WOULD_RESTORE = "would_restore"
 OUTCOME_SKIPPED = "skipped"
 OUTCOME_FAILED = "failed"
+
+
+# The fingerprint fields an archive carries, in the order they are written back. Kept in
+# lockstep with ``backup.export._FINGERPRINT_FIELDS`` — the two halves of one format.
+_FINGERPRINT_FIELDS = (
+    "tls_spki_sha256",
+    "tls_cert_sha256",
+    "tls_issuer",
+    "tls_not_after",
+    "declared_name",
+    "declared_version",
+    "fingerprint_state",
+    "fingerprint_pinned_at",
+    "pending_tls_spki_sha256",
+    "fingerprint_policy",
+)
+
+# How much of a digest to show an operator comparing two of them. The full 64 hex
+# characters twice in one sentence is unreadable, and the API has the whole value.
+_DIGEST_PREVIEW = 16
 
 
 class RestorePreflightError(BackupError):
@@ -121,6 +150,81 @@ def preflight(archive: dict[str, Any], codec: CredentialCodec, passphrase: str |
     return opener
 
 
+def _short(digest: str | None) -> str:
+    return f"{digest[:_DIGEST_PREVIEW]}…" if digest and len(digest) > _DIGEST_PREVIEW else str(digest)
+
+
+def plan_fingerprint_restore(record: dict[str, Any], existing: Any) -> tuple[dict[str, Any], str | None]:
+    """What to write back for a device's endpoint fingerprint. ``(fields, warning)``.
+
+    Pure, so the policy is testable without a registry — the same reason
+    ``security.fingerprint.plan_update`` is pure.
+
+    **The load-bearing rule is that a restore never re-pins a device that is already
+    pinned** (ADR-0015, Consequences). Where the archive and the live record disagree, the
+    live pin wins and the disagreement is *reported*. The archived value is historical; the
+    live one was established by observing the endpoint as it is now, quite possibly through
+    an audited human approval (ADR-0015 §6). Writing the old value over it would undo that
+    decision silently and then, under ``enforce``, quarantine a device that nothing was
+    wrong with — a restore that takes a healthy fleet offline is a restore nobody runs.
+
+    ⚠️ Writing the live values back is **not** a no-op, which is the non-obvious part.
+    ``on_conflict=overwrite`` goes through ``replace_device``, and that builds a *fresh*
+    ``DeviceConfig`` from registration inputs alone — so by the time this lands, the live
+    pin has already been wiped and re-establishing it is the only thing keeping the device
+    from re-TOFU-ing.
+
+    When a live pin exists the whole live block is kept, not a merge of the two. A pin, its
+    context fields, its state and its policy are one coherent trust record; half from each
+    era would describe neither.
+    """
+    block = record.get("fingerprint")
+    live_spki = getattr(existing, "tls_spki_sha256", None) if existing is not None else None
+
+    if live_spki:
+        fields = {field: getattr(existing, field, None) for field in _FINGERPRINT_FIELDS}
+        archived_spki = (block or {}).get("tls_spki_sha256")
+        warning = None
+        if archived_spki and archived_spki != live_spki:
+            warning = (
+                f"archive pins this device to SPKI {_short(archived_spki)} but it is currently "
+                f"pinned to {_short(live_spki)}; the live pin was kept and the archived one "
+                "discarded — a restore warns rather than re-pinning (ADR-0015). If the archived "
+                "value is the correct one, delete the device and restore it again."
+            )
+        return fields, warning
+
+    # No live pin to protect: whatever the archive carries beats trust-on-first-use.
+    if block is None:
+        return {}, _no_pin_warning(
+            record,
+            "this archive predates endpoint fingerprinting (ADR-0015) and carries no pin for "
+            "this device, so it will trust-on-first-use on its next probe and record whatever "
+            "answers. Re-export from a gateway running this version to capture pins.",
+        )
+
+    fields = {field: block.get(field) for field in _FINGERPRINT_FIELDS}
+    if not block.get("tls_spki_sha256"):
+        return fields, _no_pin_warning(
+            record,
+            "no fingerprint pin had been recorded for this device when the archive was made, "
+            "so it will trust-on-first-use on its next probe.",
+        )
+    return fields, None
+
+
+def _no_pin_warning(record: dict[str, Any], message: str) -> str | None:
+    """Suppress the missing-pin warning for an upstream that could never have had one.
+
+    A plain-``http://`` device has no authenticated dimension at all (ADR-0015 §7), so
+    "no pin" is its permanent and correct state rather than a gap in the archive. Warning
+    on it every restore would be noise of exactly the kind ADR-0015 §2 argues destroys a
+    control — and it would be attached to the devices where the warning means least.
+    """
+    base_url = (record.get("base_url") or "").strip().lower()
+    return message if base_url.startswith("https://") else None
+
+
 async def restore_archive(
     *,
     raw_archive: Any,
@@ -164,13 +268,22 @@ async def restore_archive(
     for r in results:
         counts[r["outcome"]] = counts.get(r["outcome"], 0) + 1
 
-    logger.info(f"Restore {'(dry run) ' if dry_run else ''}complete: {counts}")
+    # Surfaced at the top level, not left for the caller to find by scanning the device
+    # list. A fingerprint warning on 3 of 500 devices is exactly the thing that gets
+    # missed in a per-device report during an incident, and it is the thing worth reading.
+    warned = sum(1 for r in results if r.get("fingerprint_warning"))
+
+    logger.info(
+        f"Restore {'(dry run) ' if dry_run else ''}complete: {counts}"
+        + (f" ({warned} fingerprint warning{'s' if warned != 1 else ''})" if warned else "")
+    )
     return {
         "dry_run": dry_run,
         "kind": archive.get("kind"),
         "on_conflict": on_conflict,
         "created_at": archive.get("created_at"),
         "counts": counts,
+        "fingerprint_warnings": warned,
         "devices": results,
     }
 
@@ -189,11 +302,16 @@ async def _restore_one(
     include_deadletters: bool,
 ) -> dict[str, Any]:
     hostname = record.get("hostname") or "<unnamed>"
+    # Assigned once the device is known to be one this restore will write; read by
+    # _result at call time, so the outcomes decided before that carry no warning.
+    fp_warning: str | None = None
 
     def _result(outcome: str, reason: str | None = None) -> dict[str, Any]:
         out: dict[str, Any] = {"hostname": hostname, "outcome": outcome}
         if reason:
             out["reason"] = reason
+        if fp_warning:
+            out["fingerprint_warning"] = fp_warning
         return out
 
     upstream_kind = record.get("upstream_kind") or "openapi"
@@ -226,6 +344,10 @@ async def _restore_one(
         if on_conflict == ON_CONFLICT_FAIL:
             return _result(OUTCOME_FAILED, "already registered (on_conflict=fail)")
 
+    # Decided before the dry-run return on purpose: a dry run is a real prediction, and a
+    # restore that would discard an archived pin must say so while it can still be stopped.
+    fp_fields, fp_warning = plan_fingerprint_restore(record, existing)
+
     if dry_run:
         return _result(OUTCOME_WOULD_RESTORE)
 
@@ -254,7 +376,14 @@ async def _restore_one(
     except Exception as exc:  # noqa: BLE001
         return _result(OUTCOME_FAILED, f"{type(exc).__name__}: {exc}")
 
-    await _restore_governance(hostname, record, archive, backend, include_deadletters=include_deadletters)
+    await _restore_governance(
+        hostname,
+        record,
+        archive,
+        backend,
+        include_deadletters=include_deadletters,
+        fingerprint_fields=fp_fields,
+    )
     return _result(OUTCOME_RESTORED)
 
 
@@ -280,21 +409,25 @@ async def _restore_governance(
     backend: Any,
     *,
     include_deadletters: bool,
+    fingerprint_fields: dict[str, Any] | None = None,
 ) -> None:
     """Put back what registration does not reconstruct.
 
     ``register_device`` starts a device at ``tools_revision=0`` with no change history,
     which is right for a new device and wrong for a restored one: a client polling the
-    revision would read the reset as the tool set having rolled back (F-41). These are
-    written after the replay rather than through it, because they are governance metadata
-    *about* a registration rather than inputs *to* one — the egress policy has nothing to
-    say about them.
+    revision would read the reset as the tool set having rolled back (F-41). The endpoint
+    fingerprint is here for the same reason and with higher stakes: registration starts a
+    device unpinned, and an unpinned device trusts the next thing that answers (ADR-0015).
+    These are written after the replay rather than through it, because they are governance
+    metadata *about* a registration rather than inputs *to* one — the egress policy has
+    nothing to say about them.
     """
     change = (archive.get("tool_changes") or {}).get(hostname)
     revision = record.get("tools_revision") or 0
     fields: dict[str, Any] = {}
     if revision:
         fields["tools_revision"] = revision
+    fields.update(fingerprint_fields or {})
     if fields:
         await backend.update_device_fields(hostname, **fields)
     if change:

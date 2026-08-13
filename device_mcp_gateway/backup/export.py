@@ -22,6 +22,14 @@ particular running stack and mean nothing in another one — restoring them woul
 facts about a fleet that has not been contacted yet, which is exactly the mistake F-66 was.
 The restoring stack establishes them itself.
 
+The one apparent exception is the endpoint fingerprint (ADR-0015), and it proves the rule.
+A pin looks like a measurement — something a probe observed — but it is a **baseline
+somebody is trusting**, in the same family as ``tools_revision``: TOFU established it, or a
+human approved it, and either way it encodes a decision rather than a reading. So it
+travels. Dropping it would not lose a fact the new stack can re-derive; it would silently
+re-run trust-on-first-use against whatever now answers at ``base_url`` — the exact
+substitution the control exists to catch, at the exact moment nobody is watching.
+
 The credential field
 --------------------
 The archive's ``auth_config`` is always **ciphertext under whatever seals this archive** —
@@ -69,6 +77,36 @@ _DEVICE_FIELDS = (
     "rate_limit_rps",
     "upstream_kind",
     "upstream_transport",
+)
+
+# The endpoint fingerprint (ADR-0015), carried as its own block rather than folded in
+# above, because it restores under different rules: these are not inputs to a
+# registration, and one of them is a decision a human made.
+#
+# The pin is a *governance* record, not a runtime measurement, which is why it travels
+# while `reachable` and `last_check` do not. Leaving it out would mean every device
+# silently re-TOFUs on the first restore — the comparison would find no stored SPKI, read
+# the endpoint as a first pin, and record whatever answered. The control would be void
+# from the first disaster recovery onward, which is precisely when nobody is in a position
+# to notice (ADR-0015, Consequences).
+#
+# `fingerprint_state` and `pending_tls_spki_sha256` are here for the same reason: a device
+# exported mid-`pending_approval` must come back still pending. Restoring it as `pinned`
+# would let a restore launder an unapproved endpoint change into an approved baseline.
+#
+# `fingerprint_policy` is a per-device *configuration* rather than an observation, and
+# dropping it would silently downgrade an `enforce` device to the deployment default.
+_FINGERPRINT_FIELDS = (
+    "tls_spki_sha256",
+    "tls_cert_sha256",
+    "tls_issuer",
+    "tls_not_after",
+    "declared_name",
+    "declared_version",
+    "fingerprint_state",
+    "fingerprint_pinned_at",
+    "pending_tls_spki_sha256",
+    "fingerprint_policy",
 )
 
 
@@ -159,6 +197,11 @@ async def build_archive(
         # Governance counter travels with the device: resetting it on restore would tell
         # every polling client the tool set had rolled back (F-41).
         record["tools_revision"] = getattr(cfg_obj, "tools_revision", 0)
+        # Always written, even when nothing is pinned: the block's *presence* is how a
+        # reader tells a fingerprint-aware archive from one exported before ADR-0015, and
+        # those two call for different advice — re-export the stack versus accept that
+        # this device has no baseline yet.
+        record["fingerprint"] = {field: getattr(cfg_obj, field, None) for field in _FINGERPRINT_FIELDS}
         plaintext = credential_plaintext(getattr(cfg_obj, "auth_config", None), codec)
         record["auth_config"] = _seal(plaintext, sealer) if plaintext else None
         devices.append(record)

@@ -473,3 +473,65 @@ def test_the_shipped_argon2_parameters_match_the_adr():
     assert backup["argon2_iterations"] == 3
     assert backup["argon2_lanes"] == 4
     assert backup["passphrase_min_length"] == 16
+
+
+# --- Endpoint fingerprints in the archive (ADR-0015) ------------------------
+
+
+def _register_plain(client, hostname, base_url="http://127.0.0.1:9"):
+    resp = client.post("/v1/devices", headers=_auth(), json={"hostname": hostname, "base_url": base_url})
+    assert resp.status_code in (200, 201), resp.text
+    return resp
+
+
+def test_the_archive_carries_the_endpoint_fingerprint(monkeypatch):
+    """Without this the control is void from the first restore onward.
+
+    An archive that omits the pin does not lose a fact the new stack can re-derive — it
+    silently re-runs trust-on-first-use against whatever now answers at ``base_url``,
+    which is the exact substitution ADR-0015 exists to catch.
+    """
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    spki = "a1" * 32
+    resp = client.post(
+        "/v1/devices",
+        headers=_auth(),
+        json={
+            "hostname": "alpha",
+            "base_url": "https://127.0.0.1:9",
+            "expected_tls_spki_sha256": spki,
+            "fingerprint_policy": "enforce",
+        },
+    )
+    assert resp.status_code in (200, 201), resp.text
+
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+    block = archive["devices"][0]["fingerprint"]
+
+    assert block["tls_spki_sha256"] == spki
+    assert block["fingerprint_state"] == "pinned"
+    # A per-device `enforce` that silently reverts to the deployment default on restore
+    # would downgrade exactly the devices chosen for being worth protecting.
+    assert block["fingerprint_policy"] == "enforce"
+
+
+def test_the_fingerprint_block_is_present_even_when_nothing_is_pinned(monkeypatch):
+    """Its presence is how a reader tells a fingerprint-aware archive from an older one,
+    and those two call for different advice."""
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    _register_plain(client, "alpha")
+
+    block = client.get("/v1/admin/backup", headers=_auth()).json()["devices"][0]["fingerprint"]
+    assert block["tls_spki_sha256"] is None
+    assert block["fingerprint_state"] == "unpinned"
+
+
+def test_the_archive_does_not_carry_runtime_measurements(monkeypatch):
+    """The fingerprint travels because it is a trusted baseline, not because observed
+    values travel. `reachable`/`last_check` are measurements of one stack (F-66)."""
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    _register_plain(client, "alpha")
+
+    record = client.get("/v1/admin/backup", headers=_auth()).json()["devices"][0]
+    for field in ("reachable", "last_check", "pod_active", "worker_id", "spec_hash"):
+        assert field not in record, f"{field} is a measurement and must not be restored"

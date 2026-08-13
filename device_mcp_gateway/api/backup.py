@@ -224,6 +224,11 @@ async def restore_backup(request: Request):
         dry_run=dry_run,
         kind=report["kind"],
         on_conflict=on_conflict,
+        # A restore that discarded an archived pin, or that left a device to
+        # trust-on-first-use, is a change in what this stack trusts — the audit chain is
+        # where ADR-0015 §6 puts those, and a responder reading only the audit record
+        # should not have to infer it from the device counts.
+        fingerprint_warnings=report.get("fingerprint_warnings", 0),
         **{f"count_{k}": v for k, v in report["counts"].items()},
     )
     return report
