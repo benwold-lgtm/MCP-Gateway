@@ -169,6 +169,86 @@ def _declared_changed(stored: Observation, seen: Observation) -> bool:
     return False
 
 
+def plan_update(
+    stored: Observation,
+    state: str,
+    pending_spki: str | None,
+    seen: Observation,
+    now: float,
+) -> tuple[str, dict[str, Any]]:
+    """Decide what to persist after a probe. Returns ``(verdict, fields_to_write)``.
+
+    Pure so the policy can be tested without a registry. An **empty dict means write
+    nothing** — which is the common case, and deliberately so: the health loop runs every
+    ~30s per device, and re-writing an unchanged fingerprint each cycle would be pure write
+    amplification against Redis for no new information.
+
+    The load-bearing rule is that a changed key **does not re-pin**. The approved
+    ``tls_spki_sha256`` stays put and the new value lands in ``pending_tls_spki_sha256``, so
+    an operator can see both sides of the decision and so a silent substitution cannot
+    launder itself into the baseline by being observed twice.
+    """
+    verdict = compare(stored, seen)
+
+    if verdict == VERDICT_UNCHANGED:
+        return verdict, {}
+
+    if verdict == VERDICT_FIRST_PIN:
+        # Trust on first use: this establishes a baseline, it does not validate anything.
+        return verdict, {
+            "tls_spki_sha256": seen.tls_spki_sha256,
+            "tls_cert_sha256": seen.tls_cert_sha256,
+            "tls_issuer": seen.tls_issuer,
+            "tls_not_after": seen.tls_not_after,
+            "declared_name": seen.declared_name,
+            "declared_version": seen.declared_version,
+            "fingerprint_state": STATE_PINNED,
+            "fingerprint_pinned_at": now,
+        }
+
+    if verdict in NEEDS_APPROVAL:
+        if state == STATE_PENDING and pending_spki == seen.tls_spki_sha256:
+            # Already flagged, and the endpoint is still showing the same new key. Nothing
+            # new to record; writing every cycle would just churn.
+            return verdict, {}
+        return verdict, {
+            "fingerprint_state": STATE_PENDING,
+            "pending_tls_spki_sha256": seen.tls_spki_sha256,
+        }
+
+    # Informational: same key, so the endpoint is still the same endpoint. Refresh the
+    # contextual fields in place and stay pinned — this is the renewal / version-bump path
+    # that must NOT interrupt anyone.
+    fields: dict[str, Any] = {}
+    if verdict == VERDICT_CERT_ROTATED:
+        fields.update(
+            {
+                "tls_cert_sha256": seen.tls_cert_sha256,
+                "tls_issuer": seen.tls_issuer,
+                "tls_not_after": seen.tls_not_after,
+            }
+        )
+    if seen.declared_name:
+        fields["declared_name"] = seen.declared_name
+    if seen.declared_version:
+        fields["declared_version"] = seen.declared_version
+    return verdict, fields
+
+
+def approve(seen_spki: str | None, now: float) -> dict[str, Any]:
+    """Fields that re-pin a device to its pending key (ADR-0015 §6).
+
+    Clears the pending value in the same write. Leaving it set would make an approved
+    device still look mid-decision to the UI and to any later comparison.
+    """
+    return {
+        "tls_spki_sha256": seen_spki,
+        "pending_tls_spki_sha256": None,
+        "fingerprint_state": STATE_PINNED,
+        "fingerprint_pinned_at": now,
+    }
+
+
 def resolve_policy(device_policy: str | None, default_policy: str | None) -> str:
     """Effective policy for a device: its own override, else the deployment default,
     else ``warn`` (ADR-0015 §5).
@@ -181,6 +261,36 @@ def resolve_policy(device_policy: str | None, default_policy: str | None) -> str
         if candidate and candidate.lower() in (POLICY_WARN, POLICY_ENFORCE):
             return candidate.lower()
     return POLICY_WARN
+
+
+# JSON-RPC methods that *use* the device: they send its credentials upstream and return its
+# data. Everything else — initialize, tools/list, resources/list, ping — only *observes*,
+# and stays available so a quarantined device remains distinguishable from a dead one
+# (ADR-0015 §9). resources/read is here deliberately: it carries the same exposure as a
+# GET-shaped tool call and differs only in code path, so stopping one and not the other
+# would leave a quiet route to exactly what the quarantine prevents.
+QUARANTINED_METHODS = frozenset({"tools/call", "resources/read"})
+
+
+def quarantine_reason(
+    fingerprint_state: str,
+    device_policy: str | None,
+    default_policy: str | None,
+    method: str | None = None,
+) -> str | None:
+    """Why this call must be refused, or None to let it through.
+
+    Returns a message rather than a bool so the caller can tell the client *why* — a
+    generic failure would send an operator hunting the device instead of the fingerprint.
+    """
+    if method is not None and method not in QUARANTINED_METHODS:
+        return None
+    if not is_quarantined(fingerprint_state, resolve_policy(device_policy, default_policy)):
+        return None
+    return (
+        "device is quarantined: its endpoint fingerprint changed and has not been approved "
+        "(security.fingerprint_policy=enforce). Approve the new fingerprint or remove the device."
+    )
 
 
 def is_quarantined(fingerprint_state: str, effective_policy: str) -> bool:

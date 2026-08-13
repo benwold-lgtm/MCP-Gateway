@@ -95,6 +95,16 @@ data:
       # fetching in distributed mode).
       allow_private_targets: false
 
+      # Endpoint fingerprint policy (ADR-0015). "warn" (default) flags a device whose TLS
+      # key changed and keeps it serving; "enforce" additionally refuses tool calls and
+      # resource reads until an operator approves the new key or removes the device.
+      # Overridable per device at registration with `fingerprint_policy`.
+      #
+      # The pin is the SPKI (public key), not the certificate — so a routine renewal
+      # against the same key does NOT alarm. A changed key does, because from the outside
+      # that is indistinguishable from a substituted endpoint.
+      # fingerprint_policy: "warn"
+
       # Companion to gateway.trust_proxy_headers above. List the ranges the ingress
       # controller actually connects from — your cluster pod CIDR, plus the service/LB
       # range if traffic traverses one. These are cluster-specific; read them off your

@@ -23,7 +23,7 @@ class TestCompare:
         assert fp.compare(obs(), obs(tls_spki_sha256="K1")) == fp.VERDICT_FIRST_PIN
 
     def test_identical_is_unchanged(self):
-        a = obs(tls_spki_sha256="K1", tls_cert_sha256="C1", declared_name="prism", declared_version="1.0")
+        a = obs(tls_spki_sha256="K1", tls_cert_sha256="C1", declared_name="device-a", declared_version="1.0")
         assert fp.compare(a, a) == fp.VERDICT_UNCHANGED
 
     def test_renewal_with_the_same_key_does_not_alarm(self):
@@ -46,13 +46,13 @@ class TestCompare:
         assert fp.VERDICT_KEY_CHANGED in fp.NEEDS_APPROVAL
 
     def test_key_and_declared_change_is_the_strongest_signal(self):
-        stored = obs(tls_spki_sha256="K1", declared_name="prism", declared_version="1.0")
-        seen = obs(tls_spki_sha256="K2", declared_name="something-else", declared_version="9.9")
+        stored = obs(tls_spki_sha256="K1", declared_name="device-a", declared_version="1.0")
+        seen = obs(tls_spki_sha256="K2", declared_name="device-b", declared_version="9.9")
         assert fp.compare(stored, seen) == fp.VERDICT_KEY_AND_DECLARED_CHANGED
 
     def test_version_bump_alone_is_informational(self):
-        stored = obs(tls_spki_sha256="K1", declared_name="prism", declared_version="1.0")
-        seen = obs(tls_spki_sha256="K1", declared_name="prism", declared_version="1.1")
+        stored = obs(tls_spki_sha256="K1", declared_name="device-a", declared_version="1.0")
+        seen = obs(tls_spki_sha256="K1", declared_name="device-a", declared_version="1.1")
         verdict = fp.compare(stored, seen)
         assert verdict == fp.VERDICT_DECLARED_CHANGED
         assert verdict not in fp.NEEDS_APPROVAL
@@ -61,13 +61,13 @@ class TestCompare:
         """An unreachable device, or a probe that failed before the handshake, has no
         observation. Absence of evidence must not read as evidence of change, or every
         transient outage becomes a fingerprint alarm."""
-        stored = obs(tls_spki_sha256="K1", declared_name="prism")
+        stored = obs(tls_spki_sha256="K1", declared_name="device-a")
         assert fp.compare(stored, obs()) == fp.VERDICT_UNCHANGED
 
     def test_missing_declared_field_is_not_a_change(self):
         """A terse upstream that omits `version` must not look like a downgrade."""
-        stored = obs(tls_spki_sha256="K1", declared_name="prism", declared_version="1.0")
-        seen = obs(tls_spki_sha256="K1", declared_name="prism", declared_version=None)
+        stored = obs(tls_spki_sha256="K1", declared_name="device-a", declared_version="1.0")
+        seen = obs(tls_spki_sha256="K1", declared_name="device-a", declared_version=None)
         assert fp.compare(stored, seen) == fp.VERDICT_UNCHANGED
 
     def test_plain_http_device_never_alarms_on_the_tls_dimension(self):
@@ -203,3 +203,107 @@ class TestObserveTls:
         first, second = issue(30), issue(90)
         assert first != second, "different certificates"
         assert fp.spki_sha256(first) == fp.spki_sha256(second), "same key => same SPKI"
+
+
+class TestPlanUpdate:
+    """What actually gets persisted after a probe."""
+
+    STORED = fp.Observation(
+        tls_spki_sha256="K1",
+        tls_cert_sha256="C1",
+        tls_issuer="CA1",
+        declared_name="device-a",
+        declared_version="1.0",
+    )
+
+    def test_unchanged_writes_nothing(self):
+        """The health loop runs every ~30s per device. Re-writing an identical
+        fingerprint each cycle would be pure write amplification against Redis."""
+        seen = fp.Observation("K1", "C1", "CA1", None, "device-a", "1.0")
+        verdict, fields = fp.plan_update(self.STORED, fp.STATE_PINNED, None, seen, now=1.0)
+        assert verdict == fp.VERDICT_UNCHANGED
+        assert fields == {}
+
+    def test_key_change_does_not_repin(self):
+        """The load-bearing rule. If a changed key overwrote the pinned one, a silent
+        substitution would launder itself into the baseline by being observed twice —
+        the control would record the attack as the new normal."""
+        seen = fp.Observation("K2", "C2")
+        _, fields = fp.plan_update(self.STORED, fp.STATE_PINNED, None, seen, now=1.0)
+        assert "tls_spki_sha256" not in fields
+        assert fields["pending_tls_spki_sha256"] == "K2"
+        assert fields["fingerprint_state"] == fp.STATE_PENDING
+
+    def test_repeated_pending_observation_writes_nothing(self):
+        """Already flagged, same new key still showing: nothing new to record."""
+        seen = fp.Observation("K2", "C2")
+        _, fields = fp.plan_update(self.STORED, fp.STATE_PENDING, "K2", seen, now=1.0)
+        assert fields == {}
+
+    def test_a_different_new_key_while_pending_updates_the_pending_value(self):
+        seen = fp.Observation("K3", "C3")
+        _, fields = fp.plan_update(self.STORED, fp.STATE_PENDING, "K2", seen, now=1.0)
+        assert fields["pending_tls_spki_sha256"] == "K3"
+
+    def test_cert_rotation_refreshes_context_and_stays_pinned(self):
+        seen = fp.Observation("K1", "C2", "CA2", "2027-01-01", "device-a", "1.0")
+        verdict, fields = fp.plan_update(self.STORED, fp.STATE_PINNED, None, seen, now=1.0)
+        assert verdict == fp.VERDICT_CERT_ROTATED
+        assert fields["tls_cert_sha256"] == "C2"
+        assert "fingerprint_state" not in fields, "must not disturb the pinned state"
+        assert "tls_spki_sha256" not in fields, "the key did not change"
+
+    def test_first_pin_records_everything(self):
+        seen = fp.Observation("K1", "C1", "CA1", "2027-01-01", "device-a", "1.0")
+        verdict, fields = fp.plan_update(fp.Observation(), fp.STATE_UNPINNED, None, seen, now=42.0)
+        assert verdict == fp.VERDICT_FIRST_PIN
+        assert fields["tls_spki_sha256"] == "K1"
+        assert fields["fingerprint_state"] == fp.STATE_PINNED
+        assert fields["fingerprint_pinned_at"] == 42.0
+
+    def test_empty_observation_writes_nothing(self):
+        _, fields = fp.plan_update(self.STORED, fp.STATE_PINNED, None, fp.Observation(), now=1.0)
+        assert fields == {}
+
+
+class TestApprove:
+    def test_repins_and_clears_pending(self):
+        """Leaving the pending value set would make an approved device still look
+        mid-decision to the UI and to the next comparison."""
+        fields = fp.approve("K2", 99.0)
+        assert fields["tls_spki_sha256"] == "K2"
+        assert fields["pending_tls_spki_sha256"] is None
+        assert fields["fingerprint_state"] == fp.STATE_PINNED
+        assert fields["fingerprint_pinned_at"] == 99.0
+
+
+class TestQuarantineReason:
+    """ADR-0015 §9: the *use* paths stop, the *observation* paths keep working."""
+
+    @pytest.mark.parametrize("method", ["tools/call", "resources/read"])
+    def test_use_methods_are_refused(self, method):
+        assert fp.quarantine_reason(fp.STATE_PENDING, "enforce", None, method)
+
+    @pytest.mark.parametrize("method", ["initialize", "tools/list", "resources/list", "ping"])
+    def test_observation_methods_are_allowed(self, method):
+        """Refusing these would make a quarantined device indistinguishable from a dead
+        one, exactly when an operator is trying to work out which it is."""
+        assert fp.quarantine_reason(fp.STATE_PENDING, "enforce", None, method) is None
+
+    def test_warn_never_refuses(self):
+        assert fp.quarantine_reason(fp.STATE_PENDING, "warn", None, "tools/call") is None
+
+    def test_device_inherits_deployment_policy(self):
+        assert fp.quarantine_reason(fp.STATE_PENDING, None, "enforce", "tools/call")
+
+    def test_device_override_beats_deployment_policy(self):
+        assert fp.quarantine_reason(fp.STATE_PENDING, "warn", "enforce", "tools/call") is None
+
+    def test_pinned_device_is_never_refused(self):
+        assert fp.quarantine_reason(fp.STATE_PINNED, "enforce", None, "tools/call") is None
+
+    def test_reason_names_the_cause(self):
+        """A generic failure would send an operator hunting the device instead of the
+        fingerprint."""
+        reason = fp.quarantine_reason(fp.STATE_PENDING, "enforce", None, "tools/call")
+        assert "fingerprint" in reason.lower() and "approve" in reason.lower()

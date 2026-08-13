@@ -45,6 +45,7 @@ from device_mcp_gateway.audit import audit_log
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
 from device_mcp_gateway.rbac import SCOPE_TOOLS_CALL, require_scope
 from device_mcp_gateway.registry.server import Registry
+from device_mcp_gateway.security import fingerprint as fp
 
 router = APIRouter()
 
@@ -151,6 +152,16 @@ async def device_streamable_post(hostname: str, request: Request, response: Resp
     payload = await _read_payload(request)
     method = payload.get("method", "")
     msg_id = payload.get("id")
+
+    # ADR-0015 §9 — see the equivalent guard in api/sse.py.
+    _fp_reason = fp.quarantine_reason(
+        device.fingerprint_state,
+        device.fingerprint_policy,
+        (request.app.state.config.get("security", {}) or {}).get("fingerprint_policy"),
+        method,
+    )
+    if _fp_reason:
+        raise HTTPException(status_code=409, detail=f"{hostname}: {_fp_reason}")
     _principal = getattr(request.state, "principal", None)
     _subject = _principal.subject if _principal else "unknown"
     _rid = getattr(request.state, "request_id", "-")

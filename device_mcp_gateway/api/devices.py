@@ -19,6 +19,7 @@ HTTP concern. Restore rebuilds its auth from an archived credential blob instead
 
 from __future__ import annotations
 
+import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -28,6 +29,7 @@ from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
+from device_mcp_gateway.security import fingerprint as fp
 from device_mcp_gateway.rbac import SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, require_scope
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.schemas import (
@@ -59,6 +61,10 @@ from device_mcp_gateway.registry.validation import (  # noqa: F401  (re-exported
     _validate_upstream,
     validate_device_registration,
 )
+
+# A SHA-256 digest, hex. Validated rather than stored raw so a typo becomes a 400 at
+# registration instead of a device that quarantines itself on its very first probe.
+_SPKI_RE = re.compile(r"[0-9a-f]{64}")
 
 router = APIRouter()
 
@@ -180,6 +186,41 @@ async def register_device(request: Request):
         upstream_kind=upstream_kind,
         upstream_transport=upstream_transport,
     )
+
+    # ADR-0015 §8: an operator may supply the SPKI they verified out of band, which turns
+    # trust-on-first-use into real verification for the devices where it is worth the
+    # effort. Implemented as PRE-PINNING rather than as a check: writing it as the pinned
+    # key means the ordinary comparison path handles everything from there — the first
+    # probe that sees a different key classifies as key_changed and quarantines, with no
+    # separate code path to get wrong and no TOFU window at all.
+    expected_spki = data.get("expected_tls_spki_sha256")
+    if expected_spki:
+        expected_spki = str(expected_spki).strip().lower()
+        if not _SPKI_RE.fullmatch(expected_spki):
+            raise HTTPException(
+                status_code=400,
+                detail="expected_tls_spki_sha256 must be a 64-character hex SHA-256 digest",
+            )
+        await reg._backend.update_device_fields(
+            hostname,
+            tls_spki_sha256=expected_spki,
+            fingerprint_state=fp.STATE_PINNED,
+            fingerprint_pinned_at=time.time(),
+        )
+        # Re-read to return the stored truth rather than a locally patched copy. Keep the
+        # pre-update record if it has vanished — a delete racing a registration is not a
+        # reason to fail the registration that just succeeded.
+        device_cfg = await reg.get_device(hostname) or device_cfg
+
+    fingerprint_policy = data.get("fingerprint_policy")
+    if fingerprint_policy:
+        if str(fingerprint_policy).lower() not in (fp.POLICY_WARN, fp.POLICY_ENFORCE):
+            raise HTTPException(
+                status_code=400,
+                detail=f"fingerprint_policy must be '{fp.POLICY_WARN}' or '{fp.POLICY_ENFORCE}'",
+            )
+        await reg._backend.update_device_fields(hostname, fingerprint_policy=str(fingerprint_policy).lower())
+        device_cfg = await reg.get_device(hostname) or device_cfg
 
     audit_request(request, "device.create", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
     # Async registration (F-11): provisioning=True when the device was accepted
@@ -382,4 +423,70 @@ async def device_diagnostics(hostname: str, request: Request):
         # spec fetcher and the pod use, so this reports what the gateway would actually
         # present/trust rather than a separate description of it that can drift.
         tls=TlsProfileInfo(**reg.tls_profile_for(hostname)),
+    )
+
+
+@router.post(
+    "/devices/{hostname}/fingerprint/approve",
+    dependencies=[
+        Depends(require_scope(SCOPE_DEVICES_WRITE)),
+        Depends(rate_limit("30/minute", "fingerprint_approve")),
+    ],
+    summary="Approve a changed endpoint fingerprint",
+)
+async def approve_fingerprint(hostname: str, request: Request):
+    """Re-pin a device to the key it is now presenting (ADR-0015 §6).
+
+    Approval is a **trust decision**, not a dismissal, so it is audited with the principal
+    and both key values. `devices:write` is the scope by decision (§9): the operator who
+    registers devices is the one who knows whether a changed endpoint is still the right
+    one, and the gateway's RBAC is deliberately small. The trade-off is explicit — this is
+    not separation of duty, and the audit record is what carries the accountability.
+    """
+    reg: Registry = request.app.state.registry
+    device = await reg.get_device(hostname)
+    if not device:
+        raise HTTPException(status_code=404, detail=f"Device '{hostname}' not found")
+
+    if device.fingerprint_state != fp.STATE_PENDING:
+        # Not an error worth failing loudly on, but not a silent success either: approving
+        # a device that is not pending means the operator is looking at stale information.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Device '{hostname}' has no fingerprint change awaiting approval "
+                f"(state: {device.fingerprint_state})"
+            ),
+        )
+    if not device.pending_tls_spki_sha256:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Device '{hostname}' is pending approval but records no pending key; "
+                "re-probe the device before approving"
+            ),
+        )
+
+    previous = device.tls_spki_sha256
+    fields = fp.approve(device.pending_tls_spki_sha256, time.time())
+    await reg._backend.update_device_fields(hostname, **fields)
+
+    # Both values in the record: an audit entry saying only "approved" cannot answer the
+    # question someone will actually ask later, which is what it changed FROM.
+    audit_request(
+        request,
+        "device.fingerprint.approve",
+        outcome=AUDIT_OUTCOME_SUCCESS,
+        target=hostname,
+        detail=f"spki {(previous or 'none')[:16]} -> {device.pending_tls_spki_sha256[:16]}",
+    )
+    updated = await reg.get_device(hostname)
+    if updated is None:
+        # Deleted between the approval write and this read. The approval itself is already
+        # audited above, so report the race rather than inventing a device to return.
+        raise HTTPException(status_code=404, detail=f"Device '{hostname}' was removed during approval")
+    return DeviceMutationResult(
+        status="fingerprint_approved",
+        provisioning=False,
+        device=DeviceDetail.from_config(updated),
     )

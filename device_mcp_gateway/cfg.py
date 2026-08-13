@@ -102,6 +102,10 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "allow_private_targets": bool,
         "trusted_proxy_cidrs": list,
         "allowed_target_ports": list,
+        # ADR-0015: "warn" (default) or "enforce". Overridable per device. Warn keeps a
+        # device with a changed fingerprint working while flagging it; enforce refuses
+        # tool calls and resource reads until it is approved or removed.
+        "fingerprint_policy": str,
         "mtls": {
             "client_cert": str,
             "client_key": str,

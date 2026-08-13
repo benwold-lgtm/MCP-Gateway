@@ -20,6 +20,7 @@ from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
 from device_mcp_gateway.rbac import SCOPE_TOOLS_CALL, require_scope
 from device_mcp_gateway.registry.server import Registry
+from device_mcp_gateway.security import fingerprint as fp
 
 router = APIRouter()
 
@@ -128,6 +129,21 @@ async def device_sse_message(
     _principal = getattr(request.state, "principal", None)
     _subject = _principal.subject if _principal else "unknown"
     _rid = getattr(request.state, "request_id", "-")
+
+    # ADR-0015 §9: refuse the *use* methods on a device whose fingerprint changed and was
+    # not approved, when the effective policy is enforce. Keyed on the JSON-RPC method, so
+    # initialize/tools-list still answer and the device stays distinguishable from a dead
+    # one. Checked here at admission AND again at worker dispatch: this gives the caller an
+    # immediate, specific reason, while the worker check catches anything already queued
+    # when the change was detected.
+    _fp_reason = fp.quarantine_reason(
+        device.fingerprint_state,
+        device.fingerprint_policy,
+        (cfg.get("security", {}) or {}).get("fingerprint_policy"),
+        payload.get("method") if isinstance(payload, dict) else None,
+    )
+    if _fp_reason:
+        raise HTTPException(status_code=409, detail=f"{hostname}: {_fp_reason}")
 
     # Principal↔session binding (F-37): a session may only be posted to by the
     # principal that opened it. Distributed mode stores the owner on the Redis

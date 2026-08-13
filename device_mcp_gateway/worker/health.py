@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from dataclasses import replace
 from functools import partial
 from typing import Any
 
@@ -31,7 +32,8 @@ from device_mcp_gateway.core.spec_limits import (
 )
 from device_mcp_gateway.core.translator import manifest_to_dict
 from device_mcp_gateway.security.mtls import TlsProfiles
-from device_mcp_gateway.security.url_policy import build_guarded_client
+from device_mcp_gateway.security import fingerprint as fp
+from device_mcp_gateway.security.url_policy import build_guarded_client, observation_from_client
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.shared.keys import KEYS
 from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest, canonical_tools_hash
@@ -126,6 +128,12 @@ class WorkerHealthLoop:
         # cfg.last_check (which updates every health cycle) so the much longer
         # spec_poll_interval is honoured instead of always short-circuiting.
         self._last_spec_check: dict[str, float] = {}
+        # ADR-0015: what the most recent probe observed, handed from the reachability
+        # check to the comparison step. Consumed (popped) rather than read, so a stale
+        # observation from an earlier cycle can never be compared as if it were current —
+        # which would make an unreachable device look freshly verified.
+        self._last_seen: dict[str, fp.Observation] = {}
+        self._last_declared: dict[str, tuple[str | None, str | None]] = {}
         # Callback set by DeviceWorker: (hostname) -> coroutine — replace pod
         self.on_spec_changed: Any = None
 
@@ -141,6 +149,11 @@ class WorkerHealthLoop:
             verify=self._tls.for_device(hostname),
             allow_private=self._allow_private,
             allowed_ports=self._allowed_ports,
+            # ADR-0015: this is the health/discovery path, which already contacts every
+            # device on a schedule — so the fingerprint rides along on a request that was
+            # happening anyway rather than costing an extra probe. The tool-call hot path
+            # deliberately does not capture.
+            capture_fingerprint=True,
         )
         self._http_clients[key] = client
         return client
@@ -172,6 +185,13 @@ class WorkerHealthLoop:
             # Reachability check
             reachable = await self._check_reachability(cfg)
             await self._backend.update_device_fields(hostname, reachable=reachable, last_check=time.time())
+
+            # ADR-0015: compare what we just saw against the pinned fingerprint. Only when
+            # the probe SUCCEEDED — an unreachable device teaches us nothing about its
+            # identity, and treating a timeout as "the endpoint changed" would turn every
+            # transient outage into an approval request.
+            if reachable:
+                await self._update_fingerprint(hostname, cfg)
 
             if not reachable:
                 if cfg.pod_active:
@@ -305,6 +325,55 @@ class WorkerHealthLoop:
             timeout=self._discovery.get("timeout", 10),
         )
 
+    async def _update_fingerprint(self, hostname: str, cfg: Any) -> None:
+        """Compare the just-observed fingerprint with the pinned one and persist any change.
+
+        Never raises: fingerprinting is a diagnostic layered onto the health loop, and a
+        failure here must not stop reachability or spec polling for the device.
+        """
+        try:
+            seen = self._last_seen.pop(hostname, None) or fp.Observation()
+            declared = self._last_declared.pop(hostname, None)
+            if declared:
+                seen = replace(seen, declared_name=declared[0], declared_version=declared[1])
+            if seen.is_empty():
+                return
+
+            stored = fp.Observation(
+                tls_spki_sha256=cfg.tls_spki_sha256,
+                tls_cert_sha256=cfg.tls_cert_sha256,
+                tls_issuer=cfg.tls_issuer,
+                tls_not_after=cfg.tls_not_after,
+                declared_name=cfg.declared_name,
+                declared_version=cfg.declared_version,
+            )
+            verdict, fields = fp.plan_update(
+                stored,
+                cfg.fingerprint_state,
+                cfg.pending_tls_spki_sha256,
+                seen,
+                now=time.time(),
+            )
+            if not fields:
+                return
+            await self._backend.update_device_fields(hostname, **fields)
+
+            if verdict in fp.NEEDS_APPROVAL:
+                # WARNING, not an error: under the default policy the device keeps working
+                # and a human decides. The message names both keys because an operator
+                # approving this needs to see what it is changing FROM, and the audit
+                # record is what carries the accountability (ADR-0015 §6).
+                logger.warning(
+                    f"Endpoint fingerprint CHANGED for {hostname} ({verdict}): "
+                    f"pinned key {(cfg.tls_spki_sha256 or '')[:16]}... now presenting "
+                    f"{(seen.tls_spki_sha256 or '')[:16]}... — device is flagged "
+                    "pending_approval; approve or remove it"
+                )
+            else:
+                logger.debug(f"Fingerprint for {hostname}: {verdict}")
+        except Exception:
+            logger.exception(f"Fingerprint comparison failed for {hostname}")
+
     async def _check_reachability(self, cfg: Any) -> bool:
         if getattr(cfg, "upstream_kind", "openapi") == "mcp":
             # An MCP endpoint answers a bare GET with 404/405, so the status check below
@@ -312,7 +381,18 @@ class WorkerHealthLoop:
             # handshake — and the probe session is closed rather than abandoned.
             upstream = self._upstream_for(cfg)
             try:
-                await upstream.initialize()
+                info = await upstream.initialize()
+                # ADR-0015 / F-69: serverInfo is the upstream's own statement of what it
+                # is — MCP's analogue of the OpenAPI `info` block. Self-reported, so it is
+                # recorded as the DECLARED dimension only, never as verification.
+                server_info = info.get("serverInfo") if isinstance(info, dict) else None
+                if isinstance(server_info, dict):
+                    name, version = server_info.get("name"), server_info.get("version")
+                    self._last_declared[cfg.hostname] = (
+                        str(name) if name else None,
+                        str(version) if version else None,
+                    )
+                self._record_observation(cfg.hostname)
                 return True
             except Exception:
                 return False
@@ -322,9 +402,22 @@ class WorkerHealthLoop:
             resp = await send_with_retry(
                 lambda: self._client(cfg.hostname).get(cfg.base_url, timeout=5), method="GET", policy=self._retry_policy
             )
+            self._record_observation(cfg.hostname)
             return resp.status_code < 500
         except Exception:
             return False
+
+    def _record_observation(self, hostname: str) -> None:
+        """Stash the TLS fingerprint the guarded transport saw on the probe just made.
+
+        Reads it off the transport rather than the response: the certificate belongs to the
+        live connection, and by the time this runs the socket may already be back in the
+        pool. A plain-http device yields None and is simply not recorded — it has no
+        authenticated dimension at all (ADR-0015 §7).
+        """
+        seen = observation_from_client(self._client(hostname))
+        if seen is not None and seen.has_tls():
+            self._last_seen[hostname] = seen
 
     async def _fetch_spec(self, cfg: Any) -> dict | None:
         if getattr(cfg, "upstream_kind", "openapi") == "mcp":
