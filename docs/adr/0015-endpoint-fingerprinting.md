@@ -303,3 +303,34 @@ rather than buried, because it is a broader stop than the phrase "tool calls" im
 **Recovery is manual and has two forms**, both ordinary existing operations: re-approve
 (re-pins the new fingerprint, audited) or delete the device. Quarantine never blocks
 deletion — a device an operator no longer trusts must always be removable.
+
+### The operator half (UI, 2026-08-13)
+
+The presentation mitigation this ADR calls "imperfect" is now built (MCP-Gateway-UI #19,
+closing F-69). What it does, so the claim is checkable rather than aspirational:
+
+- The three dimensions render as **three separately-labelled groups** — Authenticated
+  (`tls_spki_sha256`), Self-reported (`declared_*`, captioned as spoofable and never
+  evidence of identity), Behavioural (`tools_revision`). **A test asserts that no combined
+  "verified" badge exists**, because one over the first two would lend the self-reported
+  half a weight it has not earned.
+- The state chip describes **the pin, not trust**. "pinned" is worded as *the same key as
+  last time*, which is all a TOFU baseline can support.
+- The **full** SPKI digest is shown, not a preview — an operator's real check is comparing
+  it against an independently computed digest, which a truncation cannot support.
+- An `http://` device's absent pin is reported as a **fact** ("no key to pin"), distinct
+  from "not observed yet". Conflating them would manufacture a permanent false alarm, which
+  is the §2 argument against certificate pinning applied to the display layer.
+- An unset `fingerprint_policy` is reported as **inherited**. The effective value is resolved
+  at enforcement time and not returned by the API, so naming one would be a guess printed as
+  a fact.
+- Approval is admin-only and recorded in the BFF's audit chain under the *same* action name
+  the gateway uses, `device.fingerprint.approve`, so the two chains describe one event. The
+  gateway's 409 for a device that is not pending passes through to the operator: approving
+  from a stale screen must fail visibly rather than appear to succeed.
+
+**Known residual.** `DeviceSummary` carries no `fingerprint_state`, so the device *list*
+cannot flag a device awaiting approval — it is visible only on the detail view. Under
+`enforce` that device's calls are actively being refused, so this is a discovery gap rather
+than a cosmetic one. Tracked for the next gateway release; it is one field on the list
+projection plus a `pending_approval` count on the overview.
