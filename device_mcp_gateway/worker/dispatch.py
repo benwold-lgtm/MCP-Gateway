@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from device_mcp_gateway import metrics
+from device_mcp_gateway.security import fingerprint as fp
 from device_mcp_gateway.audit import audit_log
 from device_mcp_gateway.core.backoff import jittered
 from device_mcp_gateway.core.errors import RPC_DUPLICATE, RPC_INTERNAL_ERROR, RPC_NO_WORKER, rpc_error
@@ -288,6 +289,50 @@ class CallDispatcher:
         try:
             message = json.loads(fields.get("message", "{}"))
             _method = message.get("method", "?") if isinstance(message, dict) else "?"
+
+            # ADR-0015 §9 backstop. The gateway refuses quarantined calls at admission, but
+            # a call already sitting in the stream when the fingerprint change was detected
+            # would otherwise still be dispatched — the exact window the gateway check
+            # cannot close. Reads the CURRENT config rather than anything carried on the
+            # stream entry, so a device quarantined a second ago is honoured here.
+            # `_backend` is Optional on the worker (it is set during run()); this path can
+            # be reached in tests that drive the dispatcher directly. No backend means no
+            # fingerprint state to consult, so the backstop simply does not apply.
+            cfg_now = await w._backend.get_device(hostname) if w._backend is not None else None
+            if cfg_now is not None:
+                fp_reason = fp.quarantine_reason(
+                    cfg_now.fingerprint_state,
+                    cfg_now.fingerprint_policy,
+                    (w._config.get("security", {}) or {}).get("fingerprint_policy"),
+                    _method,
+                )
+                if fp_reason:
+                    logger.warning(f"Refusing {_method} for {hostname}: {fp_reason}")
+                    await w._dead_letter(hostname, fields, "fingerprint quarantine")
+                    msg_id_val = message.get("id") if isinstance(message, dict) else None
+                    if session_id and msg_id_val is not None:
+                        await w._session_router.publish_result(
+                            session_id,
+                            rpc_error(
+                                RPC_NO_WORKER,
+                                msg_id_val,
+                                rid=rid,
+                                request_id=request_id,
+                                message=f"{hostname}: {fp_reason}",
+                            ),
+                        )
+                    if request_id:
+                        await w._r.set(KEYS.result_marker(request_id), "1", ex=w._result_marker_ttl)
+                    audit_log(
+                        "tool dispatch",
+                        hostname=hostname,
+                        subject=subject,
+                        method=_method,
+                        status="fingerprint_quarantine",
+                        rid=rid,
+                    )
+                    return
+
             pod = w._pods.get(hostname)
             if pod is None:
                 # No pod to serve this call (e.g. a pod-replace window). Dead-letter

@@ -341,6 +341,7 @@ def build_guarded_client(
     allow_private: bool = False,
     allowed_ports: set[int] | None = None,
     follow_redirects: bool = True,
+    capture_fingerprint: bool = False,
     **kwargs: Any,
 ) -> httpx.AsyncClient:
     """An ``httpx.AsyncClient`` whose every request hop is checked against the SSRF policy.
@@ -356,7 +357,27 @@ def build_guarded_client(
     every call, so a registered device that later resolves to an internal address is caught
     at dispatch time rather than only at registration. Because the validated address is
     pinned through to connect (see :class:`SsrfGuardTransport`), that holds for a *racing*
-    rebind too, not only a persistent one."""
+    rebind too, not only a persistent one.
+
+    ``capture_fingerprint=True`` records the peer certificate of each hop on the transport
+    for the caller to read afterwards (ADR-0015). Off by default: it is only wanted on the
+    health/discovery path, and the tool-call hot path should not pay for a certificate parse
+    on every dispatch."""
     inner = httpx.AsyncHTTPTransport(verify=verify)
-    transport = SsrfGuardTransport(inner, allow_private=allow_private, allowed_ports=allowed_ports)
+    transport = SsrfGuardTransport(
+        inner,
+        allow_private=allow_private,
+        allowed_ports=allowed_ports,
+        capture_fingerprint=capture_fingerprint,
+    )
     return httpx.AsyncClient(transport=transport, follow_redirects=follow_redirects, **kwargs)
+
+
+def observation_from_client(client: httpx.AsyncClient) -> Observation | None:
+    """The last fingerprint the client's guard transport saw, if it was capturing.
+
+    Reaches through the client because the transport is where the live TLS connection
+    exists; by the time a caller holds a response the socket may be back in the pool.
+    """
+    transport = getattr(client, "_transport", None)
+    return getattr(transport, "last_observation", None) if transport is not None else None
