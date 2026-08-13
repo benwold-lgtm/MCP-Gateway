@@ -10,6 +10,59 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-13
+
+Two security capabilities that constrain what the gateway talks to and what it lets near it:
+**endpoint fingerprinting** ([ADR-0015](docs/adr/0015-endpoint-fingerprinting.md)) and
+**tenant network isolation** ([ADR-0014](docs/adr/0014-tenant-namespace-naming-and-network-isolation.md)),
+plus the fix that keeps the first of them alive across a restore. Both were verified against a
+live cluster before release rather than on unit tests alone — which is how three of the defects
+below were found, two of them in the fixes for the other one.
+
+### Read this before upgrading
+
+- **⚠️ The Kubernetes NetworkPolicies now deny by default, and that is a behaviour change to
+  your cluster, not just to this app.** Before this release every rule carried `ports:` with no
+  `from:`/`to:`, which permits *any peer in the cluster* — the manifests described themselves as
+  restricting ingress to port 8000, and they did, from anywhere (F-68). Applying the new
+  manifests adds a `default-deny-all` policy plus explicit allows for intra-namespace traffic,
+  DNS and monitoring scrape. **If anything outside the gateway's namespace talks to it today,
+  it will stop.** Measured before the fix: a pod in an unrelated namespace got `HTTP 200` from
+  `/health`. Decide deliberately whether that traffic was intended, and add an allow for it if
+  so — do not skip the upgrade to keep it working by accident.
+- **`deploy/kubernetes/` no longer hardcodes a namespace.** `kustomization.yaml` is now the
+  single source of truth and kustomize renames the `Namespace` object as well as retargeting
+  every resource. If you deploy these manifests through GitOps with your own namespace
+  substitution, check it still lands where you expect before rolling.
+- **The manifests now wire `MCP_ADMIN_KEY`, `MCP_VIEWER_KEY` and `MCP_ALLOW_PRIVATE_TARGETS`,
+  which they never did.** They previously existed only as hand-applied additions, so a stack
+  built from the manifests alone came up with no break-glass RBAC keys. If you added them by
+  hand, the manifest values will now take effect — reconcile them before upgrading rather than
+  discovering the difference at a restart.
+- **Every device gains a fingerprint on its next probe, and the first one is trust-on-first-use.**
+  The default policy is `warn`: a device whose endpoint key changes is flagged and **keeps
+  serving**. Nothing stops until you opt into `security.fingerprint_policy: enforce`. TOFU
+  establishes a baseline; it does not validate anything, so a device that was already pointed
+  at the wrong endpoint pins the wrong value. For the devices where that matters, supply
+  `expected_tls_spki_sha256` at registration and the ordinary comparison path enforces it with
+  no TOFU window.
+- **Restore now reports `fingerprint_warnings`, and you should read it.** An archive taken
+  before this release carries no pins, so every device it restores will trust-on-first-use on
+  its next probe. The restore says so per device rather than passing silently. Re-export once
+  you are on 0.3.3 so your archives carry pins.
+- **Why a patch number for two new capabilities.** [docs/releasing.md](docs/releasing.md) §1.5
+  says a new capability is a minor bump even at `0.x`, and this release departs from it for the
+  same reason `0.3.1` and `0.3.2` did. `0.4.0` is committed to **removing** the deprecated
+  HTTP+SSE endpoints and to the MCP `2026-07-28` protocol shift, deliberately paired so clients
+  face one transport upgrade rather than two. Numbering this release `0.4.0` would either break
+  that commitment or collapse the deprecation window. Both features here are additive and
+  default to non-blocking behaviour — but read the NetworkPolicy note above, which is the one
+  change that can take traffic away.
+- **The HTTP+SSE deprecation clock is unchanged.** `GET /v1/devices/{hostname}/sse`,
+  `POST /v1/devices/{hostname}/messages`, `GET /v1/fleet/sse` and `POST /v1/fleet/messages`
+  still work and are still scheduled for removal in **0.4.0**. This release does not move that
+  date in either direction.
+
 ### Security
 
 - **[ADR-0015](docs/adr/0015-endpoint-fingerprinting.md) — endpoint fingerprinting (F-69).**
@@ -155,6 +208,77 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   parameterized from `kustomization.yaml` alone (kustomize renames the `Namespace` object
   *and* retargets every resource), and no resource file hardcodes it any more.
 
+- **A disaster-recovery runbook, written from an actual rebuild** —
+  [runbook.md § Rebuild a stack from nothing](docs/runbook.md#rebuild-a-stack-from-nothing-disaster-recovery).
+  A portable archive was restored into a genuinely fresh stack on separate hardware — new
+  Redis, new pods, a **different `MCP_SECRET_KEY`** — and verified by a `tools/call` on a
+  restored device returning live upstream data. That closes **TG-7** and discharges
+  [ADR-0011](docs/adr/0011-backup-and-restore.md)'s outstanding follow-up.
+
+  **The archive was never the hard part.** Preflight, replay, manifest rebuild and
+  `tools_revision` carry-over all behaved as designed. What stopped the rebuild three times
+  was the **out-of-band dependency set** — things a backup deliberately does not carry, which
+  had never been written down because nobody had rebuilt from nothing. The runbook now
+  tabulates them: per-device TLS trust material (without it the gateway **fails closed at
+  startup**), `MCP_ALLOW_PRIVATE_TARGETS` / `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY` (which the
+  `deploy/kubernetes/` manifests do not wire — they exist only as hand-applied additions), and
+  DNS for any non-Kubernetes name in a `base_url`.
+
+  The trap worth knowing: **without `MCP_ALLOW_PRIVATE_TARGETS`, restore refuses every
+  private-address device and reports a correct policy refusal.** The response cannot
+  distinguish a misconfigured new stack from a policy that legitimately rejects the device —
+  a direct consequence of restore replaying through the real registration gates. Conversely,
+  Kubernetes service DNS in `base_url`/`spec_url` needs **no** archive editing: it resolves
+  unchanged in any cluster with the same service names in the same namespace.
+
+- **TG-7, TG-8 and TG-9 in [docs/testing-gaps.md](docs/testing-gaps.md)** — the backup and
+  restore shipped in 0.3.2 is implemented and unit-tested, but has not been demonstrated to do
+  the job it exists for, and the register now says so. **TG-7** is disaster recovery proper:
+  restoring into a genuinely fresh stack, with its own Redis and its own `MCP_SECRET_KEY`. The
+  live dry run on the lab cluster does not count — every device came back
+  `skipped / already registered`, which exercises the decrypt preflight and nothing else.
+  **TG-8** is scale: export is a single synchronous response over the whole registry and
+  restore replays devices one at a time, both only ever tested at 2–3 devices. **TG-9** is
+  export and restore *mid key-rotation*, the scenario the `is_current()` double-encryption trap
+  came from — a failure that raises nothing and surfaces only when a restored device
+  authenticates upstream. [ADR-0011](docs/adr/0011-backup-and-restore.md) gains a pointer to
+  all three; its decision text is unchanged.
+
+### Changed
+
+- **[ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) is now Accepted**,
+  with its three open questions resolved. `docs/multitenancy.md` is revised against it, and
+  the "future `tenant` claim on `Principal`" seam is formally withdrawn — in-app tenancy is
+  rejected **on merit**, not deferred on cost.
+
+  **Grant lifetimes are absolute, never sliding**, because a sliding window never expires for
+  an attacker who keeps working. act-on-tenant runs 60 minutes and re-authorizes, and a
+  session holds it for **one tenant at a time** — concurrent grants would rebuild ambient
+  estate-wide authority by accumulation. The two elevated grants **step up** (re-prove
+  identity): `provider:invoke` at 15 minutes, `provider:credentials` single-use. Those are
+  where a stolen provider session gets cashed out; act-on-tenant is the everyday motion, and
+  step-up there would fire often enough to train reflexive approval. Renewal is a new audited
+  act rather than an extension, and a grant gates *initiation*, not completion.
+
+  **A tenant sees every act by a human provider principal in their own audit** — including
+  reads, since "has someone been in my system" is exactly the question, while automated
+  platform operations are not provider acts. The actor is pseudonymized **at write time**,
+  which is a constraint on the audit writer rather than the UI: the record lands in the
+  tenant's hash-chained audit, so anything written in the clear is readable by whoever can
+  read the chain, and a hash-chained record cannot be redacted afterwards without breaking
+  verification.
+
+  **Offboarding uses per-tenant content keys.** Destroying a departed tenant's key leaves the
+  provider-side chain verifiable while making the content unrecoverable, so immutability and
+  erasure stop competing. ADR-0011 archives of that tenant are inside the shred — a backup on
+  an independent expiry schedule would be a hole straight through the decision — and a
+  per-tenant hostname is **never reissued**, so stale DNS or cached tokens cannot resolve onto
+  a new tenant's stack.
+
+  **This unblocks BFF audit logging, and constrains it:** the writer must pseudonymize at
+  write time and encrypt per-tenant content under a per-tenant key from its very first record.
+  Neither can be retrofitted into a hash chain.
+
 ### Fixed
 
 - **F-70 — an invalid OpenAPI spec escaped the `ValueError` contract every caller depends
@@ -195,79 +319,6 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   CRD field, which kustomize's `namespace:` transformer does **not** rewrite, so a
   retargeted deployment would have scraped the wrong namespace. The selector is now omitted
   — an omitted selector means "my own namespace", which is correct under any name.
-
-### Changed
-
-- **[ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) is now Accepted**,
-  with its three open questions resolved. `docs/multitenancy.md` is revised against it, and
-  the "future `tenant` claim on `Principal`" seam is formally withdrawn — in-app tenancy is
-  rejected **on merit**, not deferred on cost.
-
-  **Grant lifetimes are absolute, never sliding**, because a sliding window never expires for
-  an attacker who keeps working. act-on-tenant runs 60 minutes and re-authorizes, and a
-  session holds it for **one tenant at a time** — concurrent grants would rebuild ambient
-  estate-wide authority by accumulation. The two elevated grants **step up** (re-prove
-  identity): `provider:invoke` at 15 minutes, `provider:credentials` single-use. Those are
-  where a stolen provider session gets cashed out; act-on-tenant is the everyday motion, and
-  step-up there would fire often enough to train reflexive approval. Renewal is a new audited
-  act rather than an extension, and a grant gates *initiation*, not completion.
-
-  **A tenant sees every act by a human provider principal in their own audit** — including
-  reads, since "has someone been in my system" is exactly the question, while automated
-  platform operations are not provider acts. The actor is pseudonymized **at write time**,
-  which is a constraint on the audit writer rather than the UI: the record lands in the
-  tenant's hash-chained audit, so anything written in the clear is readable by whoever can
-  read the chain, and a hash-chained record cannot be redacted afterwards without breaking
-  verification.
-
-  **Offboarding uses per-tenant content keys.** Destroying a departed tenant's key leaves the
-  provider-side chain verifiable while making the content unrecoverable, so immutability and
-  erasure stop competing. ADR-0011 archives of that tenant are inside the shred — a backup on
-  an independent expiry schedule would be a hole straight through the decision — and a
-  per-tenant hostname is **never reissued**, so stale DNS or cached tokens cannot resolve onto
-  a new tenant's stack.
-
-  **This unblocks BFF audit logging, and constrains it:** the writer must pseudonymize at
-  write time and encrypt per-tenant content under a per-tenant key from its very first record.
-  Neither can be retrofitted into a hash chain.
-
-### Added
-
-- **A disaster-recovery runbook, written from an actual rebuild** —
-  [runbook.md § Rebuild a stack from nothing](docs/runbook.md#rebuild-a-stack-from-nothing-disaster-recovery).
-  A portable archive was restored into a genuinely fresh stack on separate hardware — new
-  Redis, new pods, a **different `MCP_SECRET_KEY`** — and verified by a `tools/call` on a
-  restored device returning live upstream data. That closes **TG-7** and discharges
-  [ADR-0011](docs/adr/0011-backup-and-restore.md)'s outstanding follow-up.
-
-  **The archive was never the hard part.** Preflight, replay, manifest rebuild and
-  `tools_revision` carry-over all behaved as designed. What stopped the rebuild three times
-  was the **out-of-band dependency set** — things a backup deliberately does not carry, which
-  had never been written down because nobody had rebuilt from nothing. The runbook now
-  tabulates them: per-device TLS trust material (without it the gateway **fails closed at
-  startup**), `MCP_ALLOW_PRIVATE_TARGETS` / `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY` (which the
-  `deploy/kubernetes/` manifests do not wire — they exist only as hand-applied additions), and
-  DNS for any non-Kubernetes name in a `base_url`.
-
-  The trap worth knowing: **without `MCP_ALLOW_PRIVATE_TARGETS`, restore refuses every
-  private-address device and reports a correct policy refusal.** The response cannot
-  distinguish a misconfigured new stack from a policy that legitimately rejects the device —
-  a direct consequence of restore replaying through the real registration gates. Conversely,
-  Kubernetes service DNS in `base_url`/`spec_url` needs **no** archive editing: it resolves
-  unchanged in any cluster with the same service names in the same namespace.
-
-- **TG-7, TG-8 and TG-9 in [docs/testing-gaps.md](docs/testing-gaps.md)** — the backup and
-  restore shipped in 0.3.2 is implemented and unit-tested, but has not been demonstrated to do
-  the job it exists for, and the register now says so. **TG-7** is disaster recovery proper:
-  restoring into a genuinely fresh stack, with its own Redis and its own `MCP_SECRET_KEY`. The
-  live dry run on the lab cluster does not count — every device came back
-  `skipped / already registered`, which exercises the decrypt preflight and nothing else.
-  **TG-8** is scale: export is a single synchronous response over the whole registry and
-  restore replays devices one at a time, both only ever tested at 2–3 devices. **TG-9** is
-  export and restore *mid key-rotation*, the scenario the `is_current()` double-encryption trap
-  came from — a failure that raises nothing and surfaces only when a restored device
-  authenticates upstream. [ADR-0011](docs/adr/0011-backup-and-restore.md) gains a pointer to
-  all three; its decision text is unchanged.
 
 ## [0.3.2] - 2026-08-11
 
@@ -1061,6 +1112,7 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.3.3]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.3
 [0.3.2]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.2
 [0.3.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.1
 [0.3.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.0
