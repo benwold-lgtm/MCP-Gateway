@@ -59,6 +59,25 @@ from device_mcp_gateway.upstream.mcp_client import StreamableHttpClient
 _CONTRACT_FIELDS = ("name", "description", "inputSchema", "annotations")
 
 
+def _declared_from_server_info(init_result: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Extract (name, version) from an MCP ``initialize`` result.
+
+    Tolerant by design: ``serverInfo`` is optional in the protocol and a server may send a
+    partial one. A missing field yields None, which ``compare()`` treats as "learned
+    nothing" rather than as a change — so a terse upstream does not raise a false alarm on
+    every probe.
+    """
+    info = init_result.get("serverInfo") or {}
+    if not isinstance(info, dict):
+        return (None, None)
+    name = info.get("name")
+    version = info.get("version")
+    return (
+        str(name) if isinstance(name, (str, int, float)) and str(name).strip() else None,
+        str(version) if isinstance(version, (str, int, float)) and str(version).strip() else None,
+    )
+
+
 def canonical_tools_hash(tools: list[dict[str, Any]]) -> str:
     """A stable hash of a ``tools/list`` response.
 
@@ -189,6 +208,15 @@ class McpDiscoveryService:
             # A probe is not a session. Leaving it open would abandon one on the upstream
             # every health cycle.
             await upstream.close_session()
+        # ADR-0015 / F-69: `serverInfo` used to be logged here and dropped. It is the
+        # closest thing MCP has to the OpenAPI `info` block — the upstream's own statement
+        # of what it is — and it serves two purposes at once: fleet inventory (operators
+        # need to know what a device *is* to manage it by name) and a change signal.
+        #
+        # It is SELF-REPORTED and therefore spoofable, so it is recorded as the *declared*
+        # dimension and must never be rendered as verification. The authenticated dimension
+        # is the TLS SPKI, captured in the transport.
+        profile.declared_identity = _declared_from_server_info(info)
         logger.debug(f"MCP upstream {profile.hostname} initialised: {info.get('serverInfo', {})}")
         return True
 

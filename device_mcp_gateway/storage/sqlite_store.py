@@ -25,7 +25,19 @@ CREATE TABLE IF NOT EXISTS devices (
     auth_config        TEXT,
     rate_limit_rps     REAL,
     upstream_kind      TEXT NOT NULL DEFAULT 'openapi',
-    upstream_transport TEXT NOT NULL DEFAULT 'http'
+    upstream_transport TEXT NOT NULL DEFAULT 'http',
+    -- Endpoint fingerprint (ADR-0015). The pin is the SPKI digest, not the cert digest,
+    -- so a routine renewal against the same key does not fire. See registry_backend.py.
+    tls_spki_sha256    TEXT,
+    tls_cert_sha256    TEXT,
+    tls_issuer         TEXT,
+    tls_not_after      TEXT,
+    declared_name      TEXT,
+    declared_version   TEXT,
+    fingerprint_state  TEXT NOT NULL DEFAULT 'unpinned',
+    fingerprint_pinned_at REAL NOT NULL DEFAULT 0,
+    pending_tls_spki_sha256 TEXT,
+    fingerprint_policy TEXT
 )
 """
 
@@ -39,6 +51,17 @@ _MIGRATIONS = (
     "ALTER TABLE devices ADD COLUMN rate_limit_rps REAL",
     "ALTER TABLE devices ADD COLUMN upstream_kind TEXT NOT NULL DEFAULT 'openapi'",
     "ALTER TABLE devices ADD COLUMN upstream_transport TEXT NOT NULL DEFAULT 'http'",
+    # ADR-0015 endpoint fingerprint.
+    "ALTER TABLE devices ADD COLUMN tls_spki_sha256 TEXT",
+    "ALTER TABLE devices ADD COLUMN tls_cert_sha256 TEXT",
+    "ALTER TABLE devices ADD COLUMN tls_issuer TEXT",
+    "ALTER TABLE devices ADD COLUMN tls_not_after TEXT",
+    "ALTER TABLE devices ADD COLUMN declared_name TEXT",
+    "ALTER TABLE devices ADD COLUMN declared_version TEXT",
+    "ALTER TABLE devices ADD COLUMN fingerprint_state TEXT NOT NULL DEFAULT 'unpinned'",
+    "ALTER TABLE devices ADD COLUMN fingerprint_pinned_at REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE devices ADD COLUMN pending_tls_spki_sha256 TEXT",
+    "ALTER TABLE devices ADD COLUMN fingerprint_policy TEXT",
 )
 
 
@@ -94,8 +117,11 @@ class SqliteDeviceStore(AbstractDeviceStore):
                 """
                 INSERT OR REPLACE INTO devices
                     (hostname, base_url, spec_url, transport, auth_type, auth_config,
-                     rate_limit_rps, upstream_kind, upstream_transport)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     rate_limit_rps, upstream_kind, upstream_transport,
+                     tls_spki_sha256, tls_cert_sha256, tls_issuer, tls_not_after,
+                     declared_name, declared_version, fingerprint_state,
+                     fingerprint_pinned_at, pending_tls_spki_sha256, fingerprint_policy)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     hostname,
@@ -107,6 +133,16 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     record.get("rate_limit_rps"),
                     record.get("upstream_kind") or "openapi",
                     record.get("upstream_transport") or "http",
+                    record.get("tls_spki_sha256"),
+                    record.get("tls_cert_sha256"),
+                    record.get("tls_issuer"),
+                    record.get("tls_not_after"),
+                    record.get("declared_name"),
+                    record.get("declared_version"),
+                    record.get("fingerprint_state") or "unpinned",
+                    record.get("fingerprint_pinned_at") or 0.0,
+                    record.get("pending_tls_spki_sha256"),
+                    record.get("fingerprint_policy"),
                 ),
             )
             await db.commit()
@@ -157,7 +193,11 @@ class SqliteDeviceStore(AbstractDeviceStore):
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT hostname, base_url, spec_url, transport, auth_type, auth_config, "
-                "rate_limit_rps, upstream_kind, upstream_transport FROM devices"
+                "rate_limit_rps, upstream_kind, upstream_transport, "
+                "tls_spki_sha256, tls_cert_sha256, tls_issuer, tls_not_after, "
+                "declared_name, declared_version, fingerprint_state, "
+                "fingerprint_pinned_at, pending_tls_spki_sha256, fingerprint_policy "
+                "FROM devices"
             ) as cursor:
                 rows = await cursor.fetchall()
         result = []
@@ -184,6 +224,17 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     # by an older binary through a migrated table can still hold NULL.
                     "upstream_kind": row["upstream_kind"] or "openapi",
                     "upstream_transport": row["upstream_transport"] or "http",
+                    # Same NULL caveat as above for every ADR-0015 column.
+                    "tls_spki_sha256": row["tls_spki_sha256"],
+                    "tls_cert_sha256": row["tls_cert_sha256"],
+                    "tls_issuer": row["tls_issuer"],
+                    "tls_not_after": row["tls_not_after"],
+                    "declared_name": row["declared_name"],
+                    "declared_version": row["declared_version"],
+                    "fingerprint_state": row["fingerprint_state"] or "unpinned",
+                    "fingerprint_pinned_at": row["fingerprint_pinned_at"] or 0.0,
+                    "pending_tls_spki_sha256": row["pending_tls_spki_sha256"],
+                    "fingerprint_policy": row["fingerprint_policy"],
                 }
             )
         return result

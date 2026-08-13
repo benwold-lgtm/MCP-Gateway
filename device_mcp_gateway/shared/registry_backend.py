@@ -70,6 +70,42 @@ class DeviceConfig:
     # INBOUND — how the pod serves MCP to its own clients — and must stay "sse".
     upstream_transport: str = "http"
 
+    # --- Endpoint fingerprint (ADR-0015, F-69) -----------------------------------------
+    # Three dimensions, kept SEPARATE on purpose. Collapsing them into one "verified" flag
+    # would lend the declared fields a weight they do not have — the same mistake as
+    # trusting `upstream_kind` because it is present in the record when nothing checked it.
+    #
+    # AUTHENTICATED. The pin is the SPKI (public key) digest, not the certificate digest:
+    # a routine renewal re-issues the cert against the same key, so the SPKI is unchanged
+    # and nothing fires. Pinning the cert would alarm on every ACME renewal — every 60-90
+    # days, per device — and a control that fires constantly trains reflexive approval
+    # (ADR-0013 §8). A changed SPKI is indistinguishable from a substituted endpoint, so
+    # that is the thing worth waking someone for. Empty for an http:// upstream, which has
+    # no authenticated dimension at all (ADR-0015 §7).
+    tls_spki_sha256: str | None = None
+    # Context for a human deciding whether to approve, never used for comparison.
+    tls_cert_sha256: str | None = None
+    tls_issuer: str | None = None
+    tls_not_after: str | None = None
+    # DECLARED — self-reported by the upstream and therefore spoofable. MCP `serverInfo`
+    # from the initialize handshake; OpenAPI `info` from the document. Inventory data that
+    # is also a change signal; never evidence of identity.
+    declared_name: str | None = None
+    declared_version: str | None = None
+    # "unpinned"  — nothing recorded yet (no successful probe, or a plain-http upstream)
+    # "pinned"    — baseline established, current observation matches
+    # "pending_approval" — the SPKI changed and a human has not accepted it (ADR-0015 §4)
+    fingerprint_state: str = "unpinned"
+    fingerprint_pinned_at: float = 0.0
+    # Populated only while pending_approval, so the UI and the approval endpoint can show
+    # what it would be changing FROM. Cleared on approval.
+    pending_tls_spki_sha256: str | None = None
+    # "warn" | "enforce" | None to inherit security.fingerprint_policy (ADR-0015 §5). Per
+    # device because the risk is not uniform: a storage array holding production data
+    # warrants enforce, a lab sensor does not, and a deployment-wide-only setting gets
+    # tuned to the least critical device on it.
+    fingerprint_policy: str | None = None
+
     # --- serialisation helpers ---
 
     def to_redis_hash(self) -> dict[str, str]:
@@ -114,6 +150,21 @@ class DeviceConfig:
             # the device nowhere.
             upstream_kind=h.get("upstream_kind", "") or "openapi",
             upstream_transport=h.get("upstream_transport", "") or "http",
+            # Same `or default` treatment as above: a hash written before ADR-0015 has no
+            # key, and to_redis_hash writes "" for None. Both must land on the default —
+            # an empty fingerprint_state would match no branch in the comparison and the
+            # device would be neither pinned nor checked, which is the silent-failure
+            # shape this feature exists to remove.
+            tls_spki_sha256=_opt_str(h.get("tls_spki_sha256", "")),
+            tls_cert_sha256=_opt_str(h.get("tls_cert_sha256", "")),
+            tls_issuer=_opt_str(h.get("tls_issuer", "")),
+            tls_not_after=_opt_str(h.get("tls_not_after", "")),
+            declared_name=_opt_str(h.get("declared_name", "")),
+            declared_version=_opt_str(h.get("declared_version", "")),
+            fingerprint_state=h.get("fingerprint_state", "") or "unpinned",
+            fingerprint_pinned_at=float(h.get("fingerprint_pinned_at", "0") or "0"),
+            pending_tls_spki_sha256=_opt_str(h.get("pending_tls_spki_sha256", "")),
+            fingerprint_policy=_opt_str(h.get("fingerprint_policy", "")),
         )
 
 

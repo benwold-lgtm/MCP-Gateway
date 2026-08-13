@@ -30,6 +30,12 @@ class DeviceProfile:
     auth: AbstractAuth | None = None
     spec_data: dict[str, Any] | None = None
     pod: BasePod | None = None
+    # (name, version) an upstream declared about itself on the last successful probe —
+    # MCP `serverInfo`, or the OpenAPI `info` block (ADR-0015 §1, F-69). Transient: the
+    # probe writes it here and the caller persists it onto `config`, the same shape
+    # `spec_data` already uses. None means the last probe learned nothing, which
+    # `fingerprint.compare()` distinguishes from "learned that it changed".
+    declared_identity: tuple[str | None, str | None] | None = None
 
     # Convenience pass-throughs so call-sites don't need to know about .config
     @property

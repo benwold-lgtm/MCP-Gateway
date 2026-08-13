@@ -66,6 +66,30 @@ class DeviceDetail(DeviceSummary):
     # stays off the lean summary.
     upstream_transport: str = "http"
 
+    # --- Endpoint fingerprint (ADR-0015) -------------------------------------------
+    # Exposed as three separately-named groups rather than one "verified" boolean. A
+    # client rendering these MUST keep them distinct: `declared_*` is self-reported by
+    # the upstream and spoofable, while `tls_spki_sha256` is cryptographic. Presenting
+    # them as one badge would lend the declared fields a weight they do not have.
+    #
+    # "unpinned" | "pinned" | "pending_approval". An http:// device stays "unpinned"
+    # for its TLS dimension however many times it is probed — it has no certificate,
+    # and that is a fact about the device rather than a gap in the check.
+    fingerprint_state: str = "unpinned"
+    fingerprint_pinned_at: float | None = None
+    tls_spki_sha256: str | None = None
+    tls_cert_sha256: str | None = None
+    tls_issuer: str | None = None
+    tls_not_after: str | None = None
+    # Set only while pending_approval: what the key would become if approved, so an
+    # operator can see both sides of the decision without digging through logs.
+    pending_tls_spki_sha256: str | None = None
+    declared_name: str | None = None
+    declared_version: str | None = None
+    # None means "inherit security.fingerprint_policy"; the effective value is resolved
+    # at enforcement time, not stored.
+    fingerprint_policy: str | None = None
+
     @classmethod
     def from_config(cls, cfg: DeviceConfig) -> DeviceDetail:
         return cls(
@@ -84,6 +108,16 @@ class DeviceDetail(DeviceSummary):
             tools_revision=cfg.tools_revision,
             upstream_kind=cfg.upstream_kind,
             upstream_transport=cfg.upstream_transport,
+            fingerprint_state=cfg.fingerprint_state,
+            fingerprint_pinned_at=cfg.fingerprint_pinned_at or None,
+            tls_spki_sha256=cfg.tls_spki_sha256,
+            tls_cert_sha256=cfg.tls_cert_sha256,
+            tls_issuer=cfg.tls_issuer,
+            tls_not_after=cfg.tls_not_after,
+            pending_tls_spki_sha256=cfg.pending_tls_spki_sha256,
+            declared_name=cfg.declared_name,
+            declared_version=cfg.declared_version,
+            fingerprint_policy=cfg.fingerprint_policy,
         )
 
 
