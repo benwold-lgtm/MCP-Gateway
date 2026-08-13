@@ -131,3 +131,129 @@ async def test_check_acquires_lock_with_lock_ttl(monkeypatch):
     # The lock must be acquired with the long lock TTL, not the short interval.
     assert captured.get("ex") == loop._lock_ttl
     assert captured["ex"] > loop._interval
+
+
+# --- ADR-0015 / F-69: the OpenAPI declared dimension -------------------------
+#
+# Found by live-testing ADR-0015 on a cluster, not by the unit suite: `_last_declared`
+# was only ever written inside the `mcp` branch of `_check_reachability`, so an OpenAPI
+# device — the DEFAULT upstream kind — had no declared identity at all. Its consequences
+# are quiet ones: `key_and_declared_changed` (ADR-0015 §3's strongest signal) could never
+# fire for such a device, and the inventory metadata the ADR names as a motive was absent.
+# The evidence that made it undeniable was a spec declaring title "TLS Probe Test Device"
+# version "9.9.9" against a device reporting declared_name=None.
+
+
+async def _openapi_loop(monkeypatch, spec):
+    """A loop whose spec fetch returns `spec`, with the spec poll already due."""
+    loop, backend, _calls = await _make_loop(monkeypatch)
+
+    async def _fetch(_cfg):
+        return spec
+
+    monkeypatch.setattr(loop, "_fetch_spec", _fetch)
+    await loop._check_device("dev1")  # seed the spec-poll timestamp
+    loop._last_spec_check["dev1"] = time.time() - 301
+    return loop, backend
+
+
+@pytest.mark.asyncio
+async def test_openapi_info_becomes_the_declared_identity(monkeypatch):
+    """The gap itself: an OpenAPI device must report what it says it is."""
+    spec = {"openapi": "3.0.0", "info": {"title": "Acme Array", "version": "7.2.1"}, "paths": {}}
+    loop, _backend = await _openapi_loop(monkeypatch, spec)
+
+    await loop._check_device("dev1")
+
+    assert loop._last_declared["dev1"] == ("Acme Array", "7.2.1")
+
+
+@pytest.mark.asyncio
+async def test_declared_identity_reaches_the_device_record(monkeypatch):
+    """End to end through the comparison step, because stashing it is not the point —
+    persisting it is. The stash is consumed on the cycle *after* the spec poll."""
+    spec = {"openapi": "3.0.0", "info": {"title": "Acme Array", "version": "7.2.1"}, "paths": {}}
+    loop, backend = await _openapi_loop(monkeypatch, spec)
+
+    await loop._check_device("dev1")  # spec poll stashes
+    await loop._check_device("dev1")  # comparison consumes and persists
+
+    cfg = await backend.get_device("dev1")
+    assert cfg.declared_name == "Acme Array"
+    assert cfg.declared_version == "7.2.1"
+
+
+@pytest.mark.asyncio
+async def test_a_changed_declared_version_is_detected(monkeypatch):
+    """The change-signal half. A plain-http device has no authenticated dimension at all
+    (ADR-0015 §7), so the declared fields are the *only* thing that can move — which is
+    exactly the case that detected nothing before this fix."""
+    spec = {"openapi": "3.0.0", "info": {"title": "Acme Array", "version": "7.2.1"}, "paths": {}}
+    loop, backend = await _openapi_loop(monkeypatch, spec)
+    await loop._check_device("dev1")
+    await loop._check_device("dev1")
+    assert (await backend.get_device("dev1")).declared_version == "7.2.1"
+
+    # The appliance is upgraded in place.
+    spec["info"]["version"] = "8.0.0"
+    loop._last_spec_check["dev1"] = time.time() - 301
+    await loop._check_device("dev1")
+    await loop._check_device("dev1")
+
+    cfg = await backend.get_device("dev1")
+    assert cfg.declared_version == "8.0.0"
+    assert cfg.fingerprint_state == "pinned", "a version bump is informational, not an approval gate"
+
+
+@pytest.mark.asyncio
+async def test_a_proxied_mcp_device_does_not_read_info_from_its_spec(monkeypatch):
+    """An MCP upstream's declared identity comes from `serverInfo` on the live handshake.
+    Its `_fetch_spec` returns a synthesised {"tools": [...]} document with no `info` block,
+    and reading one from there would invent an identity nothing reported."""
+    backend = MemoryRegistryBackend()
+    await backend.set_device(
+        "mcpdev",
+        DeviceConfig(hostname="mcpdev", base_url="http://mcpdev", upstream_kind="mcp", spec_hash="x"),
+    )
+    loop, _b, _c = await _make_loop(monkeypatch)
+    loop._backend = backend
+
+    async def _fetch(_cfg):
+        return {"tools": [], "info": {"title": "should not be read", "version": "0"}}
+
+    monkeypatch.setattr(loop, "_fetch_spec", _fetch)
+    await loop._check_device("mcpdev")
+    loop._last_spec_check["mcpdev"] = time.time() - 301
+    await loop._check_device("mcpdev")
+
+    assert "mcpdev" not in loop._last_declared
+
+
+def test_a_junk_info_block_records_nothing_and_does_not_raise():
+    """A spec can survive fetching and still be malformed. Fingerprinting is a diagnostic
+    layered onto the health loop, so a junk `info` block must yield no declared identity
+    rather than an exception — and must never invent one from a partial value.
+
+    Exercised directly rather than through `_check_device`: a malformed spec changes the
+    spec hash, which routes into the translation branch and fails there for reasons that
+    have nothing to do with the `info` block.
+    """
+    loop = WorkerHealthLoop("w", MemoryRegistryBackend(), None, interval=30)
+    for junk in (
+        {"openapi": "3.0.0", "info": "not-an-object"},
+        {"openapi": "3.0.0", "info": None},
+        {"openapi": "3.0.0"},
+        {"info": {}},
+        {"info": {"title": "", "version": ""}},
+        "not-a-dict-at-all",
+    ):
+        loop._record_declared_from_spec("dev1", junk)
+        assert "dev1" not in loop._last_declared, f"recorded something from {junk!r}"
+
+
+def test_a_title_without_a_version_is_still_worth_recording():
+    """Half an identity is still inventory, and `_declared_changed` compares each field
+    independently — a missing version never reads as a change."""
+    loop = WorkerHealthLoop("w", MemoryRegistryBackend(), None, interval=30)
+    loop._record_declared_from_spec("dev1", {"info": {"title": "Acme Array"}})
+    assert loop._last_declared["dev1"] == ("Acme Array", None)

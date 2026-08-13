@@ -24,7 +24,10 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   digest (cryptographic), the upstream's *declared* `serverInfo` / OpenAPI `info`
   (self-reported, therefore spoofable — inventory that doubles as a change signal, and data
   the probe already fetched and discarded), and the existing `tools_revision`. A single badge
-  over the top would lend the declared fields weight they do not have.
+  over the top would lend the declared fields weight they do not have. The declared value
+  comes from the `initialize` handshake for an MCP upstream and from the spec poll for an
+  OpenAPI one, so a newly registered OpenAPI device shows no declared identity until its
+  first poll.
 
   **The pin is the SPKI, not the certificate**, and that one choice decides whether the
   control is signal or noise: a routine renewal re-issues against the same key, so nothing
