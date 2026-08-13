@@ -29,6 +29,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from loguru import logger
+
+# ADR-0015. fingerprint.py depends on nothing here, so this direction is cycle-free.
+from device_mcp_gateway.security.fingerprint import Observation, observe_tls
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
@@ -249,10 +253,18 @@ class SsrfGuardTransport(httpx.AsyncBaseTransport):
         *,
         allow_private: bool,
         allowed_ports: set[int] | None = None,
+        capture_fingerprint: bool = False,
     ) -> None:
         self._inner = inner
         self._allow_private = allow_private
         self._allowed_ports = allowed_ports
+        # ADR-0015: the peer certificate is only reachable from the live connection, which
+        # exists here and nowhere upstream of here — by the time the registry sees a
+        # response the socket may already be back in the pool. So the fingerprint is a
+        # property of the transport, and the last observation is left here for the caller
+        # to collect after the request completes.
+        self._capture_fingerprint = capture_fingerprint
+        self.last_observation: Observation | None = None
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         try:
@@ -265,10 +277,38 @@ class SsrfGuardTransport(httpx.AsyncBaseTransport):
             raise UrlPolicyError(f"blocked outbound request to {request.url}: {exc}") from exc
         if pinned_ip is not None:
             request = _pin_request(request, pinned_ip)
-        return await self._inner.handle_async_request(request)
+        response = await self._inner.handle_async_request(request)
+        if self._capture_fingerprint:
+            self.last_observation = _observe_response(response)
+        return response
 
     async def aclose(self) -> None:
         await self._inner.aclose()
+
+
+def _observe_response(response: httpx.Response) -> "Observation | None":
+    """Read the peer certificate off a completed response, or None for plain HTTP.
+
+    ⚠️ On a redirect chain this sees the LAST hop, because httpx invokes the transport once
+    per hop and each call overwrites the previous observation. That is the correct target —
+    it is the host that actually answered — but it means the fingerprint belongs to the
+    final URL, not necessarily the registered one. Devices are pinned to ``base_url`` and
+    redirects are re-validated per hop (F-29), so the two agree in practice.
+
+    Never raises: a fingerprint is diagnostic, and failing to read one must not fail the
+    request that carried it.
+    """
+    try:
+        stream = response.extensions.get("network_stream")
+        if stream is None:
+            return None
+        ssl_object = stream.get_extra_info("ssl_object")
+        if ssl_object is None:
+            return None  # plain http:// — no authenticated dimension exists (ADR-0015 §7)
+        return observe_tls(ssl_object)
+    except Exception as exc:  # noqa: BLE001 — diagnostic only, see docstring
+        logger.debug(f"fingerprint capture skipped: {type(exc).__name__}: {exc}")
+        return None
 
 
 def _pin_request(request: httpx.Request, ip: str) -> httpx.Request:

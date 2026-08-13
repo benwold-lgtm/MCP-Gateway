@@ -1,0 +1,247 @@
+# ADR-0015: Endpoint fingerprinting — pin what a device *is*, warn when it changes
+
+- **Status:** Accepted
+- **Date:** 2026-08-12 (Proposed) · 2026-08-12 (Accepted, on resolving §9)
+- **Related findings:** F-02 (SSRF / target policy), F-29 (redirect re-validation),
+  F-69 (declared identity discarded — *not yet filed*)
+- **Builds on:** [ADR-0009](0009-mcp-passthrough.md) (a remote MCP server is a device),
+  [ADR-0011](0011-backup-and-restore.md) (archives must carry the pins — see Consequences),
+  [ADR-0013](0013-two-plane-tenancy-and-the-provider-plane.md) §8 (why a noisy control is a
+  broken control)
+
+## Context
+
+Registering a device today establishes **where** the gateway may talk, not **what** it is
+talking to. `validate_device_registration` enforces the URL policy (F-02/F-67), every
+request is pinned to `base_url` so a fetched spec cannot redirect the gateway elsewhere,
+redirects are re-validated per hop (F-29), and tool arguments cannot override credentials
+(F-25). Those are solid, and they all constrain the *address*.
+
+Nothing constrains identity. Two consequences follow:
+
+- **`upstream_kind` is declared by the registrant, not discovered.** It is validated only
+  against the set of recognised values. The endpoint is never asked what it is, and no
+  answer it gave would be checked.
+- **The identity information the gateway already receives is thrown away.** An MCP upstream
+  returns `serverInfo: {name, version}` from the `initialize` handshake on every
+  reachability probe — and `mcp_discovery.py` logs it at debug level and discards it. The
+  OpenAPI `info: {title, version}` block is likewise not retained.
+
+Meanwhile the *functional* half of a fingerprint already exists and works:
+`canonical_tools_hash()` drives the monotonic `tools_revision`, detects a changed tool
+surface, and triggers pod replacement.
+
+**The realistic threat is not a malicious registrant.** Registration requires
+`devices:write`; anyone holding it who wants to exfiltrate can register anything and call
+it, and no amount of endpoint verification changes that — the trust decision is *who may
+register*, and that is RBAC. What nothing currently detects is the case that will actually
+happen: **the thing at `base_url` becomes a different thing.** DNS repointed, a host
+rebuilt, an appliance replaced, a service migrated, a certificate reissued under a new key.
+The gateway keeps sending credentials to it and never mentions that anything changed.
+
+There is also a plain operational motive, and it argues for the same change: operators need
+to know what a device *is* — vendor, product, version — to organise and manage a fleet by
+name. That is exactly the data being discarded.
+
+## Decision
+
+Record a fingerprint per device, made of three dimensions that are **never conflated**;
+compare on every reachability check; **warn by default and require an audited human
+approval to re-pin**, with fail-closed available as an opt-in policy.
+
+### 1. Three dimensions, labelled by how much they can be trusted
+
+| Dimension | Source | Trust |
+|---|---|---|
+| **Authenticated** | TLS **SPKI** SHA-256 (plus cert SHA-256, issuer, subject, `notAfter` as context) | Cryptographic. Proves this is the same endpoint as last time. |
+| **Declared** | MCP `serverInfo{name,version}`; OpenAPI `info{title,version}` | **Self-reported and spoofable.** Good for inventory and change *detection*; worthless as proof. |
+| **Behavioural** | `canonical_tools_hash` / `tools_revision` | Already exists. Detects a changed tool surface. |
+
+**These must stay visibly separate in the model, the API and the UI.** A single "verified"
+badge over the top would imply the declared fields carry weight they do not have — the same
+mistake as trusting `upstream_kind` because it is present in the record. The declared
+dimension is inventory that happens to be useful for detecting change, and it should read
+that way.
+
+### 2. Pin the SPKI, not the certificate
+
+The pinned value is the SHA-256 of the **Subject Public Key Info**, not of the certificate.
+
+This single choice decides whether the control is signal or noise. A routine renewal
+re-issues the certificate against the *same key*: same SPKI, no alarm. A renewal that
+rotates the key trips it — which is correct, because from the outside that is
+indistinguishable from a substituted endpoint. Pinning the full certificate would fire on
+every ACME renewal, i.e. every 60–90 days per device across the whole fleet.
+
+[ADR-0013 §8](0013-two-plane-tenancy-and-the-provider-plane.md) made this argument for
+step-up and it applies unchanged: **a control that fires constantly trains people to
+approve reflexively, destroying the signal exactly where it needs to mean something.** A
+fleet-wide quarterly false alarm would not merely be ignored, it would get the feature
+switched off.
+
+### 3. Classify the change; do not raise one undifferentiated alarm
+
+| Observed | Verdict |
+|---|---|
+| Tool hash changed only | **Not a fingerprint event.** Routine — a firmware or feature upgrade. Already handled by `tools_revision`. |
+| Cert reissued, SPKI unchanged | Informational. Auto-accept, record the new cert and expiry. |
+| Declared identity changed, SPKI unchanged | Informational — usually a version upgrade. Record; surface in inventory. |
+| **SPKI changed** | **Warn. Requires approval.** |
+| **SPKI *and* declared identity changed** | **Warn, prominently.** The strongest available signal that this is a different thing. |
+
+Folding these into one alarm would mean the common, boring cases drown the one that matters.
+
+### 4. Warn by default, and the device keeps working
+
+On an SPKI change the device is flagged `fingerprint_pending_approval`, surfaced in the API
+and UI, and **continues to serve**. Clearing the flag requires an explicit approval that
+re-pins the new value.
+
+Warning rather than stopping is deliberate. A fleet that halts on certificate rotation is a
+fleet whose operators disable the check within a quarter — and a disabled control detects
+nothing at all, which is strictly worse than a warning someone might read. The default is
+chosen for what survives contact with operations.
+
+### 5. Fail-closed is opt-in
+
+`security.fingerprint_policy: warn | enforce`, deployment-wide, overridable per device (the
+same shape as the existing per-device `rate_limit_rps`).
+
+Under `enforce`, a device with an unapproved fingerprint change **stops serving tool calls**
+— refused with an error naming the fingerprint change — while staying registered and
+visible. It is quarantined, not deleted.
+
+Per-device override matters because the risk is not uniform: a storage array holding
+production data warrants `enforce`; a lab sensor does not. A deployment-wide-only setting
+would be tuned to the least critical device.
+
+### 6. Approval is an audited act, not a dismissal
+
+Approving a changed fingerprint is a **trust decision**, and is recorded as one: the
+principal, the device, the old and new values, and the time. It follows the ADR-0013 pattern
+— cross-cutting authority is exercised and recorded, never held ambiently. A UI that lets
+someone clear the flag without it appearing in the audit chain would convert the control
+into a nuisance dialog.
+
+### 7. Plain HTTP devices have **no** authenticated dimension
+
+An `http://` upstream has no certificate, so it gets declared and behavioural dimensions
+only. This must be stated in the record and shown in the UI rather than left to inference —
+a device whose fingerprint "matches" on two spoofable dimensions is not verified, and
+displaying it beside a TLS-pinned device without distinction would be misleading.
+
+It is a reasonable follow-on to warn at registration that an `http://` device cannot be
+fingerprinted meaningfully.
+
+### 8. First registration is trust-on-first-use, and says so
+
+The first fingerprint is recorded without verification. TOFU **establishes a baseline; it
+does not validate anything** — if the endpoint was already wrong at registration, the wrong
+value is what gets pinned. The record and the UI should use that language rather than
+"verified".
+
+For deployments that need better, registration may optionally accept an **expected SPKI**,
+verified out of band, and refuse the registration on mismatch. That converts TOFU into real
+verification for the devices where it is worth the effort.
+
+## Consequences
+
+- **Positive:** the realistic failure — an endpoint quietly becoming a different endpoint —
+  becomes visible; the inventory metadata operators need to manage a fleet by name arrives
+  as a by-product of the same change; the behavioural dimension already exists, so a third
+  of this is done; the declared dimension is data already fetched on every probe and
+  currently discarded, so capturing it costs almost nothing.
+- **Negative / cost:**
+  - **⚠️ [ADR-0011](0011-backup-and-restore.md) archives must carry the pins.** If they do
+    not, every device silently re-TOFUs on restore and the control is void from the first
+    disaster recovery onward — precisely when an operator is least able to notice. Restoring
+    a pin that no longer matches must warn rather than re-pin.
+  - TOFU baselines are unverified by construction. This buys change detection, not identity
+    validation, and must not be described as the latter.
+  - The declared fields will appear in the UI, where users will over-trust them regardless
+    of labelling. The mitigation is presentation, and it is imperfect.
+  - `enforce` can take a fleet offline on a genuine key rotation. That is the point of the
+    mode, and it is why it is not the default.
+  - A schema change reaching `DeviceConfig`, both storage backends, the API models and the
+    UI — plus the archive format above.
+  - Capturing the peer certificate requires reading it from the live connection during the
+    request, which couples fingerprinting to the transport layer rather than leaving it a
+    property of the registry.
+
+## Implementation feasibility (verified 2026-08-12)
+
+Confirmed workable on the current stack (httpx 0.28.1, `cryptography` 49.0.0) before
+proposing it:
+
+- The peer certificate is reachable via `response.extensions["network_stream"]` →
+  `get_extra_info("ssl_object")` → `getpeercert(True)`. `SsrfGuardTransport` already wraps
+  the transport and is the natural capture point.
+- ⚠️ **`getpeercert` must be called positionally.** The object returned is a raw
+  `_SSLSocket`, not the `SSLSocket` wrapper, so the documented `binary_form=True` keyword
+  raises `TypeError: _SSLSocket.getpeercert() takes no keyword arguments`.
+- SPKI is derived with `cryptography`'s `x509.load_der_x509_certificate(...)` →
+  `public_key().public_bytes(DER, SubjectPublicKeyInfo)`; subject, issuer and `not_valid_after`
+  come from the same object for the contextual fields.
+
+## Alternatives considered
+
+- **Pin the full certificate:** rejected — §2. Fires on every routine renewal, which trains
+  reflexive approval and gets the feature disabled.
+- **Pin the issuer / CA only:** rejected. Any certificate from the same public CA would
+  pass, which for a publicly-issued cert is close to no control at all.
+- **Fail closed by default:** rejected — §4. Correct on paper; in practice it gets switched
+  off after the first rotation outage, and a disabled control detects nothing.
+- **Rely on ordinary TLS validation:** rejected. TLS proves the certificate matches the
+  *name* requested. Repoint the DNS at a host with a valid certificate for that name and TLS
+  is perfectly happy — which is the exact scenario this ADR exists to catch.
+- **Verify device type by matching the spec against known vendor profiles:** rejected. It was
+  considered because it sounds like the strongest option; it is brittle, needs continuous
+  maintenance per vendor, and is trivially spoofed by an endpoint that serves a matching
+  spec. Worst of all it would *look* like identity verification while delivering pattern
+  matching, which is a worse position than having no such check.
+- **Treat a changed tool hash as a fingerprint alarm:** rejected — §3. It changes on ordinary
+  upgrades and would supply most of the noise while carrying the least signal.
+
+## Resolved questions
+
+The two questions this ADR was Proposed pending are settled below (2026-08-12), which is
+what moves it to Accepted.
+
+### 9. `devices:write` approves, and `enforce` stops the *use* paths only
+
+**Approval uses the existing `devices:write` scope.** No new scope is introduced. The
+gateway's RBAC is deliberately small ([ADR-0007](0007-federated-identity-oidc-and-gateway-rbac.md)),
+and in practice the operator who registers a device is the operator who knows whether a
+changed endpoint is still the right one — splitting them would add a scope without adding a
+decision-maker.
+
+**State the trade-off rather than implying separation of duty:** anyone who can register a
+device can also approve a fingerprint change. The accountability therefore rests entirely on
+the **audit record** (§6) — principal, device, old and new values, timestamp — not on scope
+separation. If a deployment later needs the split, a narrower `devices:approve` is an
+additive change that does not disturb this decision.
+
+**Under `enforce`, the device is quarantined from use but stays observable:**
+
+| Path | Under `enforce` with an unapproved change |
+|---|---|
+| Tool calls | **Refused**, with an error naming the fingerprint change |
+| Resource reads | **Refused** — same risk as a GET tool: credentials go out, device data comes back |
+| Reachability probe / diagnostics | **Continue** |
+| `GET /v1/devices/...`, UI visibility | **Continue** |
+| Delete / re-approve | **Always available** |
+
+The dividing line is *using* the device versus *observing* it. Refusing everything would
+make a quarantined device indistinguishable from a dead one, exactly when an operator is
+trying to work out which it is; continuing to probe is what lets them see the new
+fingerprint, and see the device recover on its own if the change was a rotation.
+
+⚠️ **Resource reads are included deliberately**, which extends "stops tool calls" slightly.
+A resource read sends the device's credentials and returns its data — the same exposure as a
+GET-shaped tool call, differing only in the code path. Stopping one and not the other would
+leave a quiet route to precisely what the quarantine exists to prevent. Called out here
+rather than buried, because it is a broader stop than the phrase "tool calls" implies.
+
+**Recovery is manual and has two forms**, both ordinary existing operations: re-approve
+(re-pins the new fingerprint, audited) or delete the device. Quarantine never blocks
+deletion — a device an operator no longer trusts must always be removable.
