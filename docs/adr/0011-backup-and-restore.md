@@ -102,6 +102,15 @@ changes, which is the part with no other source of truth).
 **Opt-in:** dead-letter streams (`device:{h}:calls:dead`). Operationally valuable during an
 incident, unbounded and mostly noise otherwise.
 
+**Added 2026-08-13 — the endpoint fingerprint** (`fingerprint` block per device;
+[ADR-0015](0015-endpoint-fingerprinting.md)). It sits alongside the governance history for
+the same reason: a pin *looks* like a runtime measurement but is a baseline somebody is
+trusting — TOFU established it, or a human approved it. Omitting it does not lose a fact
+the new stack re-derives; it silently re-runs trust-on-first-use against whatever now
+answers, so **the archive is what keeps the control alive across a restore**. The restore
+half never re-pins: where the archive and a live record disagree, the live pin stays and
+the disagreement is reported.
+
 **Excluded, on purpose:** everything reconstructible or ephemeral — claims and leases,
 worker membership and heartbeats, the assignment and call streams, open sessions,
 idempotency markers, rate-limit counters, and the TTL'd manifest cache. Restoring a stale

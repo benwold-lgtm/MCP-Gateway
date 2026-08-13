@@ -417,6 +417,25 @@ generations. The message names which:
   or use a portable archive.
 - *"needs the passphrase it was exported with"* — portable archive, add `passphrase`.
 
+**Check `fingerprint_warnings` on every restore.** It counts devices whose endpoint pin
+([ADR-0015](adr/0015-endpoint-fingerprinting.md)) could not be carried across intact, and
+each one also carries a `fingerprint_warning` naming why. It is reported at the top level
+precisely because three warnings inside a 500-device list is what gets missed mid-incident:
+
+```bash
+… "$GW/v1/admin/restore" | jq '.counts, .fingerprint_warnings, [.devices[] | select(.fingerprint_warning)]'
+```
+
+Two causes, and they want different responses. **The archive and the live device disagree
+on the pin** — the live pin was kept and the archived one discarded, because a restore
+warns rather than re-pinning: the live value was established against the endpoint as it is
+now, quite possibly by an audited approval. If the *archived* value is the correct one,
+delete the device and restore it again. **The archive carries no pin at all** — either it
+predates ADR-0015 (re-export from a current gateway) or the device had never been probed;
+either way that device will trust-on-first-use on its next probe and record whatever
+answers. Plain-`http://` devices are exempt and never warn: they have no authenticated
+dimension to lose.
+
 Restored devices come back **unprovisioned**: registration re-fetches each spec and
 re-spawns each pod, so a device that is unreachable at restore time lands with a
 `spawn_error` and `reachable: false` (F-66) until it can be contacted. That is a device

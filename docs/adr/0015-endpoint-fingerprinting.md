@@ -156,6 +156,15 @@ verification for the devices where it is worth the effort.
     not, every device silently re-TOFUs on restore and the control is void from the first
     disaster recovery onward — precisely when an operator is least able to notice. Restoring
     a pin that no longer matches must warn rather than re-pin.
+    **Closed 2026-08-13** — the archive carries a `fingerprint` block per device and the
+    restore never re-pins. Two things the build found that this ADR had not accounted for:
+    (a) `on_conflict=overwrite` goes through `replace_device`, which rebuilds the record
+    from registration inputs alone, so an overwrite restore **wiped the live pin** even
+    when the archive agreed with it — writing the fingerprint back is load-bearing, not a
+    no-op; (b) `fingerprint_state` and `pending_tls_spki_sha256` have to travel too, or a
+    device exported mid-`pending_approval` comes back `pinned` and the restore becomes a
+    way to launder an unapproved change past §6. Archives written before this change are
+    still readable and are **reported** as carrying no pin rather than restored silently.
   - TOFU baselines are unverified by construction. This buys change detection, not identity
     validation, and must not be described as the latter.
   - The declared fields will appear in the UI, where users will over-trust them regardless
