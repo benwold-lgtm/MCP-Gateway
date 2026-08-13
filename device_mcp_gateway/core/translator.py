@@ -16,7 +16,6 @@ from typing import Any
 
 from loguru import logger
 from openapi_spec_validator import validate as _validate_openapi_spec
-from openapi_spec_validator.validation.exceptions import OpenAPISpecValidatorError
 
 from device_mcp_gateway.core.spec_limits import enforce_operation_count
 from device_mcp_gateway.shared.keys import device_resource_uri
@@ -214,8 +213,27 @@ class SpecTranslator:
         enforce_operation_count(spec)
         try:
             _validate_openapi_spec(spec)
-        except OpenAPISpecValidatorError as exc:
-            raise ValueError(f"Invalid OpenAPI spec: {exc}") from exc
+        except Exception as exc:
+            # Deliberately broad, and the breadth is the fix. This guard named
+            # `OpenAPISpecValidatorError`, which sits on a *different* branch of the
+            # library's hierarchy from the errors ordinary validation raises:
+            #
+            #   OpenAPISpecValidatorError -> OpenAPIError -> Exception      (version detection)
+            #   OpenAPIValidationError    -> ValidationError -> _Error      (the actual checks)
+            #
+            # So a malformed `info`, a missing required field or a wrong type — the common
+            # cases — escaped uncaught, while only the rarer "cannot tell which OpenAPI
+            # version this is" was converted. Every caller downstream catches `ValueError`
+            # to report a spec rejection (`spawn_error`, the health loop's warning), so the
+            # escape bypassed all of that and surfaced as an unhandled traceback instead.
+            #
+            # Re-enumerating the two branches would fix today's failure and leave the same
+            # trap for the next library release. This try wraps exactly one call whose only
+            # job is to decide whether the document is valid, and nothing of ours runs
+            # inside it, so *any* exception from it means the same thing to a caller: this
+            # spec cannot be used. The original type and message are preserved in the
+            # message and the `from exc` chain.
+            raise ValueError(f"Invalid OpenAPI spec: {type(exc).__name__}: {exc}") from exc
         self._spec = spec  # stored so _resolve_ref can walk the full document
         info = spec.get("info", {})
         manifest = McpManifest(

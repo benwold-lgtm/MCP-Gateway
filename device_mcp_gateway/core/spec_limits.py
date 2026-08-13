@@ -78,8 +78,19 @@ def enforce_operation_count(spec: dict, *, max_ops: int = DEFAULT_MAX_OPERATIONS
     """
     if max_ops <= 0:
         return
+    paths = spec.get("paths") if isinstance(spec, dict) else None
+    if not isinstance(paths, dict):
+        # A document whose `paths` is not an object (or which is not an object at all)
+        # declares no countable operations, so there is nothing for the size guard to do.
+        # Deliberately not an error *here*: this runs before `_validate_openapi_spec`, and
+        # that validator is the thing that knows how to say why a malformed document is
+        # unusable. Raising our own would pre-empt it with a worse message — and raising
+        # the AttributeError this used to (`"str" has no attribute "values"`) escaped the
+        # `except (SpecTooLargeError, ValueError)` that every caller uses to report a spec
+        # rejection, which is the same escape the validator guard had.
+        return
     ops = 0
-    for methods in spec.get("paths", {}).values():
+    for methods in paths.values():
         if not isinstance(methods, dict):
             continue
         ops += sum(1 for m in methods if isinstance(m, str) and m.upper() in _HTTP_METHODS)
