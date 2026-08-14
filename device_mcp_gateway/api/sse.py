@@ -15,7 +15,7 @@ from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway import API_V1_PREFIX, metrics
 from device_mcp_gateway.api.dispatch import _GATEWAY_ID, spawn_timeout_watcher
-from device_mcp_gateway.audit import audit_log
+from device_mcp_gateway.audit import audit_log, grant_fields
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
 from device_mcp_gateway.rbac import SCOPE_TOOLS_CALL, require_scope
@@ -173,6 +173,7 @@ async def device_sse_message(
                 subject=_subject,
                 status="rejected_overload",
                 rid=_rid,
+                **grant_fields(request),
             )
             raise HTTPException(
                 status_code=429,
@@ -218,6 +219,7 @@ async def device_sse_message(
             method=payload.get("method", "?"),
             status="dispatched",
             rid=_rid,
+            **grant_fields(request),
         )
         return {"status": "accepted"}
     else:
@@ -248,5 +250,9 @@ async def device_sse_message(
             status=_status,
             duration_ms=round(_dur, 1),
             rid=_rid,
+            # Always empty in embedded mode (§11a refuses grants without a shared store), but
+            # emitted from the same place as the distributed branch so the two records cannot
+            # drift into different shapes.
+            **grant_fields(request),
         )
         return response

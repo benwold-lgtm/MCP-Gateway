@@ -46,18 +46,26 @@ Real RSA keys throughout, seeded into the caches, so the whole file runs offline
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import json
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from loguru import logger
 
+import device_mcp_gateway
+from device_mcp_gateway.audit import audit_request, grant_fields
 from device_mcp_gateway.grants import (
     DEFAULT_GRANT_POLICIES,
     GRANTABLE_SCOPES,
     GrantError,
     MemoryGrantStore,
+    RedisGrantStore,
     verify_grant,
 )
 from device_mcp_gateway.oidc import (
@@ -74,7 +82,9 @@ from device_mcp_gateway.rbac import (
     SCOPE_DEVICES_WRITE,
     SCOPE_METRICS_READ,
     SCOPE_TOOLS_CALL,
+    Principal,
 )
+from device_mcp_gateway.shared.keys import KEYS
 
 # Nearly every test here is async; the two that are not are written async anyway so the
 # module carries one marker rather than thirty.
@@ -431,11 +441,18 @@ async def test_a_mixed_grant_takes_the_strictest_policy(store):
     """Composition is fail-safe, not first-wins. A claim naming both classes is single-use
     and gets the shorter window — the alternative is that adding ``tools:call`` to a
     credentials grant *relaxes* it."""
+    now = time.time()
     raw = _grant(id="mixed", scopes=[SCOPE_TOOLS_CALL, SCOPE_BACKUP_READ])
-    grant = await _verify(raw=raw, store=store)
+    grant = await _verify(raw=raw, store=store, now=now)
     assert grant.single_use is True
+    # ...and the *window* composes the same way, which the single-use half does not imply:
+    # `min` and `max` over the two policies both produce a working grant, and only this
+    # pins which one. Anchored on the same auth_time `_verify` uses.
+    auth_time = int(now) - 30
+    assert grant.expires_at == auth_time + DEFAULT_GRANT_POLICIES[SCOPE_BACKUP_READ].max_lifetime
+    assert grant.expires_at < auth_time + DEFAULT_GRANT_POLICIES[SCOPE_TOOLS_CALL].max_lifetime
     with pytest.raises(GrantError, match="already"):
-        await _verify(raw=raw, store=store)
+        await _verify(raw=raw, store=store, now=now)
 
 
 # --- end to end, through the validator ----------------------------------------
@@ -507,6 +524,13 @@ async def test_a_grant_raises_the_ceiling_for_that_request(rig):
     # ...and only that. The grant lifts the ceiling for what it names, not to `admin`.
     assert not p.scopes & {SCOPE_BACKUP_READ, SCOPE_BACKUP_EXPORT_PORTABLE}
     assert p.grant_id == "grant-001"
+    # The grant is a *union* with what the role already allowed, not a replacement. Both
+    # produce a principal holding `tools:call`, so nothing above separates them — but the
+    # replacement reading strips an elevated operator of the everyday scopes they had a
+    # second earlier, so elevating to call a tool would cost them `devices:read` while
+    # they did it. Enumerated rather than spot-checked so the base set cannot shrink here
+    # unnoticed either.
+    assert p.scopes == frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_METRICS_READ, SCOPE_TOOLS_CALL})
 
 
 async def test_the_elevation_is_not_ambient_on_the_next_request(rig):
@@ -612,3 +636,167 @@ async def test_a_tenant_issuer_needs_no_tenant_id():
     check a tenant id against."""
     cfg = _cfg(TENANT_ISS, plane=PLANE_TENANT, group_roles={"tenant-viewers": "viewer"}, tenant_id=None)
     assert cfg.tenant_id is None
+
+
+# --- §11 audit: which records name the grant, and which must not change shape --------
+#
+# The grant is what let this request happen, so the records it produced have to say so —
+# otherwise reconstructing an elevated session after the fact means correlating on subject
+# and timestamp across a provider identity that is, by §5a design, doing ordinary everyday
+# work under the same subject the rest of the time.
+#
+# Two shapes matter and they pull against each other: the field must appear wherever a
+# grant was used, and must not appear anywhere else. `audit_request` is the chokepoint for
+# the credentials class (`backup:*` routes all go through it) but explicitly **not** for the
+# invoke class — `tools:call` dispatch records are emitted through `audit_log` directly in
+# four transport modules, which is exactly the class §8 makes replayable within its window
+# and therefore the class whose records most need the join key.
+
+
+def _req(principal=None, rid="r-1"):
+    """A request stand-in with the two attributes the audit helpers actually read."""
+    return SimpleNamespace(state=SimpleNamespace(principal=principal, request_id=rid))
+
+
+def _granted(grant_id="grant-001"):
+    return Principal(
+        subject="oidc:https://provider-idp.example.com#u-1",
+        scopes=frozenset({SCOPE_TOOLS_CALL}),
+        auth_method="oidc",
+        grant_id=grant_id,
+    )
+
+
+@pytest.fixture
+def audit_records():
+    """Capture emitted audit records (event='audit') as a list of ``extra`` dicts."""
+    captured = []
+
+    def _sink(message):
+        if message.record["extra"].get("event") == "audit":
+            captured.append(message.record["extra"])
+
+    sink_id = logger.add(_sink, level="INFO")
+    yield captured
+    logger.remove(sink_id)
+
+
+async def test_a_request_under_a_grant_is_audited_with_the_grant_id(audit_records):
+    audit_request(_req(_granted()), "device.update", outcome="success", target="dev.local")
+    assert audit_records[-1]["grant"] == "grant-001"
+
+
+async def test_an_unelevated_request_carries_no_grant_field_at_all(audit_records):
+    """Not ``grant=None``. The hash chain commits to the record's field *set*, so an
+    always-present field would make every record from here on differ in shape from every
+    record already written — for a value that says nothing. Absence is the signal, and
+    this is what keeps existing chains verifying across the upgrade."""
+    audit_request(_req(_granted(grant_id=None)), "device.update", outcome="success")
+    assert "grant" not in audit_records[-1]
+
+
+async def test_an_unauthenticated_request_audits_without_raising(audit_records):
+    """The audit emitter observes the request; it must never be the thing that 500s it.
+    A request refused *before* authentication has no principal at all, and those refusals
+    are precisely the records worth having."""
+    audit_request(_req(principal=None), "device.create", outcome="denied")
+    assert "grant" not in audit_records[-1]
+    assert audit_records[-1]["subject"] == "unauthenticated"
+
+
+async def test_grant_fields_ignores_a_non_string_grant_id():
+    """Belt and braces on the boundary between a claim and a log line: `grant_id` is set
+    from a verified claim, but a field that reaches the audit sink is worth type-checking
+    at the sink, because a chained record cannot be corrected afterwards."""
+    assert grant_fields(_req(SimpleNamespace(grant_id=["g-1"]))) == {}
+    assert grant_fields(_req(SimpleNamespace(grant_id=""))) == {}
+    assert grant_fields(_req(SimpleNamespace(grant_id="g-1"))) == {"grant": "g-1"}
+
+
+async def test_every_tool_dispatch_record_names_the_grant():
+    """The invoke class's records, which `audit_request` does not reach.
+
+    Asserted structurally over the source because that is the shape of the property: the
+    four transport modules each emit their own dispatch record through `audit_log`, and the
+    regression to catch is not a wrong value but an *omission* — a fifth site added later,
+    or the kwarg dropped from one of the four while the other three keep the test green.
+    A behavioural test per site would need a stood-up distributed transport each time and
+    would still say nothing about the site nobody has written yet.
+
+    §8 makes the invoke grant replayable within its window, so one grant id legitimately
+    spans several of these records. That is the point: the id is the join key, and a
+    dispatch record missing it drops out of the reconstruction silently.
+    """
+    missing = []
+    for name in ("sse.py", "fleet.py", "streamable.py", "streamable_fleet.py"):
+        path = Path(device_mcp_gateway.__file__).parent / "api" / name
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "audit_log"):
+                continue
+            message = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else ""
+            if "dispatch" not in str(message):
+                continue
+            passes_grant = any(
+                kw.arg is None and isinstance(kw.value, ast.Call) and getattr(kw.value.func, "id", "") == "grant_fields"
+                for kw in node.keywords
+            )
+            if not passes_grant:
+                missing.append(f"{name}:{node.lineno} {message!r}")
+    assert not missing, "tool-dispatch audit records that would not name an elevated grant:\n" + "\n".join(missing)
+
+
+# --- §11a consumption against the store production actually uses ----------------
+#
+# Everything above consumes against `MemoryGrantStore`, which is the right double for the
+# *policy* — but it is also a store this repo wrote, and a test that only ever exercises it
+# agrees with itself about atomicity. `RedisGrantStore` is what a distributed gateway
+# attaches, and its single-use property is one Redis flag (`NX`) deep: drop it and every
+# `SET` succeeds, single-use silently becomes replayable-until-expiry, and no test above
+# notices. fakeredis is not enough here either — the point is the real server's
+# atomic-claim semantics under concurrency, which a simulator would model rather than run.
+
+
+@pytest.mark.integration
+async def test_redis_backed_single_use_is_claimed_exactly_once(real_redis):
+    store = RedisGrantStore(real_redis)
+    assert await store.consume("g-real", ttl=60) is True
+    assert await store.consume("g-real", ttl=60) is False
+
+
+@pytest.mark.integration
+async def test_concurrent_replays_of_one_grant_produce_exactly_one_winner(real_redis):
+    """The race the `NX` is there for: two gateway replicas presented the same credentials
+    grant at the same instant. Sequential replay (above) is satisfied by a read-then-write
+    that a simultaneous pair would both pass, so the concurrent case is asserted separately."""
+    store = RedisGrantStore(real_redis)
+    results = await asyncio.gather(*(store.consume("g-race", ttl=60) for _ in range(20)))
+    assert sum(results) == 1
+
+
+@pytest.mark.integration
+async def test_the_consumption_record_expires_with_the_grant(real_redis):
+    """A record kept forever would accumulate a key per grant for nothing — a grant past
+    its deadline is refused by the clock check before consumption is ever reached. Asserted
+    on the real server because a missing TTL is invisible to an in-process dict."""
+    store = RedisGrantStore(real_redis)
+    await store.consume("g-ttl", ttl=45)
+    ttl = await real_redis.ttl(KEYS.grant_consumed("g-ttl"))
+    assert 0 < ttl <= 45
+
+
+@pytest.mark.integration
+async def test_a_redis_that_refuses_the_write_refuses_the_grant(real_redis):
+    """Fail closed, on the real client's own error type. `verify_grant`'s handler catches
+    `Exception`, which is broad enough to be worth pinning against a store that raises the
+    way the actual library does rather than the way a test double was written to."""
+
+    class _Broken:
+        async def set(self, *a, **kw):
+            raise ConnectionError("connection pool exhausted")
+
+    with pytest.raises(GrantError, match="could not record consumption"):
+        await _verify(
+            raw=_grant(id="g-broken", scopes=[SCOPE_BACKUP_READ]),
+            store=RedisGrantStore(_Broken()),
+        )
