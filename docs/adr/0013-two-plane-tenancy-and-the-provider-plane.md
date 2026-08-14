@@ -426,16 +426,52 @@ scopes and never appear in `ROLE_SCOPES`.
   BFF's audit record. The gain is real and bounded; stating it precisely is what keeps the
   §5a standard honest.
 
-#### 11b. Still open — the claim's shape depends on the IdP
+#### 11b. The provider IdP mints the claim (resolved 2026-08-14)
 
-Whether the **provider IdP can mint this claim itself** as part of a step-up flow (one token,
-one issuer, matching the existing verification model) or whether the **BFF must become a
-secondary claims issuer** with its own signing key and JWKS endpoint. The first is clearly
-preferable. The second adds materially to a concentration this design is already watching —
-the BFF is audit writer and provider-credential holder, and token issuer would be a third
-role in one component ([ADR-0012](0012-federation-credential-model.md) argues the general
-case). **Resolve against the IdP actually being integrated before committing to the claim
-shape**; the decision above holds either way.
+**The provider IdP mints the grant claim itself, as part of a step-up flow.** One token, one
+issuer, matching the verification model already built for §6. The alternative — the BFF as a
+secondary claims issuer with its own signing key and JWKS endpoint — is rejected: it would
+make the BFF audit writer, provider-credential holder *and* token issuer at once, and
+[ADR-0012](0012-federation-credential-model.md) argues the general case against concentrating
+those. The capability is standard across the IdP category in use, so keeping this open bought
+nothing.
+
+The claim-shaping logic is a **narrow, stateless component the platform team owns** — an
+Action, a custom-claims provider, an authentication-tree node, depending on the product. It
+runs inside the IdP's issuance path, so it is **not a signing authority** and inherits none
+of Option B's key-management, rotation or JWKS-publication costs.
+
+**Requirement note, written product-agnostically:**
+
+1. Recognise a specific authentication context (`acr_values`) corresponding to the step-up
+   event for elevated grants.
+2. On issuance following that context being satisfied, inject a custom claim carrying the
+   **grant id**, the **target tenant**, and an **expiry**.
+3. Keep the component stateless — everything it needs arrives with the request.
+
+##### Three constraints, or Option A quietly becomes Option 1
+
+The reason Option B-as-a-second-issuer was rejected in §11 was that a security bound living
+outside this codebase's enforcement is not a bound. That argument does not stop applying just
+because the IdP mints the claim; it relocates. All three of these are gateway-side.
+
+- **The grant lifetime is enforced by the gateway against its own clock, never read from the
+  claim.** The BFF requests the grant, so if the hook echoes a requested `exp`, a compromised
+  BFF mints itself a thirty-day `provider:credentials` grant and §8's *single-use* and
+  *15 minutes* become suggestions. The claim's expiry may be **shorter** than the §8 ceiling
+  for its grant type, never longer. This is testable here, which is the whole reason §11
+  preferred a checked claim over a configured issuer.
+- **Verify the authentication context in the issued token, not the fact that it was
+  requested.** `acr_values` is a *request* parameter and an IdP may decline it and issue
+  anyway. The gateway checks the resulting `acr`, and checks `auth_time` freshness so a
+  session that stepped up hours ago does not satisfy a step-up now. Requesting is not
+  achieving — the same shape as trusting a default because it is present.
+- **Revocation is bounded by the window, not solved.** Terminating a provider admin's session
+  does not invalidate a grant claim already inside an issued token. For
+  `provider:credentials` the single-use consumption record (§11a) closes it after one use;
+  for `provider:invoke` there is no revocation path inside its 15 minutes. Accepted as a
+  residual, consistent with the existing "token replay within its TTL" position in
+  `docs/threat-model-identity.md`, and named here so it is a decision rather than a gap.
 
 ## Implementation notes — gateway-side multi-issuer (2026-08-14)
 
