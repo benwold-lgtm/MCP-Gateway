@@ -85,6 +85,12 @@ class Principal:
     subject: str
     scopes: frozenset[str]
     auth_method: str
+    #: The elevated grant that raised this principal's ceiling for this request, if any
+    #: (ADR-0013 §11). Carried on the principal rather than inferred from the scope set,
+    #: because "held `tools:call` because their role grants it" and "held it for ninety
+    #: seconds under grant g-7f2" are the same scopes and very different audit records.
+    #: Never set for a tenant-plane principal — the tenant plane has no ceiling to raise.
+    grant_id: Optional[str] = None
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -243,6 +249,13 @@ class CompositeAuthenticator:
     @property
     def static(self) -> Authenticator:
         return self._static
+
+    @property
+    def oidc(self) -> "MultiIssuerValidator":
+        """The federated half — exposed so the lifespan can hand it the elevated-grant
+        consumption store once Redis is up (ADR-0013 §11a). It cannot be constructed with
+        one: the authenticator is built at import time, well before Redis exists."""
+        return self._oidc
 
     async def authenticate_async(self, credentials: Optional[HTTPAuthorizationCredentials]) -> Principal:
         token = credentials.credentials if credentials else None

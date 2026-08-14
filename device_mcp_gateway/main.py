@@ -367,6 +367,16 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             # Shared, async rate limiter across gateway replicas.
             app.state.rate_limiter = RedisRateLimiter(redis_client)
             logger.info("Rate limiter using shared Redis storage")
+            # Elevated-grant consumption (ADR-0013 §11a). The authenticator is built at
+            # import time, before Redis exists, so the store is attached here rather than
+            # constructed with it — and until it is, every elevated grant is refused. That
+            # is also the permanent state in embedded mode, which has no shared store to
+            # consume against and so cannot make a single-use grant single-use.
+            if hasattr(_authenticator, "oidc") and _authenticator.oidc is not None:
+                from device_mcp_gateway.grants import RedisGrantStore
+
+                _authenticator.oidc.attach_grant_store(RedisGrantStore(redis_client))
+                logger.info("Elevated-grant consumption store attached (ADR-0013 §11a)")
         else:
             await app.state.store.initialize()
             registry = app.state.registry

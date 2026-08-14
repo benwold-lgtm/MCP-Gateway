@@ -36,6 +36,14 @@ from typing import Any, Optional
 import jwt
 from loguru import logger
 
+from device_mcp_gateway import metrics
+from device_mcp_gateway.grants import (
+    GRANT_CLAIM_DEFAULT,
+    ElevatedGrant,
+    GrantConsumptionStore,
+    GrantError,
+    verify_grant,
+)
 from device_mcp_gateway.rbac import (
     SCOPE_DEVICES_READ,
     SCOPE_DEVICES_WRITE,
@@ -74,8 +82,9 @@ PLANE_PROVIDER = "provider"
 #
 # The two elevated grants (`provider:invoke`, `provider:credentials`) are BFF scopes
 # exercised as named, time-boxed, individually audited acts — they are not reached by
-# widening this ceiling. See the ADR-0013 note in docs/ on what still has to be decided
-# about how an elevated grant presents itself to a tenant gateway.
+# widening this ceiling. They reach a tenant gateway as a verifiable claim on the token
+# which raises this ceiling for one request; see `device_mcp_gateway/grants.py` and
+# ADR-0013 §11.
 PLANE_SCOPE_CEILING: dict[str, Optional[frozenset[str]]] = {
     PLANE_TENANT: None,
     PLANE_PROVIDER: frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_METRICS_READ}),
@@ -109,6 +118,16 @@ class OIDCConfig:
     # Which population this issuer speaks for, and therefore its scope ceiling (§6a).
     # Defaults to tenant so an existing single-issuer deployment is unchanged.
     plane: str = PLANE_TENANT
+    # This gateway's own tenant identity — one gateway, one tenant (ADR-0004). Knowing its
+    # own name is not knowing that other tenants exist; it is what lets it check that a
+    # grant claim names *it* rather than the estate (§11a). Required for a provider-plane
+    # issuer, meaningless for a tenant-plane one, which honours no grants.
+    tenant_id: Optional[str] = None
+    # The authentication context that counts as a step-up for this issuer, and the name of
+    # the custom claim carrying a grant. With no step_up_acr configured, elevated grants are
+    # refused: an unverifiable step-up is not a satisfied one (§11b).
+    step_up_acr: tuple[str, ...] = ()
+    grant_claim: str = GRANT_CLAIM_DEFAULT
     jwks_uri: Optional[str] = None
     groups_claim: str = "groups"
     subject_claim: str = "sub"
@@ -133,6 +152,17 @@ class OIDCConfig:
             )
         if self.plane not in PLANE_SCOPE_CEILING:
             raise ValueError(f"gateway.oidc plane must be one of {sorted(PLANE_SCOPE_CEILING)}; got {self.plane!r}")
+        if self.plane == PLANE_PROVIDER and not self.tenant_id:
+            # Fail fast rather than on the first elevation. A provider-plane issuer whose
+            # gateway has no tenant identity can never honour a grant, and finding that out
+            # during an incident — the only time an elevation is wanted — is the worst
+            # possible moment. Tenant-plane issuers are unaffected, so no existing
+            # single-issuer deployment is forced through a config change.
+            raise ValueError(
+                f"gateway.oidc issuer {self.issuer!r} is on the provider plane, so gateway.tenant_id must "
+                f"be set: an elevated grant names exactly one tenant and this gateway has to know whether "
+                f"that is itself (ADR-0013 §11a)."
+            )
         # Validate every configured group→role now so a typo fails fast at startup, not
         # on the first login. Roles must be known scope bundles.
         ceiling = PLANE_SCOPE_CEILING[self.plane]
@@ -275,6 +305,10 @@ class OIDCValidator:
     def __init__(self, cfg: OIDCConfig, jwks: Optional[JWKSCache] = None) -> None:
         self._cfg = cfg
         self._jwks = jwks or JWKSCache(cfg)
+        # Attached after startup, once Redis exists (the validator is built before it).
+        # Until then it is None, and every elevated grant is refused — which is also the
+        # permanent state in embedded mode, where there is no shared store at all.
+        self._grant_store: Optional[GrantConsumptionStore] = None
 
     @property
     def jwks(self) -> JWKSCache:
@@ -283,6 +317,9 @@ class OIDCValidator:
     @property
     def config(self) -> OIDCConfig:
         return self._cfg
+
+    def attach_grant_store(self, store: Optional[GrantConsumptionStore]) -> None:
+        self._grant_store = store
 
     async def validate(self, token: str) -> Principal:
         """Return the Principal for a valid JWT, or raise ``OIDCError``."""
@@ -318,7 +355,78 @@ class OIDCValidator:
         except jwt.PyJWTError as exc:
             raise OIDCError(f"JWT validation failed: {exc}")
 
-        return self._principal_from_claims(claims)
+        principal = self._principal_from_claims(claims)
+        return await self._apply_grant(claims, principal)
+
+    async def _apply_grant(self, claims: dict[str, Any], principal: Principal) -> Principal:
+        """Raise this principal's ceiling if the token carries a valid grant (ADR-0013 §11).
+
+        Two orderings here are load-bearing and both are easy to get backwards.
+
+        **The plane is consulted before the union.** A grant lifts a *ceiling*, so on an
+        issuer that has none there is nothing to lift and the claim is ignored outright. Do
+        the union first and a tenant `viewer` whose own IdP can be made to emit the claim
+        gains `tools:call` on their own stack — §6a's escalation one layer up, sourced from
+        the tenant's own IdP.
+
+        **The union happens after the ceiling has been applied**, not instead of it. The
+        grant adds exactly what it names on top of the capped base; it is not an alternative
+        route to authority, so a subject whose groups map to nothing still ends up with
+        nothing.
+        """
+        raw = claims.get(self._cfg.grant_claim)
+        if raw is None:
+            return principal
+
+        ceiling = PLANE_SCOPE_CEILING[self._cfg.plane]
+        if ceiling is None:
+            # Anomalous rather than dangerous — but worth a line, because a tenant IdP
+            # emitting this claim means either a misconfigured hook or someone probing.
+            logger.warning(
+                f"token from {self._cfg.issuer!r} carries a {self._cfg.grant_claim!r} claim, but that "
+                f"issuer is on the {self._cfg.plane!r} plane and has no scope ceiling to raise. "
+                f"Ignoring the claim; it grants nothing (ADR-0013 §11)."
+            )
+            return principal
+
+        if not principal.scopes:
+            # An authenticated subject whose groups map to no role. The grant lifts a
+            # ceiling; it does not replace the group mapping, which stays load-bearing for
+            # exactly the population §6a exists to constrain.
+            logger.warning(
+                f"subject {principal.subject!r} presented an elevated grant but no group maps to a "
+                f"role; the grant raises a ceiling and is not an alternative route to authority."
+            )
+            return principal
+
+        try:
+            grant: ElevatedGrant = await verify_grant(
+                raw,
+                tenant_id=self._cfg.tenant_id,
+                step_up_acr=self._cfg.step_up_acr,
+                acr=claims.get("acr"),
+                auth_time=claims.get("auth_time"),
+                store=self._grant_store,
+                leeway=self._cfg.leeway,
+            )
+        except GrantError as exc:
+            metrics.elevated_grants_total.labels(outcome="refused").inc()
+            logger.warning(f"elevated grant refused for subject from {self._cfg.issuer!r}: {exc}")
+            # Refuse the whole token rather than serving the unelevated principal — see
+            # GrantError's docstring for why the quiet fall-back is the worse failure.
+            raise OIDCError(f"elevated grant refused: {exc}")
+
+        metrics.elevated_grants_total.labels(outcome="accepted").inc()
+        logger.info(
+            f"elevated grant {grant.id!r} accepted for {principal.subject!r} on tenant {grant.tenant!r}: "
+            f"+{sorted(grant.scopes)} until {grant.expires_at:.0f} (single_use={grant.single_use})"
+        )
+        return Principal(
+            subject=principal.subject,
+            scopes=principal.scopes | grant.scopes,
+            auth_method=principal.auth_method,
+            grant_id=grant.id,
+        )
 
     def _principal_from_claims(self, claims: dict[str, Any]) -> Principal:
         subject = claims.get(self._cfg.subject_claim) or claims.get("sub")
@@ -414,6 +522,16 @@ class MultiIssuerValidator:
         """Install a key set for one issuer (startup warm-up / tests)."""
         self._validators[issuer].jwks.seed(jwks)
 
+    def attach_grant_store(self, store: Optional[GrantConsumptionStore]) -> None:
+        """Give every issuer the elevated-grant consumption store (ADR-0013 §11a).
+
+        Called from the lifespan once Redis exists, because the authenticator is built at
+        import time and Redis is not up then. Before this runs — and forever in embedded
+        mode, which never calls it — elevated grants are refused.
+        """
+        for validator in self._validators.values():
+            validator.attach_grant_store(store)
+
     async def validate(self, token: str) -> Principal:
         try:
             unverified = jwt.decode(token, options={"verify_signature": False})
@@ -433,11 +551,19 @@ class MultiIssuerValidator:
 def _issuer_config(entry: dict, cfg: dict, *, default_plane: str = PLANE_TENANT) -> OIDCConfig:
     from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
 
+    # The gateway's own tenant identity is a property of the deployment, not of an issuer —
+    # one gateway serves one tenant (ADR-0004) — so it is read from `gateway.tenant_id` and
+    # handed to every issuer entry rather than repeated per entry.
+    tenant_id = (cfg.get("gateway", {}) or {}).get("tenant_id") or None
+
     return OIDCConfig(
         issuer=entry.get("issuer", ""),
         audience=entry.get("audience", ""),
         group_roles=dict(entry.get("group_roles", {}) or {}),
         plane=entry.get("plane", default_plane),
+        tenant_id=tenant_id,
+        step_up_acr=tuple(entry.get("step_up_acr") or ()),
+        grant_claim=entry.get("grant_claim", GRANT_CLAIM_DEFAULT),
         jwks_uri=entry.get("jwks_uri"),
         groups_claim=entry.get("groups_claim", "groups"),
         subject_claim=entry.get("subject_claim", "sub"),
