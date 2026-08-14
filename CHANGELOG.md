@@ -38,7 +38,56 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
     much a credential dump as a portable one). Exceeding it fails at startup, and the
     ceiling is applied again at validation because config can be reloaded.
 
+- **Elevated grants: a provider issuer's scope ceiling can be raised for one request
+  ([ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) §8/§11).** The
+  ceiling above is what makes provider access everyday debugging rather than standing
+  authority over a customer's hardware and credentials — which means it also blocks the two
+  operations that occasionally need to happen for real. Those now arrive as a **verifiable
+  claim on the token**, minted by the provider IdP after a step-up and checked here:
+
+  ```json
+  {"id": "g-7f2", "tenant": "acme", "scopes": ["tools:call"], "exp": 1755200000}
+  ```
+
+  New config: `gateway.tenant_id` (deployment-level — one gateway, one tenant), plus
+  per-issuer `step_up_acr` and `grant_claim`. A provider-plane issuer with no
+  `gateway.tenant_id` is **refused at startup**; nothing else changes for existing
+  deployments.
+
+  §11 chose a checked claim over a second issuer entry configured with a higher ceiling in an
+  IdP console, because a bound living in an admin console is untestable in this codebase. The
+  properties that argument buys, and that each fail *silently* when they regress — the token
+  still validates and the request still succeeds:
+
+  - **The window is the gateway's, anchored on `auth_time`.** A claim `exp` may only shorten
+    it, never lengthen it. The BFF *requests* the grant, so a hook that echoed a requested
+    expiry would let a compromised BFF mint itself a thirty-day credentials grant.
+  - **`acr` is verified in the issued token.** `acr_values` is a *request* parameter and an
+    IdP may decline the step-up and issue anyway — requesting is not achieving.
+  - **`backup:*` grants are single use**, consumed atomically (`SET NX EX`) in this tenant's
+    own Redis, and consumption **fails closed**: a store that cannot record the spend refuses
+    the grant rather than degrading it to replayable. `tools:call` grants are replayable
+    inside a 900s absolute window, because §8's grant gates initiation and one debugging
+    session is several calls. A grant naming both takes the stricter of the two.
+  - **Embedded mode refuses every elevated grant**, having no shared store to consume against.
+  - **A grant on a tenant-plane issuer is ignored**, and the plane is consulted *before* the
+    scope union — otherwise a tenant `viewer` whose own IdP can be made to emit the claim
+    gains `tools:call` on their own stack.
+  - **A grant cannot rescue an unmapped group**, and **an invalid grant refuses the whole
+    token** rather than quietly serving the unelevated principal, which would surface as a
+    confusing 403 on some later route.
+
+  The gateway still never learns the provider scope vocabulary: the policy table is keyed on
+  *gateway* scopes, and `provider:invoke`/`provider:credentials` remain BFF concepts.
+
 ### Changed
+
+- **Audit records for a request made under an elevated grant carry `grant=<id>`.** Emitted
+  only when a grant was used, so every other record keeps the exact field set earlier releases
+  wrote and existing hash chains verify across the upgrade. Attached at the `audit_request`
+  chokepoint *and* at each transport's tool-dispatch record, since the `tools:call` class does
+  not pass through the former — and being replayable within its window, it is the class whose
+  records most need the id as a join key.
 
 - **The OIDC audit subject is now `oidc:{issuer}#{sub}`** (was `oidc:{sub}`). `sub` is
   unique *within* an issuer, not globally — `admin` at the tenant IdP and `admin` at the

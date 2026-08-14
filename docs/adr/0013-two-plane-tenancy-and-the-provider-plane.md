@@ -502,3 +502,95 @@ not globally: `admin` at the tenant IdP and `admin` at the provider IdP are two 
 humans, and collapsing them puts both on one line of the tenant's hash-chained audit with
 no symptom, because both requests succeed. **This changes the audit subject format for
 existing single-issuer deployments** — see the changelog.
+
+## Implementation notes — gateway-side elevated grants (2026-08-14)
+
+§11 is built in the gateway: `device_mcp_gateway/grants.py` holds the claim, the policy
+table and `verify_grant`; `OIDCValidator._apply_grant` is where a verified grant raises the
+issuer's ceiling for one request. The claim as implemented:
+
+```json
+"mcp_grant": {
+  "id": "g-7f2",              // required; what consumption and audit key on
+  "tenant": "acme",           // required; a STRING, must equal gateway.tenant_id
+  "scopes": ["tools:call"],   // required; closed range, gateway scopes only
+  "exp": 1755200000           // optional; may only SHORTEN the window
+}
+```
+
+The claim **name** is per-issuer config (`grant_claim`, default `mcp_grant`), because an
+IdP's custom-claims hook is often constrained to a namespaced name like
+`https://mcp.example/grant`.
+
+**How §8's two grant classes reach a gateway that must not learn the provider vocabulary.**
+The policy table is keyed on *gateway* scopes: `tools:call` is the `provider:invoke` class
+(900s absolute window, replayable **within** the window, since §8's grant gates initiation
+rather than completion and one debugging session is several calls); `backup:read`,
+`backup:write` and `backup:export-portable` are the `provider:credentials` class (single
+use). §11's line therefore holds — the string `provider:invoke` appears nowhere in the
+gateway.
+
+**The grantable set is `ALL_SCOPES − <provider ceiling>`, asserted by a test** rather than
+left as a comment: the two are defined in different modules, and a new scope added without
+deciding which side of §5a it falls on would otherwise pass unnoticed.
+
+**Single-use grants still get a window (300s)**, though §8 gives that class none — otherwise
+a grant minted last year is spendable today. It is deliberately no *looser* than the invoke
+window, and a test pins that relationship rather than the durations, which are configuration.
+
+**A mixed grant takes the strictest policy** — single-use if any scope is, and the shortest
+window. The alternative is that adding `tools:call` to a credentials grant *relaxes* it.
+
+**The deadline is anchored on `auth_time`**, not `iat` and not "now". The window runs from
+the step-up, which is what makes it absolute (§8) — and it makes one mechanism serve both
+§11b constraint 1 (lifetime from our clock) and the `auth_time` freshness half of constraint
+2: a 15-minute window *is* a 15-minute step-up freshness requirement.
+
+**`leeway` is clock-skew tolerance, not slack.** `auth_time` and any claim `exp` are stamped
+by the IdP's clock, so the same tolerance already applied to the token's own `exp` applies
+here. It is bounded and configurable; `leeway: 0` gives none.
+
+**An invalid grant refuses the whole token**, rather than quietly serving the unelevated
+principal. A caller presenting a grant is asking to act elevated; the fall-back surfaces as
+a 403 on some later route, which reads as a permissions bug — and an expired credentials
+grant would be indistinguishable from a typo in a role mapping.
+
+**A grant on a ceiling-less (tenant-plane) issuer is ignored, not honoured, and the plane is
+consulted *before* the union.** Do the union first and a tenant `viewer` whose own IdP can
+be made to emit the claim gains `tools:call` on their own stack — §6a's escalation one layer
+up.
+
+**A grant cannot rescue an unmapped group.** It lifts a ceiling; it is not an alternative
+route to authority. A subject whose groups map to nothing stays at zero scopes.
+
+**Consumption is last**, after every other check, so a grant refused for clock skew or a
+wrong `acr` does not burn its id and strand a legitimate single-use grant. Consumption is
+`SET key NX EX ttl` in the receiving tenant's own Redis (§11a) — atomic claim-or-fail in one
+command, so two concurrent replays cannot both win — and any error propagates as a refusal.
+
+**Embedded mode refuses every elevated grant**, not only the single-use ones (§11a). This
+falls out of the wiring rather than being a separate check: the store is attached only in
+the distributed branch of the lifespan.
+
+**Audit.** A request acting under a grant carries `grant=<id>` on its audit records. The
+field is emitted **only when present**, so records for unelevated requests keep the exact
+field set earlier releases wrote and existing hash chains verify across the upgrade. It is
+attached at `audit_request` (which every `backup:*` route goes through) *and* at each
+transport's tool-dispatch record, because the invoke class does not pass through
+`audit_request` — and it is the class §8 makes replayable inside its window, so one grant id
+legitimately spans several records and is the join key for reconstructing the session.
+
+**New config.** `gateway.tenant_id` is deployment-level: one gateway serves one tenant
+(§1, [ADR-0004](0004-single-tenant-per-stack.md)), so it is read once and handed to every
+issuer entry rather than repeated per entry. `step_up_acr` and `grant_claim` are per-issuer.
+A provider-plane issuer with no `gateway.tenant_id` is **refused at startup** — a gateway
+that does not know its own name can never honour a grant, and discovering that during an
+incident is the worst possible moment. Tenant-plane issuers are unaffected, so no existing
+single-issuer deployment is forced through a config change.
+
+**Testing.** `tests/test_elevated_grants.py` was written before the implementation and is
+the deliverable as much as the code: §11 preferred a checked claim over a configured issuer
+*because* a bound in an admin console is untestable here, and that argument only pays if the
+checks exist. The claims are synthetic and signed by the test rig, which is the right way to
+test §11b constraint 2 — a real IdP that always complies with `acr_values` cannot exercise
+the declined-step-up path. Wiring a real provider IdP is live-cluster verification, later.

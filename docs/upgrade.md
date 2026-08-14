@@ -113,12 +113,41 @@ intentional, and the reason to validate config first:
 | **F-24** Redis auth | the Redis URL must carry a password | `redis.allow_insecure: true` |
 | **ADR-0013 §6** OIDC issuers | `gateway.oidc` may set `issuer` **or** `issuers`, never both | — (pick one form) |
 | **ADR-0013 §5a/§5b** provider plane | a `plane: provider` issuer cannot map a group to a role granting `tools:call` or any `backup:*` scope | — (the cap is the control) |
+| **ADR-0013 §11** tenant identity | a `plane: provider` issuer requires `gateway.tenant_id` | — (a gateway that cannot name itself cannot check a grant names *it*) |
 
 If an upgrade surfaces one of these for the first time, set the **real** control (an API
 key, an authenticated Redis URL) — not the escape hatch. The hatches exist for local
 development; using them to clear an upgrade blocker re-opens a release-blocking
 vulnerability. The [runbook](runbook.md#the-gateway-or-worker-wont-start-r2) covers the
 exact refusal messages.
+
+### The new `gateway.tenant_id` gate
+
+Only bites a deployment that configures a **provider-plane** issuer — which, before this
+release, could not honour an elevated grant at all, so nothing is being taken away. Set it to
+the tenant this stack serves:
+
+```yaml
+gateway:
+  tenant_id: acme
+```
+
+It is deployment-level rather than per-issuer because one gateway serves one tenant
+([ADR-0004](adr/0004-single-tenant-per-stack.md)). The gate is at **startup**, not at the
+first elevation, deliberately: an elevated grant is wanted during an incident, and that is
+the worst possible moment to discover the gateway cannot honour one. Tenant-plane and
+single-issuer deployments are unaffected and need no config change.
+
+### Audit records gain a `grant` field — but only when one was used
+
+Requests made under an elevated grant now carry `grant=<id>` on their audit records. Every
+other record is **byte-identical** to what earlier releases wrote: the field is emitted only
+when present, so existing hash chains verify across the upgrade and no parser sees a new key
+unless a grant was actually exercised.
+
+A `tools:call` grant is replayable inside its window, so one grant id legitimately appears on
+several dispatch records — that is the join key for reconstructing what an elevated session
+did, not a duplicate.
 
 ### The OIDC audit subject format changed
 
