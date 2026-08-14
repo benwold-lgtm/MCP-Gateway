@@ -130,6 +130,48 @@ one. A provider group mapped to a role that exceeds the cap is refused at startu
 **tenant** plane has no cap: a tenant's own administrator legitimately holds everything on
 their own stack.
 
+#### Lifting the cap for one request — elevated grants (ADR-0013 §11)
+
+The cap is what makes provider access everyday debugging rather than standing authority, so
+it also blocks the two operations that sometimes genuinely need to happen: invoking a tool,
+and touching backups. Those arrive as an **elevated grant** — a claim on the token, minted by
+the provider IdP after a step-up, raising that issuer's cap for **that request only**:
+
+```yaml
+gateway:
+  tenant_id: acme                        # which tenant this stack is; required for a
+  oidc:                                  # provider-plane issuer, refused at startup without
+    issuers:
+      - issuer: https://provider-idp.example.com
+        plane: provider
+        step_up_acr: ["urn:mcp:provider:step-up"]
+        grant_claim: mcp_grant           # default; namespaced names are common
+        group_roles:
+          provider-support: operator
+```
+
+```json
+{"id": "g-7f2", "tenant": "acme", "scopes": ["tools:call"], "exp": 1755200000}
+```
+
+What is worth knowing operationally:
+
+- **`tools:call` grants last 900s and are replayable inside that window** (a debugging session
+  is several calls); **`backup:*` grants are single-use**, consumed in this gateway's Redis.
+  A grant naming both is single-use and takes the shorter window.
+- **The window is the gateway's, measured from the token's `auth_time`.** A claim `exp` may
+  only shorten it. A grant does not become long-lived because an IdP hook says so.
+- **`acr` is checked in the issued token**, not assumed from what was requested — an IdP may
+  decline a step-up and issue anyway.
+- **Embedded mode refuses every grant**: single-use needs the shared store that only the
+  distributed mode has.
+- **An invalid grant refuses the whole token** — a 401 naming the grant, not a quiet
+  downgrade to the unelevated principal that would surface later as a confusing 403.
+- **A grant on a tenant-plane issuer is ignored** (no cap to lift), and it cannot rescue a
+  subject whose groups map to no role — it lifts a ceiling, it is not a route to authority.
+- **Audit:** every record produced under a grant carries `grant=<id>`. Unelevated records are
+  unchanged and carry no such field.
+
 ### Local static keys — bootstrap, CI/test, break-glass
 Independent of any IdP and always available (ADR-0007): `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY`,
 or an explicit `gateway.rbac: [{name, key, role}]` list. These keep working when the IdP is

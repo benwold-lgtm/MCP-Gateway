@@ -1,6 +1,12 @@
 # Device MCP Gateway Configuration
 
 gateway:
+  # Which tenant this stack serves. One gateway, one tenant (ADR-0004), so it is set once
+  # here rather than per issuer. Only used by ADR-0013's elevated grants: a grant claim
+  # names exactly one tenant and is refused unless it names this one. REQUIRED at startup
+  # if any issuer below is on the `provider` plane — a gateway that does not know its own
+  # name can never honour a grant, and finding that out mid-incident is the worst moment.
+  # tenant_id: "acme"
   # Require Authorization: Bearer <token> on all API routes (leave empty to disable).
   # Override with MCP_GATEWAY_API_KEY environment variable. This single key maps to
   # the "admin" role (full access) — today's behaviour, unchanged.
@@ -80,6 +86,29 @@ gateway:
   #     plane: provider
   #     group_roles:
   #       provider-support: operator
+  #     # ELEVATED GRANTS (ADR-0013 §11). The provider ceiling above is what makes provider
+  #     # access everyday debugging rather than standing authority — so it also blocks the
+  #     # two elevated grants, and a verifiable claim on the token is what lifts it, for
+  #     # one request. Omit both keys and this issuer honours no grants at all.
+  #     #
+  #     # step_up_acr: the authentication contexts that count as a step-up. Checked against
+  #     # the `acr` in the ISSUED token, not against what the BFF requested — `acr_values`
+  #     # is a request parameter and an IdP may decline it and issue anyway.
+  #     step_up_acr: ["urn:mcp:provider:step-up"]
+  #     # grant_claim: which claim carries the grant (default: mcp_grant). Configurable
+  #     # because an IdP's custom-claims hook is often constrained to a namespaced name.
+  #     grant_claim: "https://mcp.example/grant"
+  #
+  # The claim the IdP injects on issuance after the step-up:
+  #   {"id": "g-7f2", "tenant": "acme", "scopes": ["tools:call"], "exp": 1755200000}
+  # `tenant` must equal gateway.tenant_id below and is a string, never a list — single-use
+  # is consumed in this gateway's own Redis, so an estate-wide grant would be spendable
+  # once per stack. `exp` is optional and may only SHORTEN the gateway's own window; the
+  # deadline is computed here from `auth_time`, never read from the claim. `scopes` may
+  # only name tools:call or backup:* — anything else is refused, not trimmed.
+  #
+  # Elevated grants need the distributed mode's shared Redis to record single-use
+  # consumption, so embedded mode refuses every grant (ADR-0013 §11a).
   # Fernet key for encrypting device credentials in SQLite.
   # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   # Override with MCP_SECRET_KEY environment variable.

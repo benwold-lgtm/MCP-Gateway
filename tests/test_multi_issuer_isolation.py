@@ -79,6 +79,11 @@ def _cfg(issuer: str, *, plane: str, group_roles: dict[str, str], **over) -> OID
         plane=plane,
         jwks_uri=f"{issuer}/jwks",
         allow_private_targets=True,  # no DNS resolution → fully offline
+        # A provider-plane issuer requires the gateway's own tenant identity (ADR-0013
+        # §11a) — it is what an elevated grant's target is checked against. Nothing in this
+        # file exercises grants; the tenant id is here only to satisfy that startup guard.
+        # The grant machinery itself is pinned by tests/test_elevated_grants.py.
+        tenant_id="acme",
     )
     params.update(over)
     return OIDCConfig(**params)
@@ -341,6 +346,7 @@ def test_multi_issuer_config_builds_both_planes():
     v = build_oidc_validator(
         {
             "gateway": {
+                "tenant_id": "acme",  # required by the provider entry (ADR-0013 §11a)
                 "oidc": {
                     "enabled": True,
                     "issuers": [
@@ -359,7 +365,7 @@ def test_multi_issuer_config_builds_both_planes():
                             "jwks_uri": f"{PROVIDER_ISS}/jwks",
                         },
                     ],
-                }
+                },
             },
             "security": {"allow_private_targets": True},
         }

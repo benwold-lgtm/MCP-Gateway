@@ -163,6 +163,17 @@ class KeyBuilder:
         """Fixed-window counter. ``key`` is the caller-derived bucket ("scope:client")."""
         return self._k(f"rl:{key}")
 
+    # --- elevated grants (ADR-0013 §11a) -------------------------------------
+
+    def grant_consumed(self, grant_id: str) -> str:
+        """Marker that a single-use elevated grant has been spent.
+
+        Keyed on the grant id and nothing coarser. Keyed on the subject or the tenant
+        instead, a support engineer's *second* grant of the day would be refused as a
+        replay — which reads as a bug and gets "fixed" by weakening the check.
+        """
+        return self._k(f"grant:used:{grant_id}")
+
 
 def device_resource_uri(hostname: str, path: str = "") -> str:
     """An MCP resource URI for a device path.
