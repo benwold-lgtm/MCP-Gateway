@@ -357,3 +357,57 @@ builds on **F-58** and is a contractual question rather than an architectural on
 - *"Does `provider:admin` ever see decrypted device credentials?"* — **No.** See §5b, and
   note that for the provider a *ciphertext* archive is a credential dump too, because they
   hold the key.
+
+## Implementation notes — gateway-side multi-issuer (2026-08-14)
+
+§6/§6a are built in the gateway: `gateway.oidc.issuers` takes a list, each entry carrying
+its own `audience`, `group_roles`, JWKS cache and `plane`. The legacy single-issuer form
+still works untouched and lands on the tenant plane, because a security change that forces
+every existing operator through a config migration gets deferred, and then nobody gets the
+isolation.
+
+**The trap this cost the most thought to avoid.** The obvious way to accept two issuers is
+`jwt.decode(..., issuer=[a, b])` over a merged key set. That accepts a token signed by
+issuer **A**'s key while claiming `iss: B` — PyJWT is behaving correctly, since `iss` is in
+the accepted list and the key it was handed verified the signature. The *composition* is
+what is wrong, and it is a complete impersonation primitive: a tenant IdP operator mints
+themselves provider identity on their own gateway. So the issuer is resolved first, from
+the unverified claims, and used only to select a validator; every subsequent check comes
+from that one issuer's config. Reading `iss` before verification is safe precisely because
+it selects a verifier and never grants anything.
+
+`plane` binds issuer identity → eligible scope set as §6a requires. The provider ceiling is
+`devices:read` + `devices:write` + `metrics:read` — §5a's carve-out, with `tools:call` and
+every `backup:*` scope excluded. A provider-plane group mapped to a role that exceeds it is
+refused **at startup**, and the ceiling is applied **again at validation**, because config
+can be reloaded and `ROLE_SCOPES` can gain a scope after the startup guard has run.
+
+The OIDC principal subject is now `oidc:{issuer}#{sub}`. `sub` is unique within an issuer,
+not globally: `admin` at the tenant IdP and `admin` at the provider IdP are two different
+humans, and collapsing them puts both on one line of the tenant's hash-chained audit with
+no symptom, because both requests succeed. **This changes the audit subject format for
+existing single-issuer deployments** — see the changelog.
+
+### Open question — how an elevated grant reaches a tenant gateway
+
+§5 makes `provider:invoke` and `provider:credentials` **elevated**, time-boxed, individually
+audited grants, and §5a/§5b require that they are not reachable from the everyday
+`provider:admin`. The gateway now enforces that by capping the provider issuer below
+`tools:call` and `backup:*`.
+
+What is **not** yet decided is how an exercised elevated grant then presents itself to a
+tenant gateway, because the ceiling that makes the carve-out real also blocks the grant:
+
+- **A second provider issuer entry** for elevated sessions, with a higher ceiling. Simple,
+  but "elevated" becomes a property of which IdP client minted the token, and the time-box
+  lives entirely in the provider IdP.
+- **A claim on the token** (e.g. a grant id + expiry) that the gateway checks, raising the
+  ceiling for that request only. Keeps the time-box verifiable at the point of use, but
+  teaches the gateway a provider concept, which §5 deliberately avoids.
+- **A tenant-issued grant**, where the tenant's own IdP or an operator action mints the
+  elevation. Strongest consent story, worst ergonomics for a support engineer mid-incident.
+
+Deliberately left open rather than settled by implementation default: picking one silently
+here would decide the consent model for the most consequential action on the platform as a
+side effect of a scope constant. Nothing in the current gateway work depends on the answer —
+the ceiling is correct for the everyday grant either way.

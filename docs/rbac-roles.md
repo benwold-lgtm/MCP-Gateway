@@ -87,6 +87,49 @@ map to **no** role authenticates with an **empty scope set** — every route the
 audit shows *who* was denied. `jwks_uri` is auto-discovered from the issuer unless set
 explicitly; the full knob list is in [config.yaml](../config.yaml).
 
+The audit subject is `oidc:{issuer}#{sub}`. The issuer is part of the identity because `sub`
+is unique *within* an issuer, not globally — which matters as soon as there is more than one.
+
+#### More than one issuer (ADR-0013 §6)
+
+A tenant gateway can additionally trust the **provider IdP**, so a support engineer acts as
+themselves in the tenant's audit chain rather than behind a shared admin key. Use `issuers`
+instead of the single-issuer keys — setting both is refused at startup:
+
+```yaml
+gateway:
+  oidc:
+    enabled: true
+    issuers:
+      - issuer: https://login.example.com/realms/corp
+        audience: device-mcp-gateway
+        plane: tenant
+        group_roles:
+          mcp-admins: admin
+      - issuer: https://provider-idp.example.com
+        audience: device-mcp-gateway
+        plane: provider
+        group_roles:
+          provider-support: operator
+```
+
+Three rules, each of which exists because its absence fails **silently** — the token still
+validates and the request still succeeds:
+
+| Rule | Without it |
+|---|---|
+| The issuer is resolved from `iss` **first**, and the decode is pinned to that one issuer with only that issuer's keys | A token signed by issuer A's key while claiming `iss: B` is accepted — a tenant IdP operator mints themselves provider identity on their own gateway |
+| `group_roles` is **per issuer**, with no shared or fallback mapping | A tenant's own IdP admin creates a group named whatever the provider mapping keys on, adds themselves, and their gateway grants them provider-level scopes |
+| `plane` caps the scopes reachable from an issuer, **server-side** | The console's login-time plane-fixing is a session-flow guarantee; a minted provider token replayed straight at this API bypasses it entirely |
+
+The **provider** plane is capped at `devices:read`, `devices:write`, `metrics:read`. It can
+never reach `tools:call` — invoking a tool actuates the customer's real hardware, and routine
+debugging should not carry that ambiently — nor any `backup:*` scope, because the provider
+holds `MCP_SECRET_KEY` and so a ciphertext archive is as much a credential dump as a portable
+one. A provider group mapped to a role that exceeds the cap is refused at startup. The
+**tenant** plane has no cap: a tenant's own administrator legitimately holds everything on
+their own stack.
+
 ### Local static keys — bootstrap, CI/test, break-glass
 Independent of any IdP and always available (ADR-0007): `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY`,
 or an explicit `gateway.rbac: [{name, key, role}]` list. These keep working when the IdP is

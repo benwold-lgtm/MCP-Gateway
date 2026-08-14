@@ -36,12 +36,50 @@ from typing import Any, Optional
 import jwt
 from loguru import logger
 
-from device_mcp_gateway.rbac import Principal, scopes_for_role
+from device_mcp_gateway.rbac import (
+    SCOPE_DEVICES_READ,
+    SCOPE_DEVICES_WRITE,
+    SCOPE_METRICS_READ,
+    Principal,
+    scopes_for_role,
+)
 from device_mcp_gateway.security.url_policy import (
     UrlPolicyError,
     build_guarded_client,
     validate_target_url,
 )
+
+# --- Planes (ADR-0013 §6a) ---------------------------------------------------
+#
+# An issuer is not just a key source; it identifies which *population* a token comes from,
+# and that has to bind the eligible scope set **server-side**. The BFF fixes the plane at
+# login (§3), but that is a session-flow guarantee: once a provider-plane token is minted it
+# can be replayed straight at a tenant gateway with the BFF nowhere in the path.
+
+PLANE_TENANT = "tenant"
+PLANE_PROVIDER = "provider"
+
+# The maximum scope set reachable from an issuer on each plane. ``None`` means no ceiling.
+#
+# Tenant: none. A tenant's own administrator legitimately holds everything on their own
+# stack — the ceiling exists to constrain the provider issuer, not to re-litigate tenant RBAC.
+#
+# Provider: the §5a everyday-debugging carve-out. Deliberately excludes:
+#   * ``tools:call`` — tool invocation is the most consequential thing the gateway does, and
+#     a support engineer debugging a device's configuration should not carry standing
+#     authority to actuate the customer's physical hardware (§5a).
+#   * every ``backup:*`` scope — the provider holds ``MCP_SECRET_KEY``, so for them a
+#     ciphertext archive and a portable one are equally a credential dump, and ADR-0011's
+#     ciphertext/portable safety argument carries none of its force here (§5b).
+#
+# The two elevated grants (`provider:invoke`, `provider:credentials`) are BFF scopes
+# exercised as named, time-boxed, individually audited acts — they are not reached by
+# widening this ceiling. See the ADR-0013 note in docs/ on what still has to be decided
+# about how an elevated grant presents itself to a tenant gateway.
+PLANE_SCOPE_CEILING: dict[str, Optional[frozenset[str]]] = {
+    PLANE_TENANT: None,
+    PLANE_PROVIDER: frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_METRICS_READ}),
+}
 
 # Bound the installed JWKS key set (TM-I-09). A spoofed/oversized JWKS response must
 # not be able to install an unbounded number of keys (memory / lookup cost). Real IdPs
@@ -68,6 +106,9 @@ class OIDCConfig:
     issuer: str
     audience: str
     group_roles: dict[str, str]
+    # Which population this issuer speaks for, and therefore its scope ceiling (§6a).
+    # Defaults to tenant so an existing single-issuer deployment is unchanged.
+    plane: str = PLANE_TENANT
     jwks_uri: Optional[str] = None
     groups_claim: str = "groups"
     subject_claim: str = "sub"
@@ -90,10 +131,28 @@ class OIDCConfig:
                 f"gateway.oidc.algorithms must be a non-empty subset of asymmetric algorithms "
                 f"{sorted(ASYMMETRIC_ALGORITHMS)}; rejected {bad or 'empty'} (HS*/none are not allowed)"
             )
+        if self.plane not in PLANE_SCOPE_CEILING:
+            raise ValueError(f"gateway.oidc plane must be one of {sorted(PLANE_SCOPE_CEILING)}; got {self.plane!r}")
         # Validate every configured group→role now so a typo fails fast at startup, not
         # on the first login. Roles must be known scope bundles.
+        ceiling = PLANE_SCOPE_CEILING[self.plane]
         for grp, role in self.group_roles.items():
-            scopes_for_role(role)  # raises ValueError on unknown role
+            granted = scopes_for_role(role)  # raises ValueError on unknown role
+            if ceiling is None:
+                continue
+            # Refuse the mapping outright rather than silently trimming it. A config that
+            # says "provider-admins are gateway admins" is a misunderstanding of §5a, and
+            # quietly granting a narrower set would leave the operator believing something
+            # false about their own deployment.
+            excess = granted - ceiling
+            if excess:
+                raise ValueError(
+                    f"gateway.oidc issuer {self.issuer!r} is on the {self.plane!r} plane, so group "
+                    f"{grp!r} cannot map to role {role!r}: that role grants {sorted(excess)}, which is "
+                    f"outside the {self.plane} ceiling {sorted(ceiling)} (ADR-0013 §5a/§5b). Tool "
+                    f"invocation and credential-bearing reads are elevated, individually audited "
+                    f"grants — they are not reached by widening a role mapping."
+                )
         # The issuer (and an explicit JWKS URI) are operator config but still fetched
         # server-side — run them through the same egress policy as device targets (TM-I-10).
         self._check_url(self.issuer, "gateway.oidc.issuer")
@@ -221,6 +280,10 @@ class OIDCValidator:
     def jwks(self) -> JWKSCache:
         return self._jwks
 
+    @property
+    def config(self) -> OIDCConfig:
+        return self._cfg
+
     async def validate(self, token: str) -> Principal:
         """Return the Principal for a valid JWT, or raise ``OIDCError``."""
         try:
@@ -283,41 +346,145 @@ class OIDCValidator:
             # (better than a blanket 401 that hides the identity).
             logger.info(f"OIDC subject {subject!r} authenticated but no group maps to a role (groups={groups})")
 
-        return Principal(subject=f"oidc:{subject}", scopes=frozenset(scopes), auth_method=AUTH_METHOD_OIDC)
+        # Apply the plane ceiling again at validation time (§6a). Not redundant with the
+        # startup check: config can be reloaded and ROLE_SCOPES can gain a scope, and a
+        # startup-only check is a claim about one moment rather than about every request.
+        ceiling = PLANE_SCOPE_CEILING[self._cfg.plane]
+        if ceiling is not None:
+            dropped = scopes - ceiling
+            if dropped:
+                logger.warning(
+                    f"OIDC issuer {self._cfg.issuer!r} ({self._cfg.plane} plane) yielded scopes outside its "
+                    f"ceiling and they were dropped: {sorted(dropped)}. This should have been refused at "
+                    f"startup — treat it as a configuration or role-table drift."
+                )
+            scopes &= ceiling
+
+        # The subject is qualified by its issuer. `sub` is unique *within* an issuer, not
+        # globally: `admin` at the tenant IdP and `admin` at the provider IdP are two
+        # different humans, and collapsing them puts both on one line of the tenant's
+        # hash-chained audit — a failure with no symptom, because both requests succeed.
+        return Principal(
+            subject=f"oidc:{self._cfg.issuer}#{subject}",
+            scopes=frozenset(scopes),
+            auth_method=AUTH_METHOD_OIDC,
+        )
 
 
-def build_oidc_validator(cfg: dict) -> Optional[OIDCValidator]:
-    """Construct an ``OIDCValidator`` from config, or ``None`` if OIDC is not enabled.
+class MultiIssuerValidator:
+    """Routes a token to **one** issuer's validator, then verifies against only that one.
+
+    This class exists because of a single trap. The obvious way to accept two issuers is
+    to pass a list to ``jwt.decode(issuer=[...])`` over a merged key set — and that accepts
+    a token signed by issuer A's key while claiming ``iss: B``. PyJWT is behaving correctly:
+    it checks that ``iss`` is in the accepted list, and the key it was handed verified the
+    signature. The composition is what is wrong, and the result is a complete impersonation
+    primitive: a tenant IdP operator mints themselves provider identity on their own gateway.
+
+    So the issuer is resolved **first**, from the unverified claims, and used only to pick a
+    validator. Every subsequent check — signature key, audience, ``issuer=`` pin, group
+    mapping, scope ceiling — comes from that one issuer's config. Reading ``iss`` before
+    verification is safe precisely because it is used to *select* a verifier and never to
+    grant anything; an attacker choosing their own issuer only chooses whose keys must
+    validate their signature.
+
+    ``tests/test_multi_issuer_isolation.py`` pins all of this, including the converse
+    direction, because an implementation can easily get one direction right.
+    """
+
+    def __init__(self, configs: list[OIDCConfig]) -> None:
+        if not configs:
+            raise ValueError("MultiIssuerValidator needs at least one issuer")
+        self._validators: dict[str, OIDCValidator] = {}
+        for cfg in configs:
+            if cfg.issuer in self._validators:
+                # One of the two entries would silently never apply, and which one wins
+                # would be an ordering accident.
+                raise ValueError(f"duplicate gateway.oidc issuer {cfg.issuer!r}")
+            self._validators[cfg.issuer] = OIDCValidator(cfg)
+
+    @property
+    def issuers(self) -> list[str]:
+        return list(self._validators)
+
+    def for_issuer(self, issuer: str) -> OIDCValidator:
+        return self._validators[issuer]
+
+    def seed(self, issuer: str, jwks: dict[str, Any]) -> None:
+        """Install a key set for one issuer (startup warm-up / tests)."""
+        self._validators[issuer].jwks.seed(jwks)
+
+    async def validate(self, token: str) -> Principal:
+        try:
+            unverified = jwt.decode(token, options={"verify_signature": False})
+        except jwt.PyJWTError as exc:
+            raise OIDCError(f"malformed JWT: {exc}")
+        issuer = unverified.get("iss")
+        if not issuer or not isinstance(issuer, str):
+            # Nothing to route on, and there is no safe default — falling back to "the
+            # first configured issuer" would be the same bug as a shared key set.
+            raise OIDCError("JWT has no usable iss claim; cannot select an issuer")
+        validator = self._validators.get(issuer)
+        if validator is None:
+            raise OIDCError(f"issuer {issuer!r} is not configured")
+        return await validator.validate(token)
+
+
+def _issuer_config(entry: dict, cfg: dict, *, default_plane: str = PLANE_TENANT) -> OIDCConfig:
+    from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
+
+    return OIDCConfig(
+        issuer=entry.get("issuer", ""),
+        audience=entry.get("audience", ""),
+        group_roles=dict(entry.get("group_roles", {}) or {}),
+        plane=entry.get("plane", default_plane),
+        jwks_uri=entry.get("jwks_uri"),
+        groups_claim=entry.get("groups_claim", "groups"),
+        subject_claim=entry.get("subject_claim", "sub"),
+        algorithms=tuple(entry.get("algorithms") or ("RS256",)),
+        leeway=int(entry.get("leeway", 60)),
+        jwks_cache_ttl=int(entry.get("jwks_cache_ttl", 600)),
+        jwks_min_refresh_interval=int(entry.get("jwks_min_refresh_interval", 30)),
+        http_timeout=float(entry.get("http_timeout", 5.0)),
+        allow_private_targets=resolve_allow_private(cfg),
+        allowed_target_ports=resolve_allowed_ports(cfg),
+    )
+
+
+def build_oidc_validator(cfg: dict) -> Optional[MultiIssuerValidator]:
+    """Construct the inbound OIDC validator, or ``None`` if OIDC is not enabled.
 
     Reads ``gateway.oidc`` (inbound auth lives under ``gateway.*``, alongside
     ``api_key`` / ``rbac``). Resolution failures raise ``ValueError`` so a misconfigured
     IdP fails fast at startup rather than on the first login.
-    """
-    from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
 
+    Two accepted shapes. The **legacy single-issuer** form (``issuer``/``audience``/
+    ``group_roles`` at the top level) keeps working untouched and lands on the tenant
+    plane — a security change that forced every existing operator through a config
+    migration would get deferred, and then nobody would get the isolation. The
+    **multi-issuer** form takes a list under ``issuers``, each entry declaring its own
+    ``plane`` and its own ``group_roles`` (ADR-0013 §6a: no shared or fallback mapping).
+    """
     oidc_cfg = (cfg.get("gateway", {}) or {}).get("oidc", {}) or {}
     if not oidc_cfg.get("enabled", False):
         return None
 
-    algorithms = tuple(oidc_cfg.get("algorithms") or ("RS256",))
-    config = OIDCConfig(
-        issuer=oidc_cfg.get("issuer", ""),
-        audience=oidc_cfg.get("audience", ""),
-        group_roles=dict(oidc_cfg.get("group_roles", {}) or {}),
-        jwks_uri=oidc_cfg.get("jwks_uri"),
-        groups_claim=oidc_cfg.get("groups_claim", "groups"),
-        subject_claim=oidc_cfg.get("subject_claim", "sub"),
-        algorithms=algorithms,
-        leeway=int(oidc_cfg.get("leeway", 60)),
-        jwks_cache_ttl=int(oidc_cfg.get("jwks_cache_ttl", 600)),
-        jwks_min_refresh_interval=int(oidc_cfg.get("jwks_min_refresh_interval", 30)),
-        http_timeout=float(oidc_cfg.get("http_timeout", 5.0)),
-        allow_private_targets=resolve_allow_private(cfg),
-        allowed_target_ports=resolve_allowed_ports(cfg),
-    )
-    logger.info(
-        f"OIDC inbound auth enabled: issuer={config.issuer} audience={config.audience} "
-        f"algs={list(config.algorithms)} groups_claim={config.groups_claim} "
-        f"roles={sorted(set(config.group_roles.values()))}"
-    )
-    return OIDCValidator(config)
+    entries = oidc_cfg.get("issuers")
+    if entries:
+        if oidc_cfg.get("issuer"):
+            raise ValueError(
+                "gateway.oidc sets both 'issuer' and 'issuers'; use one form or the other so "
+                "there is no question which mapping applies"
+            )
+        configs = [_issuer_config(e, cfg) for e in entries]
+    else:
+        configs = [_issuer_config(oidc_cfg, cfg)]
+
+    validator = MultiIssuerValidator(configs)
+    for c in configs:
+        logger.info(
+            f"OIDC inbound auth enabled: issuer={c.issuer} plane={c.plane} audience={c.audience} "
+            f"algs={list(c.algorithms)} groups_claim={c.groups_claim} "
+            f"roles={sorted(set(c.group_roles.values()))}"
+        )
+    return validator

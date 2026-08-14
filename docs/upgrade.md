@@ -111,12 +111,31 @@ intentional, and the reason to validate config first:
 |------|-------------|-------------------------|
 | **F-23** API key | distributed mode needs at least one API key | `gateway.allow_anonymous: true` |
 | **F-24** Redis auth | the Redis URL must carry a password | `redis.allow_insecure: true` |
+| **ADR-0013 §6** OIDC issuers | `gateway.oidc` may set `issuer` **or** `issuers`, never both | — (pick one form) |
+| **ADR-0013 §5a/§5b** provider plane | a `plane: provider` issuer cannot map a group to a role granting `tools:call` or any `backup:*` scope | — (the cap is the control) |
 
 If an upgrade surfaces one of these for the first time, set the **real** control (an API
 key, an authenticated Redis URL) — not the escape hatch. The hatches exist for local
 development; using them to clear an upgrade blocker re-opens a release-blocking
 vulnerability. The [runbook](runbook.md#the-gateway-or-worker-wont-start-r2) covers the
 exact refusal messages.
+
+### The OIDC audit subject format changed
+
+Not a startup gate — nothing refuses to boot — but it changes recorded data, so it is worth
+knowing before you upgrade. The OIDC principal subject is now `oidc:{issuer}#{sub}`, where
+it was `oidc:{sub}`.
+
+`sub` is unique *within* an issuer, not globally. Once a gateway trusts a second issuer,
+`admin` at the tenant IdP and `admin` at the provider IdP are two different humans, and the
+old format silently puts them on the same line of the hash-chained audit. Qualifying the
+subject is the fix, and it applies uniformly rather than only when a second issuer is
+configured — a format that changes shape depending on how many issuers exist is exactly what
+breaks a log parser the day someone adds one.
+
+**What to check:** anything that parses or matches on the audit `subject` — SIEM rules,
+saved queries, dashboards — needs to accept both forms. Records written before the upgrade
+keep the short form; the chain itself is unaffected, since it commits to whole records.
 
 ---
 
