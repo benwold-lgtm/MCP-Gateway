@@ -269,8 +269,11 @@ the tenant API, and only through a named, audited act.
 
 ## Resolved questions
 
-The three questions this ADR was Proposed pending are settled below (2026-08-11), which is
-what moves it to Accepted.
+The three questions this ADR was Proposed pending are settled in §8–§10 (2026-08-11), which
+is what moved it to Accepted. **§11 is a fourth, and it did not exist at acceptance** — it
+was surfaced by building §6a, when the provider scope ceiling turned out to block the very
+grants §5 defines. It is recorded here rather than in the implementation notes because it is
+a decision about the consent model, not a detail of how the multi-issuer code is written.
 
 ### 8. Grant lifetimes are absolute, and the elevated grants step up
 
@@ -357,3 +360,145 @@ builds on **F-58** and is a contractual question rather than an architectural on
 - *"Does `provider:admin` ever see decrypted device credentials?"* — **No.** See §5b, and
   note that for the provider a *ciphertext* archive is a credential dump too, because they
   hold the key.
+
+### 11. An elevated grant reaches a tenant gateway as a verifiable claim on the token
+
+§5 makes `provider:invoke` and `provider:credentials` **elevated**, time-boxed, individually
+audited grants, and §5a/§5b require that they are not reachable from the everyday
+`provider:admin`. The gateway enforces that by capping the provider issuer below `tools:call`
+and `backup:*` — which means the ceiling that makes the carve-out real also blocks the grant,
+and something has to lift it.
+
+**Decision: the BFF obtains a grant claim (grant id + expiry + named tenant) and the gateway
+verifies it, raising that issuer's ceiling for that request only.** Three alternatives were
+considered.
+
+**Rejected — a second provider issuer entry with a higher ceiling.** It moves the guarantee
+out of this codebase's enforcement and into whatever a provider operator configured in an IdP
+admin console. That is the opposite of the pattern held everywhere else here: the egress
+policy is a guard function, not a policy note; the `MCP_SECRET_KEY` check is a fail-closed
+startup assertion, not documentation; §8 describes grant lifetimes as machinery rather than a
+policy file. It would turn the two highest-consequence grants in the system into exactly a
+policy file, untestable by this project's own suite.
+
+The decisive objection is narrower and harder: **it cannot express single-use at all.** A
+`provider:credentials` grant is single-use by §8, and an issued bearer token is replayable
+until expiry no matter which client minted it. Closing that needs a consumption record keyed
+on something — so the "simpler" option requires the same machinery as the option it was meant
+to avoid, precisely on the grant where the stakes are highest.
+
+**Rejected as a competing option, retained as an overlay — a tenant-issued grant.** The
+consent property is real and some contracts will require it. But requiring it universally
+blocks an incident-response engineer on a customer being awake and reachable, which
+correlates badly with the moments elevation is needed. More usefully, it is **not a different
+mechanism**: it still mints a grant id with an expiry for the gateway to check, and differs
+only in *who authorises the minting*. So the mechanism below is built once, and a future
+per-tenant contractual flag can insert a tenant-approval step before the BFF requests the
+claim — without changing a line of what the gateway validates. That is the same move §10
+already made for retention and legal hold: a contractual question kept out of the
+architecture.
+
+**On the objection that this "teaches the gateway a provider concept" — that door is already
+open, and was opened deliberately.** §6 has the tenant gateway trust a provider-specific
+issuer; §6a has it maintain a per-issuer mapping *precisely* to stop tenant/provider
+escalation; the implementation carries a `PLANE_PROVIDER` constant and a provider-specific
+scope ceiling in code today. Refusing this increment to preserve a purity the gateway no
+longer has would protect nothing. The line worth keeping is the *narrower* one §5 actually
+draws: **the gateway never learns the provider scope vocabulary.** It learns that a verifiable
+grant may raise an issuer's ceiling; `provider:invoke` and `provider:credentials` remain BFF
+scopes and never appear in `ROLE_SCOPES`.
+
+#### 11a. Three constraints that follow, named now rather than found in implementation
+
+- **The grant claim must name exactly one tenant.** Single-use has to be consumed somewhere,
+  and there is deliberately no shared state across tenant stacks (§1, [ADR-0004](0004-single-tenant-per-stack.md)).
+  Consumption therefore lives in the receiving tenant's own Redis, which is only sound if the
+  grant is bound to that tenant — an estate-wide grant would be independently spendable once
+  per gateway. §8's *one tenant at a time* makes this natural rather than a new restriction.
+- **Consumption fails closed.** If the consumption record cannot be written, the elevation is
+  refused. The alternative is that a single-use credentials grant silently degrades to
+  replayable-until-expiry exactly when the store is unhealthy, which inverts
+  [ADR-0006](0006-fail-closed-distributed-defaults.md). For the same reason an elevated grant
+  is refused outright in embedded mode, which has no shared store to consume against.
+- **Do not overclaim what this moves in-house.** It makes *expiry* and *single-use*
+  enforceable by the gateway. It does **not** make the justification enforceable — that a
+  human gave a reason, and stepped up, remains an assertion by the provider IdP plus the
+  BFF's audit record. The gain is real and bounded; stating it precisely is what keeps the
+  §5a standard honest.
+
+#### 11b. The provider IdP mints the claim (resolved 2026-08-14)
+
+**The provider IdP mints the grant claim itself, as part of a step-up flow.** One token, one
+issuer, matching the verification model already built for §6. The alternative — the BFF as a
+secondary claims issuer with its own signing key and JWKS endpoint — is rejected: it would
+make the BFF audit writer, provider-credential holder *and* token issuer at once, and
+[ADR-0012](0012-federation-credential-model.md) argues the general case against concentrating
+those. The capability is standard across the IdP category in use, so keeping this open bought
+nothing.
+
+The claim-shaping logic is a **narrow, stateless component the platform team owns** — an
+Action, a custom-claims provider, an authentication-tree node, depending on the product. It
+runs inside the IdP's issuance path, so it is **not a signing authority** and inherits none
+of Option B's key-management, rotation or JWKS-publication costs.
+
+**Requirement note, written product-agnostically:**
+
+1. Recognise a specific authentication context (`acr_values`) corresponding to the step-up
+   event for elevated grants.
+2. On issuance following that context being satisfied, inject a custom claim carrying the
+   **grant id**, the **target tenant**, and an **expiry**.
+3. Keep the component stateless — everything it needs arrives with the request.
+
+##### Three constraints, or Option A quietly becomes Option 1
+
+The reason Option B-as-a-second-issuer was rejected in §11 was that a security bound living
+outside this codebase's enforcement is not a bound. That argument does not stop applying just
+because the IdP mints the claim; it relocates. All three of these are gateway-side.
+
+- **The grant lifetime is enforced by the gateway against its own clock, never read from the
+  claim.** The BFF requests the grant, so if the hook echoes a requested `exp`, a compromised
+  BFF mints itself a thirty-day `provider:credentials` grant and §8's *single-use* and
+  *15 minutes* become suggestions. The claim's expiry may be **shorter** than the §8 ceiling
+  for its grant type, never longer. This is testable here, which is the whole reason §11
+  preferred a checked claim over a configured issuer.
+- **Verify the authentication context in the issued token, not the fact that it was
+  requested.** `acr_values` is a *request* parameter and an IdP may decline it and issue
+  anyway. The gateway checks the resulting `acr`, and checks `auth_time` freshness so a
+  session that stepped up hours ago does not satisfy a step-up now. Requesting is not
+  achieving — the same shape as trusting a default because it is present.
+- **Revocation is bounded by the window, not solved.** Terminating a provider admin's session
+  does not invalidate a grant claim already inside an issued token. For
+  `provider:credentials` the single-use consumption record (§11a) closes it after one use;
+  for `provider:invoke` there is no revocation path inside its 15 minutes. Accepted as a
+  residual, consistent with the existing "token replay within its TTL" position in
+  `docs/threat-model-identity.md`, and named here so it is a decision rather than a gap.
+
+## Implementation notes — gateway-side multi-issuer (2026-08-14)
+
+§6/§6a are built in the gateway: `gateway.oidc.issuers` takes a list, each entry carrying
+its own `audience`, `group_roles`, JWKS cache and `plane`. The legacy single-issuer form
+still works untouched and lands on the tenant plane, because a security change that forces
+every existing operator through a config migration gets deferred, and then nobody gets the
+isolation.
+
+**The trap this cost the most thought to avoid.** The obvious way to accept two issuers is
+`jwt.decode(..., issuer=[a, b])` over a merged key set. That accepts a token signed by
+issuer **A**'s key while claiming `iss: B` — PyJWT is behaving correctly, since `iss` is in
+the accepted list and the key it was handed verified the signature. The *composition* is
+what is wrong, and it is a complete impersonation primitive: a tenant IdP operator mints
+themselves provider identity on their own gateway. So the issuer is resolved first, from
+the unverified claims, and used only to select a validator; every subsequent check comes
+from that one issuer's config. Reading `iss` before verification is safe precisely because
+it selects a verifier and never grants anything.
+
+`plane` binds issuer identity → eligible scope set as §6a requires. The provider ceiling is
+`devices:read` + `devices:write` + `metrics:read` — §5a's carve-out, with `tools:call` and
+every `backup:*` scope excluded. A provider-plane group mapped to a role that exceeds it is
+refused **at startup**, and the ceiling is applied **again at validation**, because config
+can be reloaded and `ROLE_SCOPES` can gain a scope after the startup guard has run.
+
+The OIDC principal subject is now `oidc:{issuer}#{sub}`. `sub` is unique within an issuer,
+not globally: `admin` at the tenant IdP and `admin` at the provider IdP are two different
+humans, and collapsing them puts both on one line of the tenant's hash-chained audit with
+no symptom, because both requests succeed. **This changes the audit subject format for
+existing single-issuer deployments** — see the changelog.

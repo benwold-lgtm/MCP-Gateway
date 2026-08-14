@@ -10,6 +10,43 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **A tenant gateway can trust a second issuer — the provider IdP
+  ([ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) §6/§6a).**
+  `gateway.oidc.issuers` takes a list; each entry carries its own `audience`,
+  `group_roles`, JWKS cache and `plane`. The existing single-issuer config keeps working
+  untouched and lands on the tenant plane.
+
+  Three things are deliberate, because the obvious implementation of each is wrong in a way
+  that leaves no symptom:
+
+  - **The issuer is resolved first and the decode is pinned to it.** Accepting a *list* of
+    issuers over a merged key set — the natural reading of the PyJWT API — accepts a token
+    signed by issuer A's key while claiming `iss: B`. That is a complete impersonation
+    primitive: a tenant IdP operator mints themselves provider identity on their own
+    gateway. Each issuer also gets its own JWKS cache, because `kid` is issuer-chosen and
+    `key-1` is a plausible value at both.
+  - **`group_roles` is per issuer with no shared or fallback mapping.** Kept flat it is a
+    privilege-escalation primitive: a tenant's own IdP administrator creates a group named
+    whatever the provider mapping keys on, adds themselves, and is handed provider-level
+    scopes by their own gateway. An unmapped `(issuer, group)` pair now grants nothing.
+  - **`plane` binds issuer identity to an eligible scope set, server-side.** The provider
+    plane is capped at `devices:read` + `devices:write` + `metrics:read` — never
+    `tools:call` (invoking a tool actuates the customer's real hardware) and never any
+    `backup:*` scope (the provider holds `MCP_SECRET_KEY`, so a ciphertext archive is as
+    much a credential dump as a portable one). Exceeding it fails at startup, and the
+    ceiling is applied again at validation because config can be reloaded.
+
+### Changed
+
+- **The OIDC audit subject is now `oidc:{issuer}#{sub}`** (was `oidc:{sub}`). `sub` is
+  unique *within* an issuer, not globally — `admin` at the tenant IdP and `admin` at the
+  provider IdP are two different humans, and collapsing them puts both on one line of the
+  hash-chained audit with no symptom, because both requests succeed. **This affects
+  existing single-issuer deployments**: audit records written before the upgrade carry the
+  short form, and anything parsing the subject needs to accept both.
+
 ## [0.3.3] - 2026-08-13
 
 Two security capabilities that constrain what the gateway talks to and what it lets near it:

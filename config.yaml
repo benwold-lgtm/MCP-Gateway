@@ -44,6 +44,42 @@ gateway:
   #     mcp-operators: operator
   #     mcp-viewers: viewer
   #     mcp-auditors: auditor
+  #
+  # Trusting a SECOND issuer — the provider IdP (ADR-0013 §6). Use the `issuers` list
+  # instead of the single-issuer keys above; setting both is refused at startup so there
+  # is never a question which mapping applies. Everything else is per-entry.
+  #
+  # `plane` is the load-bearing field. It binds issuer identity → eligible scope set
+  # SERVER-SIDE, which the console cannot do for you: the BFF fixes a session's plane at
+  # login, but a minted provider token can be replayed straight at this API with the BFF
+  # nowhere in the path.
+  #
+  #   tenant   — no ceiling. A tenant's own administrator holds everything on their stack.
+  #   provider — capped at devices:read, devices:write, metrics:read. Deliberately NOT
+  #              tools:call (invoking a tool actuates the customer's real hardware, and a
+  #              support engineer debugging config should not carry that ambiently), and
+  #              NOT any backup:* scope (the provider holds MCP_SECRET_KEY, so for them a
+  #              ciphertext archive is as much a credential dump as a portable one).
+  #              Mapping a provider group to a role that exceeds this fails at startup.
+  #
+  # group_roles is PER ISSUER with no shared or fallback mapping: an unmapped
+  # (issuer, group) pair grants nothing. Kept flat across two issuers it would be a
+  # privilege-escalation primitive — a tenant's own IdP admin creates a group named
+  # whatever the provider mapping keys on, adds themselves, and their own gateway hands
+  # them provider-level scopes.
+  #
+  # issuers:
+  #   - issuer: "https://login.example.com/realms/corp"
+  #     audience: "device-mcp-gateway"
+  #     plane: tenant
+  #     group_roles:
+  #       mcp-admins: admin
+  #       mcp-viewers: viewer
+  #   - issuer: "https://provider-idp.example.com"
+  #     audience: "device-mcp-gateway"
+  #     plane: provider
+  #     group_roles:
+  #       provider-support: operator
   # Fernet key for encrypting device credentials in SQLite.
   # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   # Override with MCP_SECRET_KEY environment variable.

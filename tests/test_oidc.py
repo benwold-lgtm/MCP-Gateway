@@ -114,7 +114,9 @@ async def test_valid_token_maps_groups_to_scopes():
     priv = _keypair()
     v = _validator(priv)
     p = await v.validate(_token(priv, groups=["mcp-admins"]))
-    assert p.subject == "oidc:alice"
+    # The subject is qualified by its issuer: `sub` is unique within an issuer, not
+    # globally. See tests/test_multi_issuer_isolation.py for why that matters.
+    assert p.subject == f"oidc:{ISSUER}#alice"
     assert p.auth_method == "oidc"
     assert p.scopes == ALL_SCOPES
 
@@ -141,7 +143,7 @@ async def test_unmapped_groups_yield_authenticated_but_no_scopes():
     priv = _keypair()
     v = _validator(priv)
     p = await v.validate(_token(priv, groups=["some-other-group"]))
-    assert p.subject == "oidc:alice"
+    assert p.subject == f"oidc:{ISSUER}#alice"
     assert p.scopes == frozenset()  # authenticated, unauthorized → routes 403
 
 
@@ -283,7 +285,7 @@ async def test_composite_routes_jwt_to_oidc():
     priv = _keypair()
     comp = _composite(priv, static_keys={"break-glass": Principal("key:admin", ALL_SCOPES, "api_key")})
     p = await comp.authenticate_async(_bearer(_token(priv)))
-    assert p.auth_method == "oidc" and p.subject == "oidc:alice"
+    assert p.auth_method == "oidc" and p.subject == f"oidc:{ISSUER}#alice"
 
 
 @pytest.mark.asyncio

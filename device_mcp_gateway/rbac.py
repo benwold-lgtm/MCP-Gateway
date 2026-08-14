@@ -28,7 +28,7 @@ from device_mcp_gateway import metrics
 from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, audit_event
 
 if TYPE_CHECKING:
-    from device_mcp_gateway.oidc import OIDCValidator
+    from device_mcp_gateway.oidc import MultiIssuerValidator
 
 # --- Scopes ------------------------------------------------------------------
 
@@ -208,7 +208,7 @@ class CompositeAuthenticator:
     working — it just is not silent any more.
     """
 
-    def __init__(self, *, static: Authenticator, oidc: "OIDCValidator") -> None:
+    def __init__(self, *, static: Authenticator, oidc: "MultiIssuerValidator") -> None:
         self._static = static
         self._oidc = oidc
         self._oidc_warn_last = 0.0
