@@ -66,6 +66,7 @@ from device_mcp_gateway.grants import (
     GrantError,
     MemoryGrantStore,
     RedisGrantStore,
+    ENTITLEMENT_CLAIM_DEFAULT,
     verify_grant,
 )
 from device_mcp_gateway.oidc import (
@@ -134,6 +135,10 @@ def _verify(**over):
         acr=STEP_UP_ACR,
         auth_time=int(now) - 30,
         store=MemoryGrantStore(),
+        # §11c: the IdP's own statement of which tenants this operator may act on. The
+        # default entitles them to this gateway's tenant, so the checks below still fail
+        # for the one reason each is testing.
+        entitlement=[TENANT_ID, "some-other-tenant"],
         now=now,
     )
     args.update(over)
@@ -321,6 +326,156 @@ async def test_grants_are_refused_when_the_gateway_knows_no_tenant_identity():
         await _verify(tenant_id=None)
 
 
+# --- §11c: the request selects a tenant, only the IdP authorizes one -----------
+#
+# The hazard measurement turned up, which no amount of reasoning about our own code would
+# have: a requested `scope` is granted to whoever asks for it. An operator with no
+# entitlement to a tenant requested that tenant's scope from a real IdP and received the
+# claim. So the grant claim's `tenant` is chosen by the request — in practice by the BFF,
+# which is inside the threat model — and asserts nothing on its own. The entitlement claim
+# is the half the IdP derives from the directory, and the intersection is the real bound.
+
+
+async def test_a_grant_for_a_tenant_the_operator_is_not_entitled_to_is_refused():
+    """The whole point of §11c, and the case the old code accepted.
+
+    Everything here is well-formed: a real step-up, a fresh auth_time, a grant naming
+    *this* gateway's tenant. The only thing wrong is that this operator was never
+    entitled to act on it — which is precisely what a requested scope cannot establish.
+    """
+    with pytest.raises(GrantError, match="not among the operator's entitled"):
+        await _verify(entitlement=["globex", "initech"])
+
+
+async def test_a_missing_entitlement_claim_is_refused():
+    """An absent entitlement is not an unlimited one. If it were, an IdP that simply does
+    not emit the claim would hand back exactly the pre-§11c behaviour, silently."""
+    with pytest.raises(GrantError, match="no usable"):
+        await _verify(entitlement=None)
+
+
+@pytest.mark.parametrize("junk", [{}, 42, True, ["", None], [], ""])
+async def test_a_malformed_or_empty_entitlement_claim_is_refused(junk):
+    """Fail closed in every direction, including the shapes an IdP might plausibly emit
+    for "none": an empty list, an empty string, a list of blanks."""
+    with pytest.raises(GrantError):
+        await _verify(entitlement=junk)
+
+
+@pytest.mark.parametrize("empty", [[], "", ["", None]])
+async def test_an_empty_entitlement_says_so_rather_than_blaming_the_tenant(empty):
+    """ "Entitled to nothing" and "not entitled to *this*" are different operator
+    problems - the first is usually a missing IdP mapping. The distinction is only a
+    message, so it needs an assertion or it silently collapses into the other branch."""
+    with pytest.raises(GrantError, match="entitled\\s+to none"):
+        await _verify(entitlement=empty)
+
+
+async def test_a_single_string_entitlement_is_honoured():
+    """An IdP with one entitled tenant may emit a bare string rather than a list; that is
+    a formatting difference, not a policy one."""
+    grant = await _verify(entitlement=TENANT_ID)
+    assert grant.tenant == TENANT_ID
+
+
+async def test_junk_entries_cannot_manufacture_an_entitlement():
+    """Filtering non-strings may only shrink the allowed set. A list of junk plus the
+    right tenant still works; a list of junk alone must not."""
+    assert (await _verify(entitlement=[None, 7, TENANT_ID])).tenant == TENANT_ID
+    with pytest.raises(GrantError):
+        await _verify(entitlement=[None, 7, {"tenant": TENANT_ID}])
+
+
+async def test_an_unconfigured_entitlement_claim_refuses_rather_than_skips():
+    """The check must not be optional. An issuer configured to honour grants with no
+    entitlement claim named has nothing authorizing the tenant it was handed — the same
+    hole §11c exists to close, arriving through a blank config value instead."""
+    with pytest.raises(GrantError, match="entitlement_claim"):
+        await _verify(entitlement_claim="")
+
+
+async def test_entitlement_is_checked_before_a_single_use_grant_is_consumed(store):
+    """Ordering, and it is load-bearing. If an unentitled operator's attempt burned the
+    grant id, anyone could disarm a legitimate single-use credentials grant by presenting
+    it once from an account entitled to nothing."""
+    claim = _grant(id="grant-single", scopes=[SCOPE_BACKUP_READ])
+    with pytest.raises(GrantError, match="not among the operator's entitled"):
+        await _verify(raw=claim, store=store, entitlement=["globex"])
+    # The id must still be spendable by the operator who is actually entitled to it.
+    grant = await _verify(raw=claim, store=store, entitlement=[TENANT_ID])
+    assert grant.single_use is True and grant.id == "grant-single"
+
+
+async def test_entitlement_naming_other_tenants_does_not_widen_the_grant(rig):
+    """Being entitled to three tenants does not make a grant estate-wide: the grant still
+    names exactly one, and it still has to be this gateway's."""
+    v, tenant_key, provider_key = rig
+    tok = _token(
+        provider_key,
+        iss=PROVIDER_ISS,
+        groups=["provider-admins"],
+        **{
+            "mcp_grant": _grant(tenant="globex"),
+            ENTITLEMENT_CLAIM_DEFAULT: ["globex", TENANT_ID, "initech"],
+        },
+    )
+    with pytest.raises(OIDCError, match="this gateway is tenant"):
+        await v.validate(tok)
+
+
+async def test_the_entitlement_claim_name_is_configurable(rig):
+    """Deployments will not agree on the claim name; the check must follow the config."""
+    v, tenant_key, provider_key = rig
+    cfg = v.for_issuer(PROVIDER_ISS).config
+    object.__setattr__(cfg, "entitlement_claim", "corp_tenants")
+    tok = _token(
+        provider_key,
+        iss=PROVIDER_ISS,
+        groups=["provider-admins"],
+        # The default claim is removed, not merely shadowed: leaving a valid
+        # `mcp_allowed_tenants` in the token lets an implementation that ignores the
+        # config and reads the default name pass this test anyway. Mutation testing
+        # caught exactly that.
+        **{"mcp_grant": _grant(), "corp_tenants": [TENANT_ID], ENTITLEMENT_CLAIM_DEFAULT: None},
+    )
+    principal = await v.validate(tok)
+    assert SCOPE_TOOLS_CALL in principal.scopes
+
+
+async def test_the_entitlement_claim_name_is_read_from_config(rig):
+    """The config *builder* must carry the name through, not just the dataclass default.
+
+    Separate from the test above on purpose: that one sets the field on an already-built
+    config, so an ``_issuer_config`` that ignored the key entirely would still pass it.
+    Mutation testing found that gap.
+    """
+    from device_mcp_gateway.oidc import build_oidc_validator
+
+    v = build_oidc_validator(
+        {
+            "gateway": {
+                "tenant_id": TENANT_ID,
+                "oidc": {
+                    "enabled": True,
+                    "issuers": [
+                        {
+                            "issuer": PROVIDER_ISS,
+                            "audience": AUDIENCE,
+                            "plane": PLANE_PROVIDER,
+                            "group_roles": {"provider-admins": "operator"},
+                            "step_up_acr": [STEP_UP_ACR],
+                            "entitlement_claim": "corp_tenants",
+                            "jwks_uri": f"{PROVIDER_ISS}/jwks",
+                        }
+                    ],
+                },
+            },
+            "security": {"allow_private_targets": True},
+        }
+    )
+    assert v.for_issuer(PROVIDER_ISS).config.entitlement_claim == "corp_tenants"
+
+
 # --- Hazard 5: consumption fails closed ---------------------------------------
 
 
@@ -484,6 +639,10 @@ def _token(priv: rsa.RSAPrivateKey, *, iss: str, kid: str = "key-1", sub: str = 
         "auth_time": now - 30,
         "acr": STEP_UP_ACR,
         "groups": groups if groups is not None else [],
+        # §11c: the IdP's directory-derived statement of the operator's entitled tenants.
+        # Present by default so the grant tests below fail for their own reason; the §11c
+        # tests override it explicitly.
+        ENTITLEMENT_CLAIM_DEFAULT: [TENANT_ID],
     }
     claims.update(over)
     return jwt.encode(claims, priv, algorithm="RS256", headers={"kid": kid})
