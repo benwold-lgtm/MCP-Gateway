@@ -418,6 +418,9 @@ class OIDCValidator:
             grant: ElevatedGrant = await verify_grant(
                 raw,
                 tenant_id=self._cfg.tenant_id,
+                # Already issuer-qualified (see _build_principal): `sub` is unique within an
+                # issuer, not across, and the single-use record is keyed on this.
+                subject=principal.subject,
                 step_up_acr=self._cfg.step_up_acr,
                 entitlement=claims.get(self._cfg.entitlement_claim),
                 entitlement_claim=self._cfg.entitlement_claim,

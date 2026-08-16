@@ -96,6 +96,9 @@ PROVIDER_ISS = "https://provider-idp.example.com"
 AUDIENCE = "device-mcp-gateway"
 TENANT_ID = "acme"
 STEP_UP_ACR = "urn:mcp:provider:step-up"
+#: Issuer-qualified, exactly as ``_build_principal`` produces it — the single-use record is
+#: keyed partly on this, so a test using a bare ``sub`` would not exercise the real shape.
+SUBJECT = f"oidc:{PROVIDER_ISS}#opsuser"
 
 
 # --- rig ----------------------------------------------------------------------
@@ -131,6 +134,7 @@ def _verify(**over):
     args = dict(
         raw=_grant(),
         tenant_id=TENANT_ID,
+        subject=SUBJECT,
         step_up_acr=(STEP_UP_ACR,),
         acr=STEP_UP_ACR,
         auth_time=int(now) - 30,
@@ -398,11 +402,12 @@ async def test_entitlement_is_checked_before_a_single_use_grant_is_consumed(stor
     """Ordering, and it is load-bearing. If an unentitled operator's attempt burned the
     grant id, anyone could disarm a legitimate single-use credentials grant by presenting
     it once from an account entitled to nothing."""
+    now = time.time()  # one step-up across both calls, or the second cannot collide anyway
     claim = _grant(id="grant-single", scopes=[SCOPE_BACKUP_READ])
     with pytest.raises(GrantError, match="not among the operator's entitled"):
-        await _verify(raw=claim, store=store, entitlement=["globex"])
+        await _verify(raw=claim, store=store, entitlement=["globex"], now=now)
     # The id must still be spendable by the operator who is actually entitled to it.
-    grant = await _verify(raw=claim, store=store, entitlement=[TENANT_ID])
+    grant = await _verify(raw=claim, store=store, entitlement=[TENANT_ID], now=now)
     assert grant.single_use is True and grant.id == "grant-single"
 
 
@@ -490,10 +495,15 @@ async def test_a_single_use_grant_is_refused_on_replay(store):
     """The property the whole consumption record exists for. An issued bearer token is
     replayable until expiry whichever client minted it (§11) — single use has to be
     enforced by state on the receiving side, and this is that state working."""
+    # ``now`` is pinned so both calls derive the same ``auth_time`` and therefore describe
+    # the *same* step-up. Left to the clock, a second boundary between the two calls would
+    # make them two elevations and the replay would legitimately be allowed — an
+    # intermittent green that says nothing about the property under test.
+    now = time.time()
     raw = _grant(id="grant-cred", scopes=[SCOPE_BACKUP_READ])
-    await _verify(raw=raw, store=store)
-    with pytest.raises(GrantError, match="already"):
-        await _verify(raw=raw, store=store)
+    await _verify(raw=raw, store=store, now=now)
+    with pytest.raises(GrantError, match="already been spent by this step-up"):
+        await _verify(raw=raw, store=store, now=now)
 
 
 async def test_a_non_single_use_grant_is_replayable_within_its_window(store):
@@ -508,12 +518,137 @@ async def test_a_non_single_use_grant_is_replayable_within_its_window(store):
 
 
 async def test_two_different_single_use_grants_do_not_collide(store):
-    """The consumption record is keyed on the grant id. Keyed on anything coarser — the
-    subject, the tenant — a support engineer's second grant of the day is refused as a
-    replay, which reads as a bug and gets 'fixed' by weakening the check."""
-    await _verify(raw=_grant(id="g1", scopes=[SCOPE_BACKUP_READ]), store=store)
-    grant = await _verify(raw=_grant(id="g2", scopes=[SCOPE_BACKUP_READ]), store=store)
+    """Two distinct grant ids stay distinct. Keyed on the subject or the tenant *alone*, a
+    support engineer's second grant of the day is refused as a replay — which reads as a bug
+    and gets 'fixed' by weakening the check.
+
+    ``now`` is pinned so the two calls share a step-up: otherwise a differing ``auth_time``
+    would separate them regardless of the id, and the test would pass without the id
+    mattering at all.
+    """
+    now = time.time()
+    await _verify(raw=_grant(id="g1", scopes=[SCOPE_BACKUP_READ]), store=store, now=now)
+    grant = await _verify(raw=_grant(id="g2", scopes=[SCOPE_BACKUP_READ]), store=store, now=now)
     assert grant.id == "g2"
+
+
+# --- what single use is consumed *against* (found against a real IdP, 2026-08-16) ---
+#
+# Everything above this line was written against hand-built claims, and hand-built claims
+# always carried a distinct `id`. Attached to Keycloak, the claim arrives with a **constant**
+# one — a hardcoded claim mapper is the only stock way to emit `mcp_grant.id`, and it emits
+# the value it was configured with. Measured end to end: two legitimate elevations, each
+# with its own fresh TOTP step-up, gave `backup:read` 200 and then 401 "already been spent".
+# The credentials class worked exactly once per deployment, ever.
+#
+# The mechanism was not too strict; it was enforcing a different property from the one §8
+# states. §8 says *one operation, re-entry by step-up*, so the thing consumption identifies
+# has to be the elevation — subject, grant id and step-up time — not the label on the claim.
+
+
+async def test_a_fresh_step_up_re_arms_a_grant_id_the_idp_reuses(store):
+    """The regression, stated as the property that was missing. Two elevations, each with
+    its own step-up, presenting the id a stock IdP mapper actually emits: both spend."""
+    now = time.time()
+    claim = _grant(id="kc-credentials-static", scopes=[SCOPE_BACKUP_READ])
+    first = await _verify(raw=claim, store=store, auth_time=int(now) - 200, now=now)
+    second = await _verify(raw=claim, store=store, auth_time=int(now) - 5, now=now)
+    assert first.single_use is second.single_use is True
+    assert first.id == second.id == "kc-credentials-static"
+
+
+async def test_one_operator_spending_a_reused_id_does_not_disarm_another(store):
+    """The other half of the same defect, and the reason the subject is in the key. With a
+    constant id and no subject, the first operator to run a backup locks out every colleague
+    who steps up afterwards — indistinguishable, from their side, from a broken feature."""
+    now = time.time()
+    claim = _grant(id="kc-credentials-static", scopes=[SCOPE_BACKUP_READ])
+    await _verify(raw=claim, store=store, subject=f"oidc:{PROVIDER_ISS}#alice", now=now)
+    grant = await _verify(raw=claim, store=store, subject=f"oidc:{PROVIDER_ISS}#bob", now=now)
+    assert grant.single_use is True
+
+
+async def test_a_refreshed_token_does_not_buy_a_second_credentials_operation(rig):
+    """Why the record is keyed on ``auth_time`` and **not** the token id.
+
+    ``jti`` is the intuitive key and it is unsound: a refresh mints a new token id from the
+    *same* authentication event, carrying the same ``acr``, the same ``auth_time`` and the
+    same grant claim. Keyed on ``jti``, single use becomes once-per-refresh — defeated from
+    inside the window it is supposed to hold across. Written at the token level because
+    that is the only place a second token from one login can be expressed at all.
+    """
+    v, _, provider_key = rig
+    auth_time = int(time.time()) - 30
+    claim = _grant(id="kc-credentials-static", scopes=[SCOPE_BACKUP_READ])
+    common = dict(iss=PROVIDER_ISS, groups=["provider-admins"], mcp_grant=claim, auth_time=auth_time)
+    principal = await v.validate(_token(provider_key, jti="access-token-1", **common))
+    assert SCOPE_BACKUP_READ in principal.scopes
+    with pytest.raises(OIDCError, match="already been spent"):
+        await v.validate(_token(provider_key, jti="access-token-2", **common))
+
+
+async def test_two_operators_sharing_a_constant_grant_id_each_get_their_operation(rig):
+    """The same property as the unit test above, but through the authenticator, which is
+    where the subject is actually plumbed. Nothing else pins that ``principal.subject`` —
+    and not the issuer, or a constant, or the raw ``sub`` — is what reaches the record."""
+    v, _, provider_key = rig
+    auth_time = int(time.time()) - 30
+    claim = _grant(id="kc-credentials-static", scopes=[SCOPE_BACKUP_READ])
+    common = dict(iss=PROVIDER_ISS, groups=["provider-admins"], mcp_grant=claim, auth_time=auth_time)
+    first = await v.validate(_token(provider_key, sub="alice", **common))
+    second = await v.validate(_token(provider_key, sub="bob", **common))
+    assert SCOPE_BACKUP_READ in first.scopes and SCOPE_BACKUP_READ in second.scopes
+
+
+async def test_how_auth_time_is_encoded_does_not_split_one_elevation(store):
+    """``1700000000`` and ``1700000000.0`` are one step-up. Unnormalised they hash apart,
+    and single use would depend on whether the IdP's JSON encoder emitted a decimal point."""
+    now = time.time()
+    claim = _grant(id="g-cred", scopes=[SCOPE_BACKUP_READ])
+    await _verify(raw=claim, store=store, auth_time=int(now) - 30, now=now)
+    with pytest.raises(GrantError, match="already been spent"):
+        await _verify(raw=claim, store=store, auth_time=float(int(now) - 30), now=now)
+
+
+async def test_the_consumption_identity_cannot_be_re_cut_between_its_fields(store):
+    """The hashed material is length-prefixed, so no pair of distinct elevations shares a
+    digest. The separator alone covers every realistic subject; the prefix is what makes the
+    encoding unambiguous for *any* string, which is the only thing a hash input can safely
+    assume. Falsifiable rather than asserted — hence a subject carrying the separator."""
+    now = time.time()
+    scopes = [SCOPE_BACKUP_READ]
+    await _verify(raw=_grant(id="c", scopes=scopes), subject="oidc:i#a\x00b", store=store, now=now)
+    grant = await _verify(raw=_grant(id="b\x00c", scopes=scopes), subject="oidc:i#a", store=store, now=now)
+    assert grant.single_use is True
+
+
+@pytest.mark.parametrize("bad", [None, "", 7, ["oidc:i#a"]])
+async def test_a_grant_with_no_authenticated_subject_is_refused(bad):
+    """An elevation belongs to one operator — it is audited against them and consumed
+    against them. Honouring a grant with no subject would merge every operator's single-use
+    record into one, which is the "constant id" defect rebuilt from the other end."""
+    with pytest.raises(GrantError, match="no authenticated subject"):
+        await _verify(subject=bad)
+
+
+async def test_the_consumption_record_carries_no_operator_identifier():
+    """A `sub` is routinely an email address, and Redis key names surface in `SCAN` output,
+    slow logs and support dumps. The store therefore receives a digest, not the material."""
+    seen: list[str] = []
+
+    class _Recorder:
+        async def consume(self, consumption_id, *, ttl):
+            seen.append(consumption_id)
+            return True
+
+    await _verify(
+        raw=_grant(id="g-cred", scopes=[SCOPE_BACKUP_READ]),
+        subject=f"oidc:{PROVIDER_ISS}#alice@example.com",
+        store=_Recorder(),
+    )
+    assert len(seen) == 1
+    assert "alice@example.com" not in seen[0] and "g-cred" not in seen[0]
+    assert len(seen[0]) == 64 and set(seen[0]) <= set("0123456789abcdef")
 
 
 async def test_a_consumption_store_that_raises_refuses_the_grant():

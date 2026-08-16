@@ -555,10 +555,46 @@ scope mapping, lifetime, single use, audit — was already gateway-side and stay
    request.
 4. Allow the request to select a tenant and grant class through requested scopes, and **refuse
    an unrecognised scope** rather than dropping it.
-5. Emit a token identifier unique per issuance, to key the single-use consumption record.
+5. ~~Emit a token identifier unique per issuance, to key the single-use consumption record.~~
+   **Withdrawn 2026-08-16 — see §11d.** No measured product satisfies it, and requiring it
+   was the gateway asking the IdP to solve a problem the gateway had misframed.
 6. Set an audience the gateway can check — the default audience is typically not the gateway.
 
 Point 1 is the discriminating requirement: of the two products measured, only one satisfies it.
+
+#### 11d. Single use is consumed against the elevation, not the grant id (2026-08-16)
+
+**Found by attaching a real IdP, not by any test.** Every grant claim in the suite was
+hand-built and every one carried a distinct `id`. Keycloak's only stock way to emit
+`mcp_grant.id` is a hardcoded claim mapper, which emits a **constant**. Measured end to end
+with two legitimate elevations, each behind its own fresh TOTP step-up: `backup:read`
+returned 200, then 401 *"already been spent"*. The credentials class worked exactly once per
+deployment, ever — and requirement 5 above was the gateway insisting the IdP fix it.
+
+The mechanism was not too strict. It was enforcing a **different property** from the one §8
+states. §8 reads *one operation, re-entry by step-up*, so what consumption must identify is
+the elevation: **subject + grant id + `auth_time`**, hashed. Three choices inside that, each
+the opposite of the obvious one:
+
+- **`auth_time`, not `jti`.** The token id is the intuitive key and it is unsound: a refresh
+  mints a new `jti` from the *same* authentication event, with the same `acr` and the same
+  grant claim, so a jti-keyed record grants one spend per refresh — single use defeated from
+  inside the window it exists to hold across. `auth_time` is the only value that changes
+  exactly when a new step-up happens, and it is strictly the stronger key, since two tokens
+  sharing a `jti` necessarily share an `auth_time`.
+- **The subject is in the key and takes nothing away.** With a per-issuance id it is
+  redundant; with a constant one it stops the first operator to run a backup from locking out
+  every colleague. It weakens no replay defence — a replayed token carries its victim's
+  subject and collides with the victim's own record. The subject is already issuer-qualified
+  (`oidc:<iss>#<sub>`), which is what keeps two trusted issuers apart.
+- **`auth_time` is normalised to whole seconds**, so `1700000000` and `1700000000.0` are one
+  elevation. Rounding can only merge neighbouring events, never split one — the closed
+  direction.
+
+`shared/keys.py` used to argue *"keyed on the grant id and nothing coarser; keyed on the
+subject instead, a support engineer's second grant of the day is refused as a replay"*. The
+reasoning was right and the conclusion did not follow: the finer key refused their second
+grant **ever**. A composite containing the subject is not the coarsening that warning meant.
 
 ##### Implementation (2026-08-16)
 
@@ -676,6 +712,8 @@ route to authority. A subject whose groups map to nothing stays at zero scopes.
 wrong `acr` does not burn its id and strand a legitimate single-use grant. Consumption is
 `SET key NX EX ttl` in the receiving tenant's own Redis (§11a) — atomic claim-or-fail in one
 command, so two concurrent replays cannot both win — and any error propagates as a refusal.
+The key identifies the **elevation**, not the claim's `id` (§11d): a stock IdP mapper emits a
+constant id, and keying on it made the credentials class spendable once per deployment.
 
 **Embedded mode refuses every elevated grant**, not only the single-use ones (§11a). This
 falls out of the wiring rather than being a separate check: the store is attached only in

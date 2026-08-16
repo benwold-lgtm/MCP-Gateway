@@ -84,9 +84,10 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
     expiry would let a compromised BFF mint itself a thirty-day credentials grant.
   - **`acr` is verified in the issued token.** `acr_values` is a *request* parameter and an
     IdP may decline the step-up and issue anyway — requesting is not achieving.
-  - **`backup:*` grants are single use**, consumed atomically (`SET NX EX`) in this tenant's
-    own Redis, and consumption **fails closed**: a store that cannot record the spend refuses
-    the grant rather than degrading it to replayable. `tools:call` grants are replayable
+  - **`backup:*` grants are single use** — one operation per *elevation*, consumed atomically
+    (`SET NX EX`) in this tenant's own Redis against the operator, the grant id and the
+    step-up time together (§11d), and consumption **fails closed**: a store that cannot record
+    the spend refuses the grant rather than degrading it to replayable. `tools:call` grants are replayable
     inside a 900s absolute window, because §8's grant gates initiation and one debugging
     session is several calls. A grant naming both takes the stricter of the two.
   - **Embedded mode refuses every elevated grant**, having no shared store to consume against.
@@ -101,6 +102,29 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   *gateway* scopes, and `provider:invoke`/`provider:credentials` remain BFF concepts.
 
 ### Fixed
+
+- **A `provider:credentials` grant is no longer spendable only once per deployment
+  ([ADR-0013 §11d](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md)).** Single use
+  was consumed against the grant claim's `id`. Every claim in the test suite was hand-built
+  and carried a distinct one; a real IdP does not. Keycloak's only stock way to emit
+  `mcp_grant.id` is a hardcoded claim mapper, which emits a **constant** — so the first
+  `backup:read` a deployment ever performed recorded that constant as spent and every later
+  elevation, each behind its own fresh step-up, was refused *"already been spent"*. Measured
+  end to end, not inferred: 200, then 401.
+
+  The mechanism was not too strict; it was enforcing a different property from the one §8
+  states. §8 is *one operation, re-entry by step-up*, so consumption now identifies the
+  **elevation** — subject, grant id and `auth_time`, hashed — rather than the label on the
+  claim. Two things inside that are the opposite of the obvious choice: the key uses
+  `auth_time` and **not `jti`**, because a refresh mints a new token id from the same
+  authentication event and would buy a second operation inside the window; and the operator's
+  subject is *in* the key, which takes no replay defence away (a replayed token carries its
+  victim's subject) while stopping the first operator to run a backup from locking out every
+  colleague.
+
+  No config change, and no action for operators. The IdP requirement to emit a per-issuance
+  token identifier is **withdrawn** — nothing needs it now. Consumption records written by an
+  earlier build are orphaned and expire on their own TTL.
 
 - **A failed JWKS refresh now names the issuer and the error type.** Several httpx timeout
   exceptions stringify to the empty string, so the most common IdP misconfiguration there
