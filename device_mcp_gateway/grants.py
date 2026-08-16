@@ -45,6 +45,7 @@ no shared store to consume against.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Protocol, Sequence
@@ -136,9 +137,12 @@ class GrantConsumptionStore(Protocol):
     cases. A store that returned True on error would degrade single-use to
     replayable-until-expiry precisely when the backing store is unhealthy, inverting
     ADR-0006 at the moment it matters most.
+
+    ``consumption_id`` identifies one *elevation*, not one grant claim — see
+    :func:`_consumption_id` for why those turned out to be different things.
     """
 
-    async def consume(self, grant_id: str, *, ttl: int) -> bool: ...  # pragma: no cover - protocol
+    async def consume(self, consumption_id: str, *, ttl: int) -> bool: ...  # pragma: no cover - protocol
 
 
 class MemoryGrantStore:
@@ -152,13 +156,13 @@ class MemoryGrantStore:
     def __init__(self) -> None:
         self._spent: dict[str, float] = {}
 
-    async def consume(self, grant_id: str, *, ttl: int) -> bool:
+    async def consume(self, consumption_id: str, *, ttl: int) -> bool:
         now = time.time()
         for gid in [g for g, exp in self._spent.items() if exp <= now]:
             del self._spent[gid]
-        if grant_id in self._spent:
+        if consumption_id in self._spent:
             return False
-        self._spent[grant_id] = now + ttl
+        self._spent[consumption_id] = now + ttl
         return True
 
 
@@ -175,10 +179,10 @@ class RedisGrantStore:
         self._redis = redis
         self._keys = keys
 
-    async def consume(self, grant_id: str, *, ttl: int) -> bool:
+    async def consume(self, consumption_id: str, *, ttl: int) -> bool:
         # Any exception propagates: the caller must not be able to mistake "could not
         # write the record" for "the grant was unused".
-        claimed = await self._redis.set(self._keys.grant_consumed(grant_id), "1", nx=True, ex=ttl)
+        claimed = await self._redis.set(self._keys.grant_consumed(consumption_id), "1", nx=True, ex=ttl)
         return bool(claimed)
 
 
@@ -234,6 +238,51 @@ def _parse_tenant(raw: Any, tenant_id: str) -> str:
     return raw
 
 
+def _consumption_id(*, subject: str, grant_id: str, auth_time: float) -> str:
+    """The identity of one **elevation**, which is what §8's "single use" is actually about.
+
+    §8 reads: `provider:credentials` is *one operation*, and re-entry is *a step-up*. So the
+    thing consumption must identify is the step-up, not the label the IdP wrote on the claim.
+    Keying on ``id`` alone conflated the two, and the difference is invisible until a real
+    IdP is attached: measured against Keycloak 26, a hardcoded claim mapper is the only way
+    to emit ``mcp_grant.id`` and it emits a **constant**, so the first credentials grant a
+    deployment ever spends disables the class for that deployment permanently. The mechanism
+    was not too strict — it was enforcing a different property from the one §8 states.
+
+    Three choices here, each of which the obvious alternative gets wrong:
+
+    **``auth_time``, not ``jti``.** The token id is the intuitive answer and it is unsound:
+    a refresh yields a new ``jti`` from the *same* authentication event, carrying the same
+    ``acr`` and the same grant claim, so a jti-keyed record grants one spend per refresh —
+    single-use destroyed from inside the window, precisely where §8 expects it to hold.
+    ``auth_time`` is the only value here that changes exactly when a new step-up happens.
+    It is also strictly the stronger key: two tokens sharing a ``jti`` necessarily share an
+    ``auth_time``, so nothing a jti would separate is merged.
+
+    **The subject is in the key, and it takes nothing away.** With a per-issuance ``id`` it
+    is redundant; with a constant one it is what stops one operator's spend from disarming
+    every other operator's. It weakens no replay defence: a replayed token carries its
+    victim's subject and so collides with the victim's own record. The subject arrives
+    already qualified by its issuer (``oidc:<iss>#<sub>``), which is what keeps two trusted
+    issuers from colliding on a shared ``sub``.
+
+    **``auth_time`` is normalised**, and this is the only place that does it, so that
+    ``1700000000`` and ``1700000000.0`` — the same instant, differing only in how a JSON
+    encoder felt about it — are one elevation rather than two. Whole seconds is the natural
+    grain because ``auth_time`` is a whole-second claim; the precision is not itself
+    load-bearing (no test can tell it from six decimal places, and none pretends to), but
+    the int/float collapse is, and mutation testing kills anything that drops it.
+
+    The parts are length-prefixed before hashing: without it a subject ending in the
+    separator and a grant id beginning with one could be re-cut into the same digest, which
+    is a forged collision between two distinct elevations. Hashing at all is for the key's
+    sake — bounded length, and no operator identifier sitting in a Redis key name.
+    """
+    parts = (subject, grant_id, f"{float(auth_time):.0f}")
+    material = "\x00".join(f"{len(p)}:{p}" for p in parts)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _check_entitlement(raw: Any, tenant: str, claim_name: str) -> None:
     """ADR-0013 §11c: the request *selected* this tenant; only the IdP can *authorize* it.
 
@@ -287,6 +336,7 @@ async def verify_grant(
     raw: Any,
     *,
     tenant_id: Optional[str],
+    subject: Any,
     step_up_acr: Sequence[str],
     acr: Any,
     auth_time: Any,
@@ -310,6 +360,12 @@ async def verify_grant(
         # so it must honour none. Guarded again at startup for provider issuers, since
         # discovering this during an incident is the worst possible moment.
         raise GrantError("this gateway has no configured tenant_id, so it cannot honour an elevated grant")
+    if not isinstance(subject, str) or not subject:
+        # An elevation belongs to one operator: it is audited against them and, for the
+        # credentials class, consumed against them. A caller that cannot name the subject
+        # has mis-wired the authenticator, and honouring the grant anyway would silently
+        # merge every operator's single-use record into one.
+        raise GrantError("no authenticated subject was supplied, so an elevated grant cannot be attributed or consumed")
     if not step_up_acr:
         raise GrantError(
             "no step_up_acr is configured for this issuer, so the step-up behind an elevated grant "
@@ -387,12 +443,20 @@ async def verify_grant(
     # --- §11a: consumption, last and fail-closed --------------------------------
     if policy.single_use:
         ttl = max(int(deadline - now) + leeway, leeway)
+        # Consumed against the *elevation*, not the claim's ``id`` — see _consumption_id.
+        consumption_id = _consumption_id(subject=subject, grant_id=grant_id, auth_time=auth_time)
         try:
-            claimed = await store.consume(grant_id, ttl=ttl)
+            claimed = await store.consume(consumption_id, ttl=ttl)
         except Exception as exc:
             raise GrantError(f"could not record consumption of single-use grant {grant_id!r}, refusing it: {exc}")
         if not claimed:
-            raise GrantError(f"single-use grant {grant_id!r} has already been spent")
+            # Named as a property of the step-up, because that is what the operator has to
+            # do about it. "Grant x has already been spent" invited the reading that the
+            # grant was permanently burnt, which is what the id-keyed record actually did.
+            raise GrantError(
+                f"single-use grant {grant_id!r} has already been spent by this step-up; §8 makes the "
+                f"credentials class one operation per elevation, so another needs a fresh step-up"
+            )
 
     return ElevatedGrant(
         id=grant_id,
