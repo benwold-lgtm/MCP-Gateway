@@ -250,7 +250,17 @@ class JWKSCache:
             try:
                 await self._refresh()
             except Exception as exc:  # network, TLS, JSON, policy — all fall through
-                logger.warning(f"OIDC JWKS refresh failed (serving from cache if present): {exc}")
+                # The exception TYPE carries the diagnosis here: several httpx timeout
+                # errors stringify to "", so `{exc}` alone logs a blank reason for the
+                # most common IdP misconfiguration there is — an unreachable JWKS host
+                # (blocked egress port, NetworkPolicy, firewall). Naming the issuer
+                # matters too: with several issuers configured, "refresh failed" is
+                # otherwise unattributable.
+                detail = str(exc) or "(no detail)"
+                logger.warning(
+                    f"OIDC JWKS refresh failed for issuer {self._cfg.issuer!r} "
+                    f"(serving from cache if present): {type(exc).__name__}: {detail}"
+                )
         if kid in self._keys:
             return self._keys[kid]
         raise OIDCError(f"no JWKS key for kid={kid!r} (unknown key or IdP unreachable)")

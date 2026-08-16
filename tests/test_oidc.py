@@ -254,6 +254,44 @@ async def test_kid_miss_refresh_is_rate_limited(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_jwks_refresh_failure_names_the_issuer_and_the_error_type(monkeypatch):
+    """An unreachable JWKS host must not log a blank reason.
+
+    Several httpx timeout exceptions stringify to "", so the most common IdP
+    misconfiguration there is — the JWKS host unreachable (blocked egress port,
+    NetworkPolicy, firewall) — logged `refresh failed ...: ` with nothing after the
+    colon, while authentication silently degraded to static break-glass keys. With
+    more than one issuer configured it was also unattributable. Found by pointing a
+    real gateway at an IdP on a port the shipped NetworkPolicy does not allow.
+    """
+    from loguru import logger
+
+    priv = _keypair()
+    v = _validator(priv)
+
+    class _BlankTimeout(Exception):
+        def __str__(self):
+            return ""
+
+    async def _fake_refresh():
+        raise _BlankTimeout()
+
+    monkeypatch.setattr(v.jwks, "_refresh", _fake_refresh)
+    messages: list[str] = []
+    sink_id = logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+    try:
+        with pytest.raises(OIDCError):
+            await v.jwks.get_key("missing")
+    finally:
+        logger.remove(sink_id)
+
+    logged = " ".join(messages)
+    assert "_BlankTimeout" in logged, "the exception TYPE is the diagnosis when str() is empty"
+    assert v.config.issuer in logged, "with several issuers, the failure must name one"
+    assert "(no detail)" in logged
+
+
+@pytest.mark.asyncio
 async def test_stale_cache_triggers_refresh(monkeypatch):
     priv = _keypair()
     v = _validator(priv, jwks_cache_ttl=0)  # always stale
