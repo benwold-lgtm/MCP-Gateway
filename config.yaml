@@ -98,14 +98,25 @@ gateway:
   #     # grant_claim: which claim carries the grant (default: mcp_grant). Configurable
   #     # because an IdP's custom-claims hook is often constrained to a namespaced name.
   #     grant_claim: "https://mcp.example/grant"
+  #     # entitlement_claim: which claim lists the tenants this operator may act on at all
+  #     # (default: mcp_allowed_tenants). REQUIRED in practice — a grant is honoured only
+  #     # where the requested tenant and this list intersect (ADR-0013 §11c). Emit it from
+  #     # a DIRECTORY attribute, never from the authorization request: measured against
+  #     # real IdPs, a requested scope is granted to whoever asks for it, so the grant
+  #     # claim's `tenant` is chosen by the caller and authorizes nothing by itself. A
+  #     # token with no usable entitlement claim has every grant refused.
+  #     entitlement_claim: "https://mcp.example/allowed-tenants"
   #
   # The claim the IdP injects on issuance after the step-up:
   #   {"id": "g-7f2", "tenant": "acme", "scopes": ["tools:call"], "exp": 1755200000}
-  # `tenant` must equal gateway.tenant_id below and is a string, never a list — single-use
-  # is consumed in this gateway's own Redis, so an estate-wide grant would be spendable
-  # once per stack. `exp` is optional and may only SHORTEN the gateway's own window; the
-  # deadline is computed here from `auth_time`, never read from the claim. `scopes` may
-  # only name tools:call or backup:* — anything else is refused, not trimmed.
+  # ...alongside the entitlement claim, which the IdP derives from the directory:
+  #   {"mcp_allowed_tenants": ["acme", "globex"]}
+  # `tenant` must equal gateway.tenant_id below, must appear in the entitlement claim, and
+  # is a string, never a list — single-use is consumed in this gateway's own Redis, so an
+  # estate-wide grant would be spendable once per stack. `exp` is optional and may only
+  # SHORTEN the gateway's own window; the deadline is computed here from `auth_time`, never
+  # read from the claim. `scopes` may only name tools:call or backup:* — anything else is
+  # refused, not trimmed.
   #
   # Elevated grants need the distributed mode's shared Redis to record single-use
   # consumption, so embedded mode refuses every grant (ADR-0013 §11a).

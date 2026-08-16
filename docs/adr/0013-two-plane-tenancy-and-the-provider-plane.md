@@ -560,6 +560,28 @@ scope mapping, lifetime, single use, audit — was already gateway-side and stay
 
 Point 1 is the discriminating requirement: of the two products measured, only one satisfies it.
 
+##### Implementation (2026-08-16)
+
+`entitlement_claim` joins `step_up_acr` and `grant_claim` as per-issuer configuration,
+defaulting to `mcp_allowed_tenants`. `verify_grant` performs the intersection.
+
+Three details are load-bearing and none is obvious from the outside:
+
+- **It sits after the tenant is validated and before consumption.** After, because there is
+  no point asking whether an operator is entitled to a tenant the grant does not correctly
+  name. Before, because otherwise an operator entitled to nothing could present someone
+  else's single-use credentials grant, have it refused, and *still* burn the id — disarming
+  a legitimate grant permanently from an account with no authority at all.
+- **A missing or malformed entitlement claim refuses.** "No entitlement stated" and
+  "entitled to everything" must never be the same thing: were they, an IdP that simply does
+  not emit the claim would silently restore the pre-§11c behaviour with no error anywhere.
+- **One membership test carries the property.** Mutation testing showed the emptiness and
+  type-filtering branches were removable without changing a single outcome — an empty list,
+  a blank string and a list of non-strings all fail the membership test anyway. They were
+  defence in depth in appearance only, so they now shape the *message* (a missing IdP
+  mapping and an unentitled operator are different problems) rather than standing as
+  separate guards that no test could distinguish.
+
 ## Implementation notes — gateway-side multi-issuer (2026-08-14)
 
 §6/§6a are built in the gateway: `gateway.oidc.issuers` takes a list, each entry carrying

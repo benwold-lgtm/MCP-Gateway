@@ -38,6 +38,7 @@ from loguru import logger
 
 from device_mcp_gateway import metrics
 from device_mcp_gateway.grants import (
+    ENTITLEMENT_CLAIM_DEFAULT,
     GRANT_CLAIM_DEFAULT,
     ElevatedGrant,
     GrantConsumptionStore,
@@ -128,6 +129,10 @@ class OIDCConfig:
     # refused: an unverifiable step-up is not a satisfied one (§11b).
     step_up_acr: tuple[str, ...] = ()
     grant_claim: str = GRANT_CLAIM_DEFAULT
+    # The claim naming the tenants this operator may act on at all (§11c). The grant
+    # claim above is *selected* by the request; this one is derived by the IdP from the
+    # directory. The gateway honours a grant only where the two intersect.
+    entitlement_claim: str = ENTITLEMENT_CLAIM_DEFAULT
     jwks_uri: Optional[str] = None
     groups_claim: str = "groups"
     subject_claim: str = "sub"
@@ -414,6 +419,8 @@ class OIDCValidator:
                 raw,
                 tenant_id=self._cfg.tenant_id,
                 step_up_acr=self._cfg.step_up_acr,
+                entitlement=claims.get(self._cfg.entitlement_claim),
+                entitlement_claim=self._cfg.entitlement_claim,
                 acr=claims.get("acr"),
                 auth_time=claims.get("auth_time"),
                 store=self._grant_store,
@@ -574,6 +581,7 @@ def _issuer_config(entry: dict, cfg: dict, *, default_plane: str = PLANE_TENANT)
         tenant_id=tenant_id,
         step_up_acr=tuple(entry.get("step_up_acr") or ()),
         grant_claim=entry.get("grant_claim", GRANT_CLAIM_DEFAULT),
+        entitlement_claim=entry.get("entitlement_claim", ENTITLEMENT_CLAIM_DEFAULT),
         jwks_uri=entry.get("jwks_uri"),
         groups_claim=entry.get("groups_claim", "groups"),
         subject_claim=entry.get("subject_claim", "sub"),

@@ -62,6 +62,11 @@ from device_mcp_gateway.shared.keys import KEYS
 #: Default name of the custom claim carrying the grant. Per-issuer config, because an IdP's
 #: custom-claims hook is often constrained to a namespaced name (``https://…/grant``).
 GRANT_CLAIM_DEFAULT = "mcp_grant"
+#: The claim carrying the operator's tenant entitlement — the estate they may act on at all
+#: (ADR-0013 §11c). Distinct from the grant claim on purpose: the grant claim is *selected*
+#: by the request and so is not trusted alone, whereas this one is derived by the IdP from
+#: the directory and cannot be influenced by the client.
+ENTITLEMENT_CLAIM_DEFAULT = "mcp_allowed_tenants"
 
 
 @dataclass(frozen=True)
@@ -229,6 +234,55 @@ def _parse_tenant(raw: Any, tenant_id: str) -> str:
     return raw
 
 
+def _check_entitlement(raw: Any, tenant: str, claim_name: str) -> None:
+    """ADR-0013 §11c: the request *selected* this tenant; only the IdP can *authorize* it.
+
+    The grant claim's ``tenant`` is chosen by whoever built the authorization request — in
+    practice the BFF, which is inside the threat model. Measured against real IdPs, a
+    requested scope is granted to anyone who asks for it: an operator with no entitlement to
+    a tenant requested that tenant's scope and received the claim. So the tenant name alone
+    asserts nothing, and this is the check that makes it mean something.
+
+    The entitlement claim is the other half: derived by the IdP from the directory, not from
+    the request, so a client cannot influence it. Both arrive in the access token, which is
+    why the intersection belongs here rather than in the BFF — a check on the side that
+    chose the value would be the attacker validating their own request.
+
+    Fail-closed in every direction: a missing, malformed or empty claim refuses, because
+    "no entitlement stated" and "entitled to everything" must never be the same thing.
+    """
+    if isinstance(raw, str):
+        allowed = [raw] if raw else []
+    elif isinstance(raw, list):
+        allowed = [t for t in raw if isinstance(t, str) and t]
+    else:
+        # A claim of the wrong type is the one case that cannot be phrased as "not
+        # entitled": the gateway has no idea what the IdP meant, so it says so.
+        raise GrantError(
+            f"token has no usable {claim_name!r} claim (got {type(raw).__name__}), so this "
+            f"gateway cannot tell whether the operator may act on {tenant!r} at all; an "
+            f"elevated grant needs the IdP to say so, not the request (ADR-0013 §11c)"
+        )
+
+    # **One membership test carries the whole property.** Everything above only decides
+    # which sentence explains a refusal — an empty list, a blank string and a list of
+    # non-strings all fail here anyway, which mutation testing confirmed by leaving those
+    # branches removable without changing a single outcome. Keeping the emptiness case as
+    # a separate `if` looked like defence in depth and was really an untested no-op, so it
+    # is folded into the message instead of standing as its own guard.
+    if tenant not in allowed:
+        if not allowed:
+            raise GrantError(
+                f"token's {claim_name!r} claim names no tenant, so the operator is entitled "
+                f"to none; an absent entitlement is not an unlimited one (ADR-0013 §11c)"
+            )
+        raise GrantError(
+            f"grant names tenant {tenant!r}, which is not among the operator's entitled "
+            f"tenants in {claim_name!r}; the request may select a tenant but only the IdP "
+            f"authorizes one (ADR-0013 §11c)"
+        )
+
+
 async def verify_grant(
     raw: Any,
     *,
@@ -237,6 +291,8 @@ async def verify_grant(
     acr: Any,
     auth_time: Any,
     store: Optional[GrantConsumptionStore],
+    entitlement: Any = None,
+    entitlement_claim: str = ENTITLEMENT_CLAIM_DEFAULT,
     leeway: int = 60,
     now: Optional[float] = None,
 ) -> ElevatedGrant:
@@ -276,6 +332,16 @@ async def verify_grant(
     if not isinstance(grant_id, str) or not grant_id:
         raise GrantError("grant claim has no usable 'id' — nothing to consume against, and nothing to audit")
     tenant = _parse_tenant(raw.get("tenant"), tenant_id)
+    # §11c, and it must sit here: after the tenant is known to be well-formed and to name
+    # this gateway, and well before consumption, so an operator who is simply not entitled
+    # to this tenant does not burn a legitimate single-use grant id on the way to a refusal.
+    if not entitlement_claim:
+        raise GrantError(
+            "no entitlement_claim is configured for this issuer, so the operator's entitlement "
+            "to the named tenant cannot be checked; the request would be selecting a tenant "
+            "with nothing authorizing it (ADR-0013 §11c)"
+        )
+    _check_entitlement(entitlement, tenant, entitlement_claim)
     scopes = _parse_scopes(raw.get("scopes"))
     policy = _policy_for(scopes)
 

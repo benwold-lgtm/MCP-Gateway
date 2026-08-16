@@ -49,11 +49,25 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   {"id": "g-7f2", "tenant": "acme", "scopes": ["tools:call"], "exp": 1755200000}
   ```
 
-  > **Amended before release — [ADR-0013 §11c](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md).**
-  > Measurement against two real IdPs showed none will mint this claim: a requested scope can
-  > *select* a tenant but does not *authorize* one. The shape above is what the code checks
-  > today; it is changing so the IdP asserts the operator's tenant entitlement and the gateway
-  > intersects it against the requested tenant. Not yet reflected in the code below.
+  Alongside it the token must carry the operator's **tenant entitlement**, which the IdP
+  derives from the directory rather than from the request:
+
+  ```json
+  {"mcp_allowed_tenants": ["acme", "globex"]}
+  ```
+
+  **A grant is honoured only where the two intersect** ([ADR-0013 §11c](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md)).
+  Measured against two real IdPs, a requested scope is granted to whoever asks for it — an
+  operator with no entitlement to a tenant requested that tenant's scope and received the
+  claim. So the grant claim's `tenant` is *selected* by whoever built the authorization
+  request, in practice the BFF, which is inside the threat model; it authorizes nothing on
+  its own. The intersection is enforced in the gateway rather than the BFF for exactly that
+  reason, and needs no new call: both claims arrive in the access token.
+
+  New per-issuer config: `entitlement_claim` (default `mcp_allowed_tenants`). A token with
+  **no usable entitlement claim has every grant refused** — "no entitlement stated" and
+  "entitled to everything" must never be the same thing, or an IdP that simply omits the
+  claim silently restores the unchecked behaviour.
 
   New config: `gateway.tenant_id` (deployment-level — one gateway, one tenant), plus
   per-issuer `step_up_acr` and `grant_claim`. A provider-plane issuer with no
