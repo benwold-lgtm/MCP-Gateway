@@ -185,6 +185,14 @@ spec:
     # unreachable until you widen the block. The symptom of either is a connection
     # timeout at health-check time, naming nothing in this file.
     #
+    # ⚠️ The IdP is the case that bites hardest, because it has NO health check. If the
+    # issuer/JWKS endpoint is on a port not listed here (Keycloak on 8080 is covered;
+    # an IdP on 9000, 8443 behind a proxy, or any vendor port may not be), the gateway
+    # cannot fetch JWKS — and OIDC then *falls through to the static break-glass keys*
+    # rather than failing loudly. The fleet keeps working for key holders while every
+    # OIDC user gets a 401, which reads like an IdP problem rather than a policy one.
+    # The gateway log names the issuer and the error type; check there first.
+    #
     # Add it to BOTH this policy and the worker one: in distributed mode the WORKER does
     # the fetching, so the gateway's copy alone is not enough.
     #

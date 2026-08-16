@@ -88,6 +88,18 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Fixed
 
+- **A failed JWKS refresh now names the issuer and the error type.** Several httpx timeout
+  exceptions stringify to the empty string, so the most common IdP misconfiguration there
+  is — the JWKS host unreachable because a port is blocked by a NetworkPolicy or firewall —
+  logged `OIDC JWKS refresh failed ...: ` with nothing after the colon. Meanwhile
+  authentication *silently degrades* to static break-glass keys, so the blank line was the
+  only signal. With more than one issuer configured it was also unattributable.
+
+  Found by pointing a real gateway at an IdP listening on a port the shipped NetworkPolicy
+  does not allow. Note for operators upgrading: the egress allowlist in
+  `deploy/kubernetes/networkpolicy.yaml` covers 80/443/8080/8443/9440 — **an IdP on any
+  other port needs adding**, and unlike a device it will not fail a health check.
+
 - **`gateway.oidc` and `gateway.tenant_id` no longer warn "unknown config key — ignored".**
   Neither was declared in the config-validation schema, so every deployment that actually
   enabled OIDC was told at startup that its OIDC block was a typo and was being ignored —
