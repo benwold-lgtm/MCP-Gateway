@@ -38,6 +38,54 @@ def test_unknown_nested_key_flagged_with_dotted_path():
     assert len(problems) == 1
 
 
+def test_multi_issuer_oidc_config_validates_clean():
+    """A config that actually ENABLES OIDC must validate (ADR-0013 §6/§6a).
+
+    Regression: `gateway.oidc` and `gateway.tenant_id` were absent from the schema, so a
+    working multi-issuer deployment was warned at startup that its OIDC block was an
+    unknown key and "ignored" — the opposite of true, and an operator following the
+    warning would delete working config. It survived the suite because every OIDC key in
+    the shipped `config.yaml` is commented out, so `test_shipped_config_yaml_validates_clean`
+    never exercised one. Found by pointing a real gateway at two real IdP realms.
+    """
+    cfg = {
+        "gateway": {
+            "tenant_id": "acme",
+            "oidc": {
+                "enabled": True,
+                "issuers": [
+                    {
+                        "issuer": "https://login.example.com/realms/corp",
+                        "audience": "mcp-gateway",
+                        "plane": "tenant",
+                        "group_roles": {"mcp-admins": "admin"},
+                    },
+                    {
+                        "issuer": "https://provider-idp.example.com",
+                        "audience": "mcp-gateway",
+                        "plane": "provider",
+                        "group_roles": {"mcp-admins": "operator"},
+                        "step_up_acr": ["urn:example:step-up"],
+                        "grant_claim": "mcp_grant",
+                    },
+                ],
+            },
+        }
+    }
+    assert validate_config(cfg) == []
+
+
+def test_oidc_typo_is_still_flagged():
+    # Declaring `oidc` opaque must not turn its neighbours into a blind spot.
+    problems = validate_config({"gateway": {"oidcc": {}}})
+    assert any("gateway.oidcc" in p for p in problems)
+
+
+def test_tenant_id_type_is_checked():
+    problems = validate_config({"gateway": {"tenant_id": 5}})
+    assert any("gateway.tenant_id" in p and "str" in p for p in problems)
+
+
 def test_type_mismatch_flagged():
     problems = validate_config({"server": {"port": "8000"}})
     assert any("server.port" in p and "int" in p for p in problems)

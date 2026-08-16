@@ -86,6 +86,21 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   The gateway still never learns the provider scope vocabulary: the policy table is keyed on
   *gateway* scopes, and `provider:invoke`/`provider:credentials` remain BFF concepts.
 
+### Fixed
+
+- **`gateway.oidc` and `gateway.tenant_id` no longer warn "unknown config key — ignored".**
+  Neither was declared in the config-validation schema, so every deployment that actually
+  enabled OIDC was told at startup that its OIDC block was a typo and was being ignored —
+  while the gateway read and honoured it. An operator following the warning would have
+  deleted working authentication config.
+
+  It survived the suite because every OIDC key in the shipped `config.yaml` is commented
+  out, so the "shipped config validates clean" test never exercised one. Found by pointing a
+  real gateway at two real IdP realms; the regression test now validates an *enabled*
+  multi-issuer config rather than a commented-out example. `oidc` is declared as an opaque
+  mapping on purpose — its structure is validated by `OIDCConfig`, which fails hard at
+  startup, and a second warn-only schema would be a weaker duplicate that drifts.
+
 ### Changed
 
 - **Audit records for a request made under an elevated grant carry `grant=<id>`.** Emitted

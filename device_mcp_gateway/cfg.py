@@ -46,6 +46,15 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "max_body_bytes": int,
         "read_cache_ttl": _NUM,
         "trust_proxy_headers": bool,
+        # Inbound OIDC (ADR-0013 §6/§6a) and the deployment's tenant identity. Declared
+        # as opaque leaves: `oidc` has its own structural validation in
+        # `build_oidc_validator`/`OIDCConfig`, which fails *fast and hard* at startup —
+        # a second, warn-only schema here would be a weaker duplicate that drifts. Left
+        # undeclared they were reported as unknown keys and "ignored", which is exactly
+        # backwards: they are honoured, and an operator following the warning would
+        # delete working OIDC config.
+        "oidc": dict,
+        "tenant_id": str,
     },
     "server": {"host": str, "port": int},
     "registry": {
