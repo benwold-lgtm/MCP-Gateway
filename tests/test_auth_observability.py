@@ -88,6 +88,50 @@ async def test_first_failure_warns_and_the_flood_is_rate_limited(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message, expect_reachability_advice",
+    [
+        ("no JWKS key for kid='x' (unknown key or IdP unreachable)", True),
+        (
+            "elevated grant refused: token acr 'x' is not one of the configured step-up "
+            "contexts ['urn:mcp:provider:step-up']",
+            False,
+        ),
+        ("JWT validation failed: Signature verification failed", False),
+    ],
+)
+async def test_reachability_advice_only_for_reachability_failures(monkeypatch, message, expect_reachability_advice):
+    """ "Your IdP may be unreachable" must not be appended to every failure.
+
+    A refused elevated grant (ADR-0013 §11) and a forged signature are the gateway
+    working as designed. Telling the operator to go and check IdP connectivity buries
+    the real reason under a wrong one — which matters most for the grant refusal,
+    since that is the path someone reads during an incident.
+    """
+    from device_mcp_gateway.oidc import OIDCError
+    from device_mcp_gateway.rbac import CompositeAuthenticator
+
+    class _Failing:
+        async def validate(self, token):
+            raise OIDCError(message)
+
+    warnings: list[str] = []
+    from device_mcp_gateway import rbac as rbac_mod
+
+    monkeypatch.setattr(rbac_mod.logger, "warning", lambda msg, *a, **k: warnings.append(str(msg)))
+
+    comp = CompositeAuthenticator(static=Authenticator({}, False), oidc=_Failing())
+    with pytest.raises(Exception):
+        await comp.authenticate_async(_creds(_JWT))
+
+    assert warnings, "the failure must still be reported"
+    said = "JWKS endpoint is unreachable" in warnings[0]
+    assert said is expect_reachability_advice, warnings[0]
+    if not expect_reachability_advice:
+        assert "refused on its own merits" in warnings[0]
+
+
+@pytest.mark.asyncio
 async def test_suppressed_count_is_reported_on_the_next_warning(monkeypatch):
     """Rate limiting must not hide the scale of the problem."""
     from device_mcp_gateway.oidc import OIDCError

@@ -234,11 +234,20 @@ class CompositeAuthenticator:
         self._oidc_warn_last = now
         self._oidc_warn_suppressed = 0
         extra = f" ({suppressed} similar suppressed in the last {int(_OIDC_WARN_INTERVAL)}s)" if suppressed else ""
+        # The "check whether your IdP is reachable" advice is only true for the reachability
+        # class. Appended unconditionally it actively misdirects: a refused elevated grant
+        # (ADR-0013 §11) or a forged token is the gateway working as designed, and sending
+        # the operator to look at IdP connectivity buries the real reason under a wrong one.
+        advice = (
+            " If this persists, the IdP or its JWKS endpoint is unreachable and only "
+            "break-glass keys can authenticate — see mcp_oidc_validation_failures_total."
+            if reason == "jwks_unavailable"
+            else " This token was refused on its own merits, not for IdP reachability — see "
+            "mcp_oidc_validation_failures_total."
+        )
         logger.warning(
             f"OIDC validation failed (reason={reason}), falling through to static break-glass "
-            f"keys{extra}: {message}. If this persists, the IdP or its JWKS endpoint is "
-            "unreachable and only break-glass keys can authenticate — see "
-            "mcp_oidc_validation_failures_total."
+            f"keys{extra}: {message}.{advice}"
         )
 
     @property
