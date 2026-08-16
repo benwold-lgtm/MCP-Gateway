@@ -426,7 +426,12 @@ scopes and never appear in `ROLE_SCOPES`.
   BFF's audit record. The gain is real and bounded; stating it precisely is what keeps the
   §5a standard honest.
 
-#### 11b. The provider IdP mints the claim (resolved 2026-08-14)
+#### 11b. The provider IdP mints the claim (resolved 2026-08-14, **amended by §11c**)
+
+> **§11c supersedes the "mints the grant" framing below.** Measurement against two real IdPs
+> showed no product will mint this claim without custom code inside the issuance path. The
+> constraints in *Three constraints, or Option A quietly becomes Option 1* all survive intact
+> and are, if anything, load-bearing in more places. Read §11c for what is actually built.
 
 **The provider IdP mints the grant claim itself, as part of a step-up flow.** One token, one
 issuer, matching the verification model already built for §6. The alternative — the BFF as a
@@ -472,6 +477,88 @@ because the IdP mints the claim; it relocates. All three of these are gateway-si
   for `provider:invoke` there is no revocation path inside its 15 minutes. Accepted as a
   residual, consistent with the existing "token replay within its TTL" position in
   `docs/threat-model-identity.md`, and named here so it is a decision rather than a gap.
+
+#### 11c. The IdP asserts, the request selects, the gateway intersects (amended 2026-08-16)
+
+§11b assumed the provider IdP would mint `mcp_grant = {id, tenant, scopes, exp}` given the
+target tenant and grant class. Both halves were built against that assumption and verified
+against a test double. **The assumption was wrong, and the double could not have caught it**:
+it hardcoded the tenant and scopes, so it agreed with the code because both were written from
+the same belief. The gap is at the protocol level, where no mutation of our own code reaches.
+This is the same lesson as `MemoryGrantStore` in the notes below, one layer further out.
+
+**What was measured (2026-08-16).** Full authorization-code + PKCE flows against two current
+IdPs, decoding real tokens, with a genuine step-up flow and a real second factor:
+
+- **The step-up request never carried the tenant or the grant class**, because the mechanisms
+  for doing so are narrower than assumed. A custom authorization parameter never reaches a
+  mapper. The OIDC Core §5.5 `claims` parameter is worse than useless here: on the product
+  tested its mapper is id_token-only, string-only, and **echoes the client's own value back** —
+  it asserts nothing. On the other product, claim mappings run at the **token** endpoint, by
+  which time the authorization request no longer exists.
+- **The requested `scope` is the only viable carrier.** It survives to issuance, it lands in
+  both tokens, and an unregistered scope is refused at the authorization endpoint rather than
+  dropped — the fail-closed behaviour this project requires everywhere else.
+- **But a scope selects a tenant; it does not authorize one.** A user with no entitlement to a
+  tenant requested that tenant's scope and received the claim. Making the IdP intersect
+  *requested* against *permitted* requires scripting or dynamic-scope features that are
+  preview or experimental — precisely the "configured in an IdP admin console" dependency §11
+  rejected, now with the added cost of running unsupported features.
+
+**Decision: split the claim by who can be trusted to say it, and intersect in the gateway.**
+
+| Who says it | Claims | Why it can be trusted |
+|---|---|---|
+| The IdP asserts | `acr`, `auth_time`, `mcp_allowed_tenants` | Derived from the authentication event and the directory. The client cannot influence any of them. |
+| The request selects | `mcp_grant.tenant`, and the grant class | Chosen by the BFF, therefore **not** trusted on its own. |
+| The gateway intersects | `mcp_grant.tenant ∈ mcp_allowed_tenants` | The security bound, enforced in this codebase against a claim the client cannot forge. |
+
+`mcp_allowed_tenants` is a directory attribute on the provider operator — the estate they may
+act on at all. It is not a grant and confers nothing by itself; §8's act-on-tenant window,
+the justification, the single-use consumption record and the absolute lifetime all still
+apply on top of it.
+
+**The intersection belongs to the gateway, not the BFF.** The BFF chooses the scope, so a
+compromised BFF asking for a tenant its operator may not touch is exactly the case this must
+catch — a check in the BFF would be the attacker validating their own request. Both claims
+arrive in the **access token** the gateway already receives as a bearer, so it can perform the
+intersection unaided, with no new call and no new trust relationship. This keeps §11's
+central property: the bound lives in code this project's suite can test.
+
+**This is a smaller claim than §11b made, and a more honest one.** The IdP is no longer
+described as minting a grant; it attests to an authentication event and an entitlement, which
+is what an IdP is actually authoritative for. Everything that makes the result a *grant* —
+scope mapping, lifetime, single use, audit — was already gateway-side and stays there.
+
+##### Consequences for the three constraints
+
+- **Lifetime is unchanged and now unavoidable.** The claim carries no expiry at all, so there
+  is nothing to echo. The gateway computes the deadline from `auth_time` against its own clock
+  and caps it at the §8 ceiling for the grant class.
+- **Verifying `acr` is now the *only* freshness protection, and must be treated as such.**
+  A client-supplied `max_age=0` was measured to be **inert** once the IdP binds a step-up flow
+  with its own re-authentication age: the flow's configuration wins and no re-prompt occurs.
+  Sending `max_age=0` is still correct and stays, but it is a request, not a guarantee — the
+  guarantee is the issued `acr` plus `auth_time` freshness. The IdP-side configuration that
+  actually forces a fresh step-up is a deployment requirement, documented with the runbook,
+  not something the gateway can compel.
+- **Revocation is unchanged** — bounded by the window, closed after one use for
+  `provider:credentials`.
+
+##### Revised requirement note, product-agnostically
+
+1. Recognise a step-up authentication context and **enforce** it, emitting the achieved
+   context as `acr` in the access token. A product that accepts `acr_values` and issues
+   without enforcing it is not usable as the provider IdP.
+2. Emit `auth_time` in the access token.
+3. Emit the operator's tenant entitlement as a claim derived from the directory, not from the
+   request.
+4. Allow the request to select a tenant and grant class through requested scopes, and **refuse
+   an unrecognised scope** rather than dropping it.
+5. Emit a token identifier unique per issuance, to key the single-use consumption record.
+6. Set an audience the gateway can check — the default audience is typically not the gateway.
+
+Point 1 is the discriminating requirement: of the two products measured, only one satisfies it.
 
 ## Implementation notes — gateway-side multi-issuer (2026-08-14)
 

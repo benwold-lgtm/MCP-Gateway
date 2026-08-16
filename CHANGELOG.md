@@ -49,6 +49,12 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   {"id": "g-7f2", "tenant": "acme", "scopes": ["tools:call"], "exp": 1755200000}
   ```
 
+  > **Amended before release — [ADR-0013 §11c](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md).**
+  > Measurement against two real IdPs showed none will mint this claim: a requested scope can
+  > *select* a tenant but does not *authorize* one. The shape above is what the code checks
+  > today; it is changing so the IdP asserts the operator's tenant entitlement and the gateway
+  > intersects it against the requested tenant. Not yet reflected in the code below.
+
   New config: `gateway.tenant_id` (deployment-level — one gateway, one tenant), plus
   per-issuer `step_up_acr` and `grant_claim`. A provider-plane issuer with no
   `gateway.tenant_id` is **refused at startup**; nothing else changes for existing
