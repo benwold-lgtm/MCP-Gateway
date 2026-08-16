@@ -126,6 +126,21 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   token identifier is **withdrawn** — nothing needs it now. Consumption records written by an
   earlier build are orphaned and expire on their own TTL.
 
+- **Embedded mode no longer leaks an MCP session→owner entry per abandoned session.**
+  Distributed mode was already safe: `SessionRouter` pipelines `hset` with `expire`, so an
+  abandoned session costs one Redis key for at most 24 h. Embedded mode kept the same fact in
+  a plain dict, written on `initialize` and removed only on an explicit `DELETE` — nothing
+  reclaimed it, so every crash, timeout or restart between the two leaked an entry for the
+  life of the process.
+
+  Invisible while the only MCP clients were long-lived agents that tear their own sessions
+  down. It stops being invisible for a caller that opens a session per operation, which is
+  what a console tool-invocation route does. `ExpiringOwners` now backs the embedded map,
+  using **the same TTL constant** as the distributed side so the two cannot drift into
+  different definitions of an abandoned session. Explicit teardown is unchanged and still
+  immediate.
+
+
 - **A failed JWKS refresh now names the issuer and the error type.** Several httpx timeout
   exceptions stringify to the empty string, so the most common IdP misconfiguration there
   is — the JWKS host unreachable because a port is blocked by a NetworkPolicy or firewall —

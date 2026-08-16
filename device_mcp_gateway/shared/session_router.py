@@ -35,7 +35,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from device_mcp_gateway.shared.keys import KEYS
 
-_SESSION_TTL = 86_400  # 24 h — refreshed periodically while the stream is active
+SESSION_TTL = 86_400  # 24 h — refreshed periodically while the stream is active
 _REFRESH_THROTTLE = 60.0  # min seconds between TTL refreshes on a busy stream
 # Cap a session's buffered results so a client that stops reading can't grow the
 # stream without bound. Approximate trimming keeps XADD O(1).
@@ -146,7 +146,7 @@ class SessionRouter:
         session_id: str,
         hostname: str,
         gateway_id: str,
-        ttl: int = _SESSION_TTL,
+        ttl: int = SESSION_TTL,
         owner: str | None = None,
         extra: dict[str, str] | None = None,
     ) -> None:
@@ -185,7 +185,7 @@ class SessionRouter:
         # check callers run on the "owner" field.
         return {_decode(k): _decode(v) for k, v in h.items()}
 
-    async def refresh(self, session_id: str, ttl: int = _SESSION_TTL) -> None:
+    async def refresh(self, session_id: str, ttl: int = SESSION_TTL) -> None:
         # Keep the session hash, its results stream, and (for a fleet session) its
         # tools lookup table on the same TTL so none outlives the others. EXPIRE
         # on a key that doesn't exist (e.g. fleet_tools for a per-device session)
@@ -204,7 +204,7 @@ class SessionRouter:
         await pipe.execute()
         logger.debug(f"Session deleted: session_id={session_id}")
 
-    async def set_fleet_tools(self, session_id: str, tools: dict[str, dict], ttl: int = _SESSION_TTL) -> None:
+    async def set_fleet_tools(self, session_id: str, tools: dict[str, dict], ttl: int = SESSION_TTL) -> None:
         """Persist a fleet session's display-name -> tool-entry lookup table.
 
         Each entry carries ``hostname``/``real_name`` (for ``tools/call`` dispatch)
@@ -256,7 +256,7 @@ class SessionRouter:
                 # per message (RC-3). This runs BEFORE the empty-response check: the
                 # session's lease should track how long the client has held the stream
                 # open, not how much traffic crossed it. With the check after, an idle
-                # session never renewed and its key expired at _SESSION_TTL under a
+                # session never renewed and its key expired at SESSION_TTL under a
                 # stream the client still had open — the next POST then got a 404 for a
                 # session that was, from the client's side, plainly alive.
                 if throttle.ready(time.monotonic()):
@@ -356,5 +356,5 @@ class SessionRouter:
         key = _results_key(session_id)
         pipe = self._r.pipeline()
         pipe.xadd(key, {"data": json.dumps(result)}, maxlen=_RESULTS_MAXLEN, approximate=True)
-        pipe.expire(key, _SESSION_TTL)
+        pipe.expire(key, SESSION_TTL)
         await pipe.execute()

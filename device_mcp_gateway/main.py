@@ -59,6 +59,7 @@ from device_mcp_gateway.rbac import authenticate_request, build_authenticator, w
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import MemoryRegistryBackend, RedisRegistryBackend
+from device_mcp_gateway.shared.session_owners import ExpiringOwners
 
 
 class _BodyTooLarge(Exception):
@@ -254,8 +255,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.bg_tasks = set()
     # Embedded-mode session→owner map for principal↔session binding (F-37). In
     # distributed mode the owner lives on the Redis session hash instead, so the
-    # binding survives across gateway replicas.
-    _app.state.session_owners = {}
+    # binding survives across gateway replicas — and carries a TTL there, which is why
+    # this one expires too: a client that opens a session per operation orphans one on
+    # every crash, and a plain dict would never give the entry back.
+    _app.state.session_owners = ExpiringOwners()
     # Embedded-mode fleet sessions: session_id -> SseTransport. Distributed mode
     # persists fleet session state in Redis instead of this in-process dict.
     _app.state.fleet_transports = {}

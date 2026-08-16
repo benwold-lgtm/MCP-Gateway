@@ -261,7 +261,7 @@ async def test_an_idle_stream_still_renews_its_session_lease(monkeypatch):
     The refresh used to sit *after* the ``if not resp: continue`` that handles an elapsed
     XREAD block, so it was unreachable on a stream carrying no results. A quiet session —
     an MCP client connected and waiting, which is the steady state — expired at
-    _SESSION_TTL under a stream it still had open, and its next POST got a 404 for a
+    SESSION_TTL under a stream it still had open, and its next POST got a 404 for a
     session that was, from the client's side, plainly alive.
     """
     from device_mcp_gateway.shared import session_router as sr
