@@ -26,6 +26,7 @@ register were reconstructed from the codebase, the evaluation findings register,
 | [0013](0013-two-plane-tenancy-and-the-provider-plane.md) | Two-plane tenancy — isolated tenant stacks, and a provider plane above them | Accepted |
 | [0014](0014-tenant-namespace-naming-and-network-isolation.md) | Tenant namespace naming (pseudonymous, deterministic) + default-deny network isolation between tenants | Accepted |
 | [0015](0015-endpoint-fingerprinting.md) | Endpoint fingerprinting — pin TLS SPKI + declared identity, warn on change, opt-in fail-closed | Accepted |
+| [0016](0016-reaching-many-tenant-gateways.md) | Reaching many tenant gateways — routing, not fan-out; provisioning-written registry; single-tenant and estate consoles are separate deployments | Proposed |
 
 When you add an ADR: copy the template, take the next number, set status `Proposed`, and
 add a row here. Flip to `Accepted` when merged.
