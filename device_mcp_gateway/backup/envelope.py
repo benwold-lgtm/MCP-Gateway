@@ -38,6 +38,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -90,15 +91,26 @@ class Argon2Params:
             salt=os.urandom(_SALT_BYTES),
         )
 
-    def to_envelope(self, *, passphrase_min_length: int) -> dict[str, Any]:
-        return {
+    def to_envelope(self, *, passphrase_source: str, passphrase_min_length: int | None = None) -> dict[str, Any]:
+        """Describe the derivation. ``passphrase_min_length`` is written **only** for a
+        supplied passphrase.
+
+        It records the floor that was enforced, which is a fact about a *caller's* choice. A
+        generated passphrase never faced that floor, so emitting the number there would state
+        something untrue about the archive — the field would mean two different things
+        depending on how the archive was made, and a reader could not tell which.
+        """
+        kdf: dict[str, Any] = {
             "algorithm": "argon2id",
             "memory_cost_kib": self.memory_cost_kib,
             "iterations": self.iterations,
             "lanes": self.lanes,
             "salt": base64.b64encode(self.salt).decode(),
-            "passphrase_min_length": passphrase_min_length,
+            "passphrase_source": passphrase_source,
         }
+        if passphrase_source == PASSPHRASE_SUPPLIED and passphrase_min_length is not None:
+            kdf["passphrase_min_length"] = passphrase_min_length
+        return kdf
 
     @classmethod
     def from_envelope(cls, kdf: dict[str, Any]) -> "Argon2Params":
@@ -137,8 +149,39 @@ def fernet_for_passphrase(passphrase: str, params: Argon2Params) -> Any:
     return Fernet(base64.urlsafe_b64encode(derived))
 
 
+#: How a portable archive's passphrase came to be. Recorded in the envelope because the two
+#: cases have genuinely different security properties, and a reader that cannot tell them
+#: apart cannot judge the archive it is holding.
+PASSPHRASE_SUPPLIED = "supplied"
+PASSPHRASE_GENERATED = "generated"
+
+#: 32 bytes ⇒ 256 bits of entropy, ~43 URL-safe characters. Far above any floor a human
+#: would meet: the floor exists because people choose weak passphrases, and this is the
+#: change that stops them having to choose at all.
+_GENERATED_PASSPHRASE_BYTES = 32
+
+
+def generate_passphrase() -> str:
+    """Mint a portable-export passphrase server-side (ADR-0011).
+
+    The reason this exists: a caller-supplied passphrase is typed by a human, travels in a
+    request body, and is only as strong as the floor. A generated one is none of those —
+    it is never request input, so it cannot be logged by anything on the way *in*, and its
+    strength does not depend on who asked.
+
+    It is returned to the caller exactly once, alongside the archive, and stored nowhere. An
+    archive whose passphrase was not kept is unrecoverable by design; that is the same
+    property the ciphertext archive has with respect to ``MCP_SECRET_KEY``.
+    """
+    return secrets.token_urlsafe(_GENERATED_PASSPHRASE_BYTES)
+
+
 def check_passphrase(passphrase: str | None, *, minimum: int) -> str:
-    """Enforce the passphrase floor at export. Raises :class:`PassphraseTooWeak`."""
+    """Enforce the passphrase floor on a **caller-supplied** passphrase.
+
+    Still enforced, and still strict: supplying a weak passphrase is now a choice rather than
+    the only option, which makes it less forgivable rather than more.
+    """
     if not passphrase:
         raise PassphraseTooWeak("a portable export requires a passphrase")
     if len(passphrase) < minimum:

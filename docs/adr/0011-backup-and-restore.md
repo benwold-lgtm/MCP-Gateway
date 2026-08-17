@@ -46,7 +46,7 @@ gated by **three scopes**, with a **fail-closed preflight** on every restore.
 | Kind | Credentials | Scope required | Job it does |
 |---|---|---|---|
 | **Ciphertext** (default) | Left encrypted exactly as stored | `backup:read` | Routine/scheduled backup, restore into the same stack or any stack sharing `MCP_SECRET_KEY` |
-| **Portable** | Decrypted, then re-encrypted to a caller-supplied passphrase | `backup:read` **and** `backup:export-portable` | Migration to a stack with a different key; disaster recovery when the key itself is lost |
+| **Portable** | Decrypted, then re-encrypted to a **server-generated** passphrase (a caller may still supply one) | `backup:read` **and** `backup:export-portable` | Migration to a stack with a different key; disaster recovery when the key itself is lost |
 
 **An archive never contains `MCP_SECRET_KEY`.** A ciphertext archive is worthless to
 someone who steals only the archive — that is the point of the default. A portable archive
@@ -60,7 +60,8 @@ own scope, is never the default, and is audited as the significant event it is.
   assumed by the reader. Raising the cost later must not make every existing archive
   unreadable.
 - **A random salt per archive**, in the envelope alongside the parameters.
-- A **passphrase-strength floor** enforced at export, also recorded in the envelope.
+- A **passphrase-strength floor** enforced at export on a *supplied* passphrase, and
+  recorded in the envelope only in that case — see the amendment below.
 
 ### 3. Restore is fail-closed, and the preflight is a gate rather than a documented assumption
 
@@ -245,3 +246,34 @@ and the price of that decision rather than a defect in it.
 - **A documented "check your key first" assumption instead of a preflight:** rejected on
   review. The failure it prevents is silent and occurs at the worst possible moment; a
   paragraph in a runbook is not a control.
+
+---
+
+## Amendment (2026-08-17) — the passphrase is generated, not typed
+
+**Change:** omitting the passphrase on a portable export no longer fails. The gateway mints
+one (256 bits, `secrets.token_urlsafe(32)`) and returns it **once**, in the
+`X-Backup-Passphrase` response header. Supplying one still works and is still held to the
+floor.
+
+**Why.** A caller-supplied passphrase is typed by a human, arrives as request input, and is
+only as strong as the floor. All three are avoidable. A generated one is never request
+input, so nothing on the way *in* can log it; its strength does not depend on who asked;
+and there is no weak-choice path left to take by accident. The floor stays for supplied
+passphrases — removing the need to choose does not make a bad choice acceptable.
+
+**Why a header rather than a wrapped body.** Returning `{archive, passphrase}` reads more
+naturally and is a trap: any caller saving the body to a file would write the passphrase
+*inside the archive it protects*, silently, and produce something `restore` rejects as well.
+The body therefore stays a bare archive — byte for byte what every existing client already
+expects — and the secret goes somewhere a file-writing caller cannot accidentally persist.
+It must never be logged; anything proxying this inherits that obligation.
+
+**Envelope.** `kdf.passphrase_source` is now always written (`supplied` | `generated`).
+`kdf.passphrase_min_length` is written **only** for a supplied passphrase: it records a floor
+enforced against a caller's choice, and a minted passphrase never faced one. Emitting it in
+both cases would make the field mean two different things with no way to tell which.
+
+**Consequence, accepted.** An archive whose minted passphrase was not captured is
+unrecoverable. That is the same property a ciphertext archive already has with respect to
+`MCP_SECRET_KEY`, and it is the cost of the secret existing in exactly one place.

@@ -93,7 +93,8 @@ async def _archive(registry, codec, **over):
         mode="embedded",
     )
     kwargs.update(over)
-    return await build_archive(**kwargs)
+    # Most tests care only about the archive. The minted passphrase has its own tests below.
+    return (await build_archive(**kwargs)).archive
 
 
 # --- Ciphertext archives ----------------------------------------------------
@@ -215,11 +216,109 @@ async def test_the_envelope_records_the_parameters_actually_used():
 
 @pytest.mark.asyncio
 async def test_a_passphrase_below_the_floor_is_refused():
+    """Still strict for a *supplied* passphrase. ADR-0011 removed the need to choose one; it
+    did not make a weak choice acceptable — if anything it is now less forgivable."""
     codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
     with pytest.raises(PassphraseTooWeak):
         await _archive(_FakeRegistry([_device()]), codec, kind="portable", passphrase="short")
-    with pytest.raises(PassphraseTooWeak):
-        await _archive(_FakeRegistry([_device()]), codec, kind="portable", passphrase=None)
+
+
+# --- ADR-0011: the passphrase is generated server-side -----------------------
+
+
+@pytest.mark.asyncio
+async def test_omitting_the_passphrase_mints_one_instead_of_refusing():
+    """The behaviour change. Absence used to be an error; it is now a request to mint.
+
+    The point is not convenience. A caller-supplied passphrase is typed by a human, travels
+    in a request body, and is only as strong as the floor — a generated one is none of those.
+    """
+    codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
+    result = await build_archive(
+        registry=_FakeRegistry([_device()]),
+        codec=codec,
+        config={"backup": {**CHEAP_KDF, "passphrase_min_length": 16}},
+        gateway_version="test",
+        mode="embedded",
+        kind="portable",
+    )
+    assert result.passphrase, "an archive whose passphrase is never revealed cannot be opened"
+    assert len(result.passphrase) >= 32
+    assert result.archive["kdf"]["passphrase_source"] == "generated"
+
+
+@pytest.mark.asyncio
+async def test_the_minted_passphrase_actually_opens_the_archive():
+    """The assertion that makes the one above worth having. A generated secret that does not
+    decrypt what it was generated for would produce an archive nobody can ever open — and
+    every other test here would still pass."""
+    from device_mcp_gateway.backup.envelope import Argon2Params, fernet_for_passphrase
+
+    codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
+    result = await build_archive(
+        registry=_FakeRegistry([_device()]),
+        codec=codec,
+        config={"backup": {**CHEAP_KDF, "passphrase_min_length": 16}},
+        gateway_version="test",
+        mode="embedded",
+        kind="portable",
+    )
+    opener = fernet_for_passphrase(result.passphrase, Argon2Params.from_envelope(result.archive["kdf"]))
+    canary = opener.decrypt(result.archive["canary"].encode())
+    assert canary == CANARY_PLAINTEXT
+
+
+@pytest.mark.asyncio
+async def test_a_supplied_passphrase_is_never_echoed_back():
+    """The caller already has it. Repeating a secret only multiplies the places it can be
+    captured — logs, proxies, a UI that renders whatever it is handed."""
+    codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
+    result = await build_archive(
+        registry=_FakeRegistry([_device()]),
+        codec=codec,
+        config={"backup": {**CHEAP_KDF, "passphrase_min_length": 16}},
+        gateway_version="test",
+        mode="embedded",
+        kind="portable",
+        passphrase="a-perfectly-long-passphrase",
+    )
+    assert result.passphrase is None
+    assert result.archive["kdf"]["passphrase_source"] == "supplied"
+
+
+@pytest.mark.asyncio
+async def test_the_envelope_does_not_claim_a_floor_that_never_applied():
+    """`passphrase_min_length` records a floor enforced against a caller's choice. A minted
+    passphrase never faced one, so writing the number there would state something untrue —
+    the field would mean two different things and a reader could not tell which."""
+    codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
+    minted = await build_archive(
+        registry=_FakeRegistry([_device()]),
+        codec=codec,
+        config={"backup": {**CHEAP_KDF, "passphrase_min_length": 16}},
+        gateway_version="test",
+        mode="embedded",
+        kind="portable",
+    )
+    assert "passphrase_min_length" not in minted.archive["kdf"]
+
+
+@pytest.mark.asyncio
+async def test_the_passphrase_is_never_written_into_the_archive_it_protects():
+    """The failure this design exists to prevent. An archive carrying its own passphrase is
+    encrypted in name only, and it would happen silently."""
+    import json as _json
+
+    codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
+    result = await build_archive(
+        registry=_FakeRegistry([_device()]),
+        codec=codec,
+        config={"backup": {**CHEAP_KDF, "passphrase_min_length": 16}},
+        gateway_version="test",
+        mode="embedded",
+        kind="portable",
+    )
+    assert result.passphrase not in _json.dumps(result.archive)
 
 
 # --- The canary -------------------------------------------------------------
@@ -535,3 +634,78 @@ def test_the_archive_does_not_carry_runtime_measurements(monkeypatch):
     record = client.get("/v1/admin/backup", headers=_auth()).json()["devices"][0]
     for field in ("reachable", "last_check", "pod_active", "worker_id", "spec_hash"):
         assert field not in record, f"{field} is a measurement and must not be restored"
+
+
+# --- ADR-0011 over HTTP: where the minted passphrase is delivered -------------
+
+
+def test_a_portable_export_over_http_mints_and_reveals_a_passphrase(monkeypatch):
+    """End to end through the route, because the delivery channel is the design decision."""
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    resp = client.post("/v1/admin/backup", headers=_auth(), json={"kind": "portable"})
+    assert resp.status_code == 200
+    minted = resp.headers.get("X-Backup-Passphrase")
+    assert minted and len(minted) >= 32
+
+
+def test_the_response_body_is_the_archive_and_nothing_else(monkeypatch):
+    """The trap this shape avoids. Wrapping the response as `{archive, passphrase}` reads
+    more naturally and would mean any caller saving the body to a file writes the passphrase
+    *inside the archive it protects* — silently, and producing something restore rejects.
+
+    So: the body stays a bare archive, byte for byte usable, and the secret is not in it.
+    """
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    resp = client.post("/v1/admin/backup", headers=_auth(), json={"kind": "portable"})
+    body = resp.json()
+    assert "archive" not in body  # not wrapped
+    assert {"kind", "kdf", "devices", "canary"} <= set(body)
+    assert resp.headers["X-Backup-Passphrase"] not in resp.text
+
+
+def test_supplying_a_passphrase_returns_no_header(monkeypatch):
+    """Nothing was minted, so there is nothing to reveal. Echoing the caller's own secret
+    back would only add a place for it to be captured."""
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    resp = client.post("/v1/admin/backup", headers=_auth(), json={"kind": "portable", "passphrase": "q" * 20})
+    assert resp.status_code == 200
+    assert "X-Backup-Passphrase" not in resp.headers
+
+
+def test_a_ciphertext_export_never_mints_a_passphrase(monkeypatch):
+    """It is sealed under MCP_SECRET_KEY and has no passphrase at all. A header here would
+    imply an opener that does not exist."""
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    resp = client.get("/v1/admin/backup", headers=_auth())
+    assert resp.status_code == 200
+    assert "X-Backup-Passphrase" not in resp.headers
+
+
+def test_the_audit_records_that_one_was_minted_but_never_the_value(monkeypatch):
+    """A responder reconstructing who could open which archive needs the first fact and must
+    not be handed the second."""
+    from loguru import logger
+
+    captured: list[dict] = []
+
+    def _sink(message):
+        rec = message.record
+        if rec["extra"].get("event") == "audit":
+            captured.append(rec["extra"])
+
+    # The client first: `create_app` reconfigures logging and would drop a sink added before
+    # it, leaving this test asserting against an empty list — passing for the wrong reason.
+    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    sink_id = logger.add(_sink, level="INFO")
+    try:
+        resp = client.post("/v1/admin/backup", headers=_auth(), json={"kind": "portable"})
+        minted = resp.headers["X-Backup-Passphrase"]
+    finally:
+        logger.remove(sink_id)
+
+    assert captured, "no audit records captured — the assertions below would pass vacuously"
+
+    blob = json.dumps(captured, default=str)
+    assert '"passphrase_source": "generated"' in blob or "'passphrase_source': 'generated'" in blob
+    # The value itself must appear nowhere in the chain.
+    assert minted not in blob
