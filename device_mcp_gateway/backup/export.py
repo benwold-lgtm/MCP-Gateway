@@ -50,6 +50,7 @@ quietly downgraded.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
@@ -60,8 +61,11 @@ from device_mcp_gateway.backup.envelope import (
     KIND_CIPHERTEXT,
     KIND_PORTABLE,
     build_envelope,
+    PASSPHRASE_GENERATED,
+    PASSPHRASE_SUPPLIED,
     check_passphrase,
     fernet_for_passphrase,
+    generate_passphrase,
     seal_canary,
 )
 from device_mcp_gateway.shared.crypto import CredentialCodec
@@ -140,6 +144,21 @@ def credential_plaintext(blob: str | None, codec: CredentialCodec) -> str | None
         return blob
 
 
+@dataclass(frozen=True)
+class ExportResult:
+    """An archive, and the passphrase this call minted for it — if it minted one.
+
+    Two fields rather than one dict because they must never travel together into storage:
+    writing the passphrase into the archive would put the secret inside the thing it
+    protects. Keeping them separate at the type level makes that mistake awkward to make.
+    """
+
+    archive: dict[str, Any]
+    #: Present only for a portable export with no supplied passphrase. The caller's single
+    #: opportunity to capture it; it is stored nowhere and cannot be re-read.
+    passphrase: str | None = None
+
+
 async def build_archive(
     *,
     registry: Any,
@@ -150,14 +169,22 @@ async def build_archive(
     include_deadletters: bool = False,
     gateway_version: str,
     mode: str,
-) -> dict[str, Any]:
+) -> "ExportResult":
     """Collect the registry into a sealed archive.
+
+    Returns an :class:`ExportResult` rather than the archive alone, because a portable export
+    with no supplied passphrase **mints one**, and the caller gets exactly one chance to
+    receive it (ADR-0011). A function that generated a secret and returned only the thing it
+    protects would be handing back an archive nobody can ever open.
 
     Raises :class:`CiphertextExportUnavailable` when a ciphertext export has no key to
     encrypt with, and :class:`~device_mcp_gateway.backup.envelope.PassphraseTooWeak` when a
-    portable export's passphrase is below the configured floor.
+    *supplied* portable passphrase is below the configured floor.
     """
     backup_cfg = config.get("backup", {})
+    # Set only when this call minted a passphrase. A supplied one is never echoed back: the
+    # caller already has it, and repeating a secret multiplies the places it can be captured.
+    revealed: str | None = None
 
     if kind == KIND_CIPHERTEXT:
         if not codec.enabled:
@@ -170,7 +197,17 @@ async def build_archive(
         sealer: Any = codec
         kdf_envelope = None
     elif kind == KIND_PORTABLE:
-        passphrase = check_passphrase(passphrase, minimum=int(backup_cfg.get("passphrase_min_length", 16)))
+        floor = int(backup_cfg.get("passphrase_min_length", 16))
+        if passphrase:
+            passphrase = check_passphrase(passphrase, minimum=floor)
+            passphrase_source = PASSPHRASE_SUPPLIED
+        else:
+            # ADR-0011: absence is now a request to mint one, not an error. A scheduled caller
+            # that has always supplied a passphrase is unaffected; one that never could now
+            # gets a stronger secret than the floor would have accepted.
+            passphrase = generate_passphrase()
+            passphrase_source = PASSPHRASE_GENERATED
+            revealed = passphrase
         params = Argon2Params.generate(
             memory_cost_kib=int(backup_cfg.get("argon2_memory_cost_kib", 65536)),
             iterations=int(backup_cfg.get("argon2_iterations", 3)),
@@ -179,7 +216,8 @@ async def build_archive(
         # Derived once for the whole archive, not per credential.
         sealer = fernet_for_passphrase(passphrase, params)
         kdf_envelope = params.to_envelope(
-            passphrase_min_length=int(backup_cfg.get("passphrase_min_length", 16)),
+            passphrase_source=passphrase_source,
+            passphrase_min_length=floor,
         )
     else:
         raise BackupError(f"unknown archive kind {kind!r}")
@@ -236,7 +274,7 @@ async def build_archive(
         f"Backup archive built: kind={kind} devices={counts['devices']} "
         f"tool_changes={counts['tool_changes']} dead_letters={counts['dead_letters']}"
     )
-    return archive
+    return ExportResult(archive=archive, passphrase=revealed)
 
 
 def _seal(plaintext: str, sealer: Any) -> str:

@@ -198,13 +198,15 @@ async def test_preflight_opens_every_credential_not_just_the_first():
 
     codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
     other = CredentialCodec.from_secret(Fernet.generate_key().decode())
-    archive = await build_archive(
-        registry=_Reg(),
-        codec=codec,
-        config={"backup": CHEAP_KDF},
-        gateway_version="test",
-        mode="embedded",
-    )
+    archive = (
+        await build_archive(
+            registry=_Reg(),
+            codec=codec,
+            config={"backup": CHEAP_KDF},
+            gateway_version="test",
+            mode="embedded",
+        )
+    ).archive
     archive["devices"] = [
         {"hostname": "good", "base_url": "http://good.example.com", "auth_config": codec.encrypt("{}")},
         {"hostname": "bad", "base_url": "http://bad.example.com", "auth_config": other.encrypt("{}")},

@@ -19,6 +19,7 @@ Two routes for one operation, and the split is about where a secret is allowed t
 
 from __future__ import annotations
 
+from fastapi.responses import JSONResponse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from device_mcp_gateway import __version__
@@ -46,13 +47,18 @@ _EXPORT_LIMITS = [
 ]
 
 
+#: Where a *minted* passphrase is delivered. Single use in the sense that matters: it is
+#: generated per export, returned once, and stored nowhere on this side.
+PASSPHRASE_HEADER = "X-Backup-Passphrase"
+
+
 async def _export(
     request: Request,
     *,
     kind: str,
     passphrase: str | None,
     include_deadletters: bool,
-) -> dict:
+) -> JSONResponse:
     """Shared body of both routes: authorize the kind, build, audit."""
     if kind not in ARCHIVE_KINDS:
         raise HTTPException(status_code=400, detail=f"kind must be one of: {', '.join(ARCHIVE_KINDS)}")
@@ -79,7 +85,7 @@ async def _export(
 
     reg = request.app.state.registry
     try:
-        archive = await build_archive(
+        result = await build_archive(
             registry=reg,
             codec=request.app.state.codec,
             config=request.app.state.config,
@@ -101,6 +107,8 @@ async def _export(
         )
         raise HTTPException(status_code=409, detail=str(exc))
 
+    archive = result.archive
+
     # Audit every successful export, both kinds. A ciphertext export is a complete dump of
     # every credential in the stack; if previewing a restore is worth a record, this is.
     # The passphrase is never a field here.
@@ -112,8 +120,28 @@ async def _export(
         kind=kind,
         include_deadletters=include_deadletters,
         **{f"count_{k}": v for k, v in archive["counts"].items()},
+        # *That* one was minted is recorded; the passphrase itself never is. A responder
+        # reconstructing who could open which archive needs the first and must not have the
+        # second.
+        **({"passphrase_source": "generated"} if result.passphrase else {}),
     )
-    return archive
+
+    # The archive is the whole body — unchanged contract — and a minted passphrase rides in a
+    # header instead.
+    #
+    # This is the important shape decision in ADR-0011. Wrapping the response as
+    # `{archive, passphrase}` reads more naturally and is a trap: any caller that saves the
+    # body to a file then writes the passphrase *inside the archive it protects*, silently,
+    # and produces something `restore` will not accept either. A header keeps the body a
+    # valid archive for every existing client and puts the secret somewhere a file-writing
+    # caller cannot accidentally persist.
+    #
+    # It must never be logged. The gateway does not log response headers; anything that
+    # proxies this — the BFF included — inherits that obligation.
+    response = JSONResponse(content=archive)
+    if result.passphrase:
+        response.headers[PASSPHRASE_HEADER] = result.passphrase
+    return response
 
 
 def _action_for(kind: str) -> str:
