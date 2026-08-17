@@ -79,6 +79,26 @@ def test_admin_overview_aggregate():
     assert isinstance(data["devices"], list)
 
 
+def test_overview_publishes_when_a_reading_goes_stale():
+    """F-71. A consumer showing device health has to know when `reachable` stopped being a
+    measurement and became a memory. Publishing it here is the point: a UI that hardcoded a
+    threshold would be silently wrong on any deployment that tuned the poll interval — a
+    constant that looks like a measurement, which is the shape of several past defects.
+
+    Deliberately not driven by the circuit breaker: `BreakerState` is only readable in
+    embedded mode, so a fleet list cannot depend on it. Staleness works in both modes.
+    """
+    data = client.get("/v1/admin/overview").json()
+    stale_after = data["stale_after_seconds"]
+    assert stale_after is not None
+    # Three missed polls, not one — a single missed check is a blip, and calling healthy
+    # devices "unknown" on every hiccup trains operators to ignore the state.
+    interval = gw_main.app.state.config.get("registry", {}).get("health_check_interval", 30)
+    assert stale_after == interval * 3
+    # It must exceed the poll interval, or every device is stale between two healthy checks.
+    assert stale_after > interval
+
+
 def test_register_http_transport_returns_400():
     response = client.post(
         "/v1/devices",

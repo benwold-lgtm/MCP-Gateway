@@ -145,6 +145,18 @@ class OverviewResponse(BaseModel):
     mode: str
     counts: OverviewCounts
     devices: list[DeviceSummary]
+    #: After how many seconds without a successful check a device's `reachable` flag should
+    #: be treated as **unknown** rather than as a reading (F-71).
+    #:
+    #: Published because the alternative is every consumer inventing its own threshold, and
+    #: getting it silently wrong on any deployment that tuned `registry.health_check_interval`
+    #: — a hardcoded constant would *look* like a measurement while being a guess. Derived
+    #: here because this is the side that knows the poll interval.
+    #:
+    #: Note what this is **not**: circuit-breaker state. `BreakerState` is only readable in
+    #: embedded mode (the pod runs on a worker in distributed mode), so a fleet list cannot
+    #: be driven by it. Staleness works in both modes, which is why it is the discriminator.
+    stale_after_seconds: float | None = None
 
 
 class BreakerState(BaseModel):
