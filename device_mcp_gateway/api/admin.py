@@ -75,8 +75,13 @@ async def admin_overview(request: Request):
         mode = request.app.state.mode
         devices = await reg.list_devices()
         reachable_count = sum(1 for d in devices if d.reachable)
+        # Three missed polls before a reading is called stale: one missed check is a blip,
+        # and calling a healthy device "unknown" on every transient hiccup would train
+        # operators to ignore the state that exists to be noticed.
+        interval = float(request.app.state.config.get("registry", {}).get("health_check_interval", 30) or 30)
         body = {
             "mode": mode,
+            "stale_after_seconds": interval * 3,
             "counts": {
                 "total": len(devices),
                 "active_pods": sum(1 for d in devices if d.pod_active),
