@@ -10,121 +10,22 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
-### Added
-
-- **A tenant gateway can trust a second issuer — the provider IdP
-  ([ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) §6/§6a).**
-  `gateway.oidc.issuers` takes a list; each entry carries its own `audience`,
-  `group_roles`, JWKS cache and `plane`. The existing single-issuer config keeps working
-  untouched and lands on the tenant plane.
-
-  Three things are deliberate, because the obvious implementation of each is wrong in a way
-  that leaves no symptom:
-
-  - **The issuer is resolved first and the decode is pinned to it.** Accepting a *list* of
-    issuers over a merged key set — the natural reading of the PyJWT API — accepts a token
-    signed by issuer A's key while claiming `iss: B`. That is a complete impersonation
-    primitive: a tenant IdP operator mints themselves provider identity on their own
-    gateway. Each issuer also gets its own JWKS cache, because `kid` is issuer-chosen and
-    `key-1` is a plausible value at both.
-  - **`group_roles` is per issuer with no shared or fallback mapping.** Kept flat it is a
-    privilege-escalation primitive: a tenant's own IdP administrator creates a group named
-    whatever the provider mapping keys on, adds themselves, and is handed provider-level
-    scopes by their own gateway. An unmapped `(issuer, group)` pair now grants nothing.
-  - **`plane` binds issuer identity to an eligible scope set, server-side.** The provider
-    plane is capped at `devices:read` + `devices:write` + `metrics:read` — never
-    `tools:call` (invoking a tool actuates the customer's real hardware) and never any
-    `backup:*` scope (the provider holds `MCP_SECRET_KEY`, so a ciphertext archive is as
-    much a credential dump as a portable one). Exceeding it fails at startup, and the
-    ceiling is applied again at validation because config can be reloaded.
-
-- **Elevated grants: a provider issuer's scope ceiling can be raised for one request
-  ([ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md) §8/§11).** The
-  ceiling above is what makes provider access everyday debugging rather than standing
-  authority over a customer's hardware and credentials — which means it also blocks the two
-  operations that occasionally need to happen for real. Those now arrive as a **verifiable
-  claim on the token**, minted by the provider IdP after a step-up and checked here:
-
-  ```json
-  {"id": "g-7f2", "tenant": "acme", "scopes": ["tools:call"], "exp": 1755200000}
-  ```
-
-  Alongside it the token must carry the operator's **tenant entitlement**, which the IdP
-  derives from the directory rather than from the request:
-
-  ```json
-  {"mcp_allowed_tenants": ["acme", "globex"]}
-  ```
-
-  **A grant is honoured only where the two intersect** ([ADR-0013 §11c](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md)).
-  Measured against two real IdPs, a requested scope is granted to whoever asks for it — an
-  operator with no entitlement to a tenant requested that tenant's scope and received the
-  claim. So the grant claim's `tenant` is *selected* by whoever built the authorization
-  request, in practice the BFF, which is inside the threat model; it authorizes nothing on
-  its own. The intersection is enforced in the gateway rather than the BFF for exactly that
-  reason, and needs no new call: both claims arrive in the access token.
-
-  New per-issuer config: `entitlement_claim` (default `mcp_allowed_tenants`). A token with
-  **no usable entitlement claim has every grant refused** — "no entitlement stated" and
-  "entitled to everything" must never be the same thing, or an IdP that simply omits the
-  claim silently restores the unchecked behaviour.
-
-  New config: `gateway.tenant_id` (deployment-level — one gateway, one tenant), plus
-  per-issuer `step_up_acr` and `grant_claim`. A provider-plane issuer with no
-  `gateway.tenant_id` is **refused at startup**; nothing else changes for existing
-  deployments.
-
-  §11 chose a checked claim over a second issuer entry configured with a higher ceiling in an
-  IdP console, because a bound living in an admin console is untestable in this codebase. The
-  properties that argument buys, and that each fail *silently* when they regress — the token
-  still validates and the request still succeeds:
-
-  - **The window is the gateway's, anchored on `auth_time`.** A claim `exp` may only shorten
-    it, never lengthen it. The BFF *requests* the grant, so a hook that echoed a requested
-    expiry would let a compromised BFF mint itself a thirty-day credentials grant.
-  - **`acr` is verified in the issued token.** `acr_values` is a *request* parameter and an
-    IdP may decline the step-up and issue anyway — requesting is not achieving.
-  - **`backup:*` grants are single use** — one operation per *elevation*, consumed atomically
-    (`SET NX EX`) in this tenant's own Redis against the operator, the grant id and the
-    step-up time together (§11d), and consumption **fails closed**: a store that cannot record
-    the spend refuses the grant rather than degrading it to replayable. `tools:call` grants are replayable
-    inside a 900s absolute window, because §8's grant gates initiation and one debugging
-    session is several calls. A grant naming both takes the stricter of the two.
-  - **Embedded mode refuses every elevated grant**, having no shared store to consume against.
-  - **A grant on a tenant-plane issuer is ignored**, and the plane is consulted *before* the
-    scope union — otherwise a tenant `viewer` whose own IdP can be made to emit the claim
-    gains `tools:call` on their own stack.
-  - **A grant cannot rescue an unmapped group**, and **an invalid grant refuses the whole
-    token** rather than quietly serving the unelevated principal, which would surface as a
-    confusing 403 on some later route.
-
-  The gateway still never learns the provider scope vocabulary: the policy table is keyed on
-  *gateway* scopes, and `provider:invoke`/`provider:credentials` remain BFF concepts.
+> **The provider-plane work built here was superseded before it shipped, and is not in this
+> list.** [ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md)'s multi-issuer
+> trust and elevated grants were implemented, verified against real identity providers, and
+> then replaced in design by
+> [ADR-0017](docs/adr/0017-provider-authority-is-delegated.md)–[0021](docs/adr/0021-separate-console-applications.md),
+> which move authority over a tenant to that tenant. The code is still in `main` and is being
+> removed rather than released, so no version ever offered it — the entries are omitted instead
+> of being announced and then deprecated. See
+> [ADR-0016](docs/adr/0016-reaching-many-tenant-gateways.md) (Rejected) for why the direction
+> changed.
+>
+> Withdrawn on that basis: the second trusted issuer (`gateway.oidc.issuers`), elevated grant
+> claims with their entitlement intersection, the single-use consumption record, and the
+> `grant=<id>` audit field. The fixes and the change below are independent of it and stand.
 
 ### Fixed
-
-- **A `provider:credentials` grant is no longer spendable only once per deployment
-  ([ADR-0013 §11d](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md)).** Single use
-  was consumed against the grant claim's `id`. Every claim in the test suite was hand-built
-  and carried a distinct one; a real IdP does not. Keycloak's only stock way to emit
-  `mcp_grant.id` is a hardcoded claim mapper, which emits a **constant** — so the first
-  `backup:read` a deployment ever performed recorded that constant as spent and every later
-  elevation, each behind its own fresh step-up, was refused *"already been spent"*. Measured
-  end to end, not inferred: 200, then 401.
-
-  The mechanism was not too strict; it was enforcing a different property from the one §8
-  states. §8 is *one operation, re-entry by step-up*, so consumption now identifies the
-  **elevation** — subject, grant id and `auth_time`, hashed — rather than the label on the
-  claim. Two things inside that are the opposite of the obvious choice: the key uses
-  `auth_time` and **not `jti`**, because a refresh mints a new token id from the same
-  authentication event and would buy a second operation inside the window; and the operator's
-  subject is *in* the key, which takes no replay defence away (a replayed token carries its
-  victim's subject) while stopping the first operator to run a backup from locking out every
-  colleague.
-
-  No config change, and no action for operators. The IdP requirement to emit a per-issuance
-  token identifier is **withdrawn** — nothing needs it now. Consumption records written by an
-  earlier build are orphaned and expire on their own TTL.
 
 - **Embedded mode no longer leaks an MCP session→owner entry per abandoned session.**
   Distributed mode was already safe: `SessionRouter` pipelines `hset` with `expire`, so an
@@ -140,13 +41,12 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   different definitions of an abandoned session. Explicit teardown is unchanged and still
   immediate.
 
-
 - **A failed JWKS refresh now names the issuer and the error type.** Several httpx timeout
   exceptions stringify to the empty string, so the most common IdP misconfiguration there
   is — the JWKS host unreachable because a port is blocked by a NetworkPolicy or firewall —
   logged `OIDC JWKS refresh failed ...: ` with nothing after the colon. Meanwhile
   authentication *silently degrades* to static break-glass keys, so the blank line was the
-  only signal. With more than one issuer configured it was also unattributable.
+  only signal.
 
   Found by pointing a real gateway at an IdP listening on a port the shipped NetworkPolicy
   does not allow. Note for operators upgrading: the egress allowlist in
@@ -161,26 +61,18 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
   It survived the suite because every OIDC key in the shipped `config.yaml` is commented
   out, so the "shipped config validates clean" test never exercised one. Found by pointing a
-  real gateway at two real IdP realms; the regression test now validates an *enabled*
-  multi-issuer config rather than a commented-out example. `oidc` is declared as an opaque
-  mapping on purpose — its structure is validated by `OIDCConfig`, which fails hard at
-  startup, and a second warn-only schema would be a weaker duplicate that drifts.
+  real gateway at two real IdP realms. `oidc` is declared as an opaque mapping on purpose —
+  its structure is validated by `OIDCConfig`, which fails hard at startup, and a second
+  warn-only schema would be a weaker duplicate that drifts.
 
 ### Changed
 
-- **Audit records for a request made under an elevated grant carry `grant=<id>`.** Emitted
-  only when a grant was used, so every other record keeps the exact field set earlier releases
-  wrote and existing hash chains verify across the upgrade. Attached at the `audit_request`
-  chokepoint *and* at each transport's tool-dispatch record, since the `tools:call` class does
-  not pass through the former — and being replayable within its window, it is the class whose
-  records most need the id as a join key.
-
 - **The OIDC audit subject is now `oidc:{issuer}#{sub}`** (was `oidc:{sub}`). `sub` is
-  unique *within* an issuer, not globally — `admin` at the tenant IdP and `admin` at the
-  provider IdP are two different humans, and collapsing them puts both on one line of the
-  hash-chained audit with no symptom, because both requests succeed. **This affects
-  existing single-issuer deployments**: audit records written before the upgrade carry the
-  short form, and anything parsing the subject needs to accept both.
+  unique *within* an issuer, not globally — `admin` at one IdP and `admin` at another are two
+  different humans, and collapsing them puts both on one line of the hash-chained audit with
+  no symptom, because both requests succeed. **This affects existing deployments**: audit
+  records written before the upgrade carry the short form, and anything parsing the subject
+  needs to accept both.
 
 ## [0.3.3] - 2026-08-13
 
