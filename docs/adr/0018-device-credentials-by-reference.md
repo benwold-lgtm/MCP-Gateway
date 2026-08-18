@@ -202,6 +202,81 @@ on how many attempts are allowed:
 That combination targets the actual failure — applying something other than what was reviewed
 — where single-use only ever targeted the count.
 
+##### The digest commits to the whole request, by construction
+
+The rule is **not** "the archive plus `on_conflict` plus `include_deadletters`". It is:
+
+> The digest commits to the **entire canonicalized apply request**, minus only fields that are
+> purely informational and cannot affect what is applied. That exclusion list is **empty
+> today**, and adding to it requires a stated reason.
+
+The enumerated version is wrong for a reason worth recording, because it is a shape this
+repository has already been bitten by: **a list of fields is a dependency that must be
+remembered at a site that does not exist yet.** Whoever adds the next restore parameter has to
+also remember to add it to what the digest covers, and nothing fails if they don't — the same
+failure shape as a guard that must be attached per route rather than being structural. Binding
+to the request as a whole covers new parameters by construction, and the person adding one has
+to argue *out* rather than remember to argue *in*.
+
+The concrete case that proves the enumeration insufficient, and would equally have been missed
+by any list written before the parameter existed: a dry run under `on_conflict=skip` reports
+*"3 conflicts, nothing overwritten"*, a human reads that and approves, and the apply arrives
+with the same archive and `on_conflict=overwrite`. An archive-only digest calls that a match
+while performing a categorically more destructive act than the one reviewed.
+
+Two mechanical requirements follow:
+
+- **The gateway computes the digest over its own parsed, canonicalized representation**, at dry
+  run and again at apply — never over the client's bytes. Otherwise the client chooses the
+  canonicalization, and equality becomes a property of their serializer.
+- **Canonicalization is specified** — key ordering, numeric form, absent-versus-null — because
+  a digest whose inputs re-serialize differently is a correctness bug that presents as a
+  spurious refusal, and the fix under time pressure is always to weaken the check.
+
+##### Validation and execution are one call, with no validate endpoint
+
+The apply request carries the digest, and the gateway validates it and performs the write
+**inside that single synchronous request.** There is no separate validate step and no
+`POST /admin/restore/validate` to add later — a two-round-trip shape would open precisely the
+window this project has already lost twice, in the DNS-rebind race in the SSRF guard and in the
+stream-cursor ordering fix.
+
+There is a reason the check is structurally gap-free here rather than merely carefully
+sequenced, and it is worth stating: **the digest commits to the request, and the request cannot
+change during its own handling.** There is no external state for the validation to race
+against. That is a property of what was chosen to bind to, not of how carefully the handler is
+written — which is the distinction between the two earlier bugs and this.
+
+##### The digest binds the operation, not the target
+
+The digest guarantees the **requested operation** was not altered between review and execution.
+It does **not** guarantee the target registry was frozen, and it is not intended to.
+
+The case: a dry run reports device X will be skipped as a conflict; someone deletes X out of
+band; the apply now creates X instead of skipping it. The digest is byte-identical and the
+real-world outcome differs from the report the human read.
+
+**This is within what was approved.** `on_conflict` exists precisely to define bounded,
+acceptable behaviour under that divergence — an operator selecting `skip` has approved *"do not
+overwrite what is there"*, which is a rule about whatever is there at the time, not a prediction
+about a specific device. Any outcome the mode produces is inside the approval.
+
+Freezing the target was considered and is not merely undesirable but unworkable here: the health
+worker writes `reachable` and `last_check` for every device on every cycle, so a registry-wide
+version stamp would be stale before a human finished reading the report. A restore that refused
+on any concurrent registry change would refuse essentially always, and the pressure would then
+be to disable the check.
+
+So three distinct guarantees, which must not be conflated:
+
+| Question | Answered by |
+|---|---|
+| Is this the operation that was reviewed? | The digest |
+| Is the behaviour under divergence acceptable? | `on_conflict`, chosen by the operator |
+| What actually happened? | The apply's own per-device report, audited |
+
+The digest is not a promise about the world; it is a promise about the instruction.
+
 ##### Consequence: the consumption record has no members left
 
 With `backup:export-portable` removed, `backup:read` reduced to configuration, and
@@ -352,9 +427,9 @@ required otherwise would not describe the actual estate.
   credential to keep the fleet dispatching is the availability answer; refusing is the
   correctness one. Leaning refuse, since a rotated-away credential failing at the device is a
   worse diagnosis than an honest `ERR_SECRET_STORE_UNAVAILABLE`.
-- **What the restore plan digest commits to.** §6 requires an apply to name the dry run it was
-  previewed from; whether that digest covers the archive alone or also `on_conflict` and
-  `include_deadletters` decides whether changing a mode silently invalidates a preview or
-  silently does not. The second is the dangerous one.
+- **Whether a stale digest should report *what* changed.** §6 settles that a mismatched apply is
+  refused; telling the operator which field moved is better usability and is also a small
+  oracle over a request they already hold, so it is probably fine and is worth deciding rather
+  than defaulting.
 - **Whether the console should write to the secret store** where the backend allows it, or
   refuse on principle and keep registration a two-system operation.
