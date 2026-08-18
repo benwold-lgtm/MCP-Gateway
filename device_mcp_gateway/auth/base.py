@@ -31,8 +31,55 @@ class AuthMaterial:
     cookies: dict[str, str] = field(default_factory=dict)
 
 
+class CredentialNotBound(RuntimeError):
+    """A by-reference handler was used before its material was resolved (ADR-0018 §1).
+
+    Raised rather than sending an empty or placeholder credential upstream. A device that
+    authenticates with the string ``None`` fails at the upstream with a 401, which reads as
+    "wrong password" and sends the operator to check their secret store — when what actually
+    happened is that the gateway skipped a resolution step.
+    """
+
+
+def exclusive_secret(literal: Any, ref: Any, *, field: str) -> None:
+    """Enforce ADR-0018's migration rule: a secret is inline **or** by reference, never both.
+
+    Both is refused rather than resolved by precedence. A record carrying an inline value and
+    a reference has two answers to "what is this device's credential", and any precedence rule
+    makes the losing one invisible — so a reference that silently never took effect looks
+    exactly like one that did. Neither is refused for the same reason: it is a device that
+    cannot authenticate, and finding that out at registration beats finding out at dispatch.
+    """
+    if literal is not None and ref is not None:
+        raise ValueError(
+            f"{field} and {field}_ref are mutually exclusive (ADR-0018): a device holds its "
+            "secret inline or by reference, never both."
+        )
+    if literal is None and ref is None:
+        raise ValueError(f"one of {field} or {field}_ref is required")
+
+
 class AbstractAuth(ABC):
     """Base class for authentication handlers."""
+
+    #: The credential reference this handler resolves before use, or ``None`` when the
+    #: secret is inline. Read by the dispatch path; handlers that hold no secret leave it
+    #: ``None`` and are unaffected by ADR-0018.
+    credential_ref: str | None = None
+
+    async def bind(self, resolver: Any) -> None:
+        """Resolve this handler's reference into usable material for one dispatch.
+
+        No-op when the secret is inline. Implementations MUST NOT persist what they resolve:
+        the material lives for the request, which is the line ADR-0018 §1 draws between a
+        cache and a durable copy.
+
+        **This seam is for operator-provisioned secrets only** (ADR-0018 §1a). A credential the
+        gateway mints and rotates itself — an OAuth2 refresh token — has no external writer and
+        cannot be held by reference; it stays encrypted at rest. Do not extend this to one
+        without reading §1a, which explains why the boundary is where it is.
+        """
+        return None
 
     @abstractmethod
     async def get_headers(self) -> dict[str, str]:
