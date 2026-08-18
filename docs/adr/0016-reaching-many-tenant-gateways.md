@@ -1,10 +1,33 @@
 # ADR-0016: Reaching many tenant gateways from the provider console
 
-- **Status:** Proposed
+- **Status:** **Rejected** — superseded before acceptance by
+  [ADR-0017](0017-provider-authority-is-delegated.md) …
+  [ADR-0021](0021-separate-console-applications.md)
 - **Date:** 2026-08-17
 - **Builds on:** [ADR-0013](0013-two-plane-tenancy-and-the-provider-plane.md) §4/§5a/§6/§7,
   [ADR-0014](0014-tenant-namespace-naming-and-network-isolation.md) §1/§3/§4/§6,
   [ADR-0012](0012-federation-credential-model.md)
+
+> ## Why this was not accepted
+>
+> This ADR answers the question *"how does the provider console reach a customer's gateway?"*
+> correctly. The question turned out to be the wrong one.
+>
+> Writing it made the shape of the problem visible: the routing machinery, the entitlement
+> intersection it preserves, the ceiling it depends on and the second trusted issuer beneath
+> all of it exist to make it safe for the provider to reach into a tenant's stack holding a
+> credential. **ADR-0017 removes the reach instead**, and with it the reason to route.
+>
+> The record is kept rather than deleted because two of its rejected alternatives remain true
+> and would otherwise be re-derived by anyone who revisits this — deriving endpoints from the
+> ADR-0014 namespace pseudonym puts `K_ns` in a browser-facing component, and letting the IdP
+> assert endpoints turns an identity compromise into a credential redirection. Its finding
+> that ADR-0014 needs no change also survives, for the same reason: nothing here was ever
+> tenant-to-tenant.
+>
+> The one decision inside it that carries forward unchanged is **§1: this was never fan-out.**
+> Estate-wide reads belong on the metrics plane, and no successor ADR reopens that.
+
 
 ## Context
 
