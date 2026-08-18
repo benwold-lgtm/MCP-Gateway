@@ -109,7 +109,7 @@ ADR-0011 is not superseded wholesale, and the parts that survive are the parts t
 | Generated passphrase + `X-Backup-Passphrase` header | Removed |
 | `backup:export-portable` scope | Removed |
 | `provider:credentials` grant | Removed as a category — see §6 |
-| Single-use semantics for `backup:write` (restore) | **Survives**, on destructiveness rather than disclosure — §6 |
+| A gate on `backup:write` (restore) | **Survives**, on destructiveness rather than disclosure — but time-boxed, not single-use (§6) |
 
 ### 6. `provider:credentials` disappears as a category, and its mechanism must re-earn its place
 
@@ -134,15 +134,17 @@ deleting a tier feels like a loss.
 
 #### What that does and does not remove
 
-The tempting conclusion is that single-use goes with it, and that would be wrong. Look at what
-was actually in the class: `backup:read` and `backup:export-portable` — credential-bearing —
-but also **`backup:write`**, which is restore.
+The tempting conclusion is that every member goes with the category, and that is too fast. Look
+at what was actually in the class: `backup:read` and `backup:export-portable` —
+credential-bearing — but also **`backup:write`**, which is restore.
 
-Restore was single-use because it travelled in the credential class. It has an independent
-reason to be, and that reason survives §3 untouched: **restore overwrites a tenant's device
-registry.** Its risk is destructiveness, not disclosure. The single-use grant and the §11d
-consumption record are the right shape for "one operation, then re-authenticate" regardless of
-whether a secret was involved.
+Restore was gated because it travelled in the credential class. It has an independent reason to
+be gated, and that reason survives §3 untouched: **restore overwrites a tenant's device
+registry.** Its risk is destructiveness, not disclosure.
+
+But inheriting the credential class's *gate* along with its membership would be the same
+mistake in reverse. The reason survives; the mechanism has to be chosen for it, which is the
+subsection below.
 
 So the elevated taxonomy loses a tier and gains a clearer axis. It was implicitly
 **credential-bearing vs not**; it becomes **blast radius**:
@@ -150,12 +152,71 @@ So the elevated taxonomy loses a tier and gains a clearer axis. It was implicitl
 | | Grant | Duration | Why |
 |---|---|---|---|
 | Acts on one device, reversibly | `provider:invoke` | Time-boxed | ADR-0013 §5, unchanged |
-| Overwrites the registry | `backup:write` | **Single use** | Destructive, not credential-bearing |
+| Overwrites the registry | `backup:write` | **Time-boxed, repeatable** | Destructive, not credential-bearing — every call audited |
 | Reads configuration | `devices:read` / `backup:read` | Ordinary | Nothing elevated remains |
 
 That axis is the better one. It explains why restore is gated without appealing to a fact
 about restore that is no longer true, and it does not need a grant category to hold a single
 member.
+
+#### Restore is time-boxed and repeatable, not single-use
+
+Saying restore keeps its gate leaves the shape of that gate implicit, and the two candidates
+behave very differently. It is **time-boxed and repeatable** — the `provider:invoke` class —
+and not single-use.
+
+The reasoning single-use rested on does not transfer. Disclosure does not decay: once an
+archive has been read the harm is done and cannot be undone, so rationing reads is a real
+bound. A destructive write is different in kind — **accountability for it is fully discharged
+by recording each act, not by rationing how many times an operator may try.** Every restore
+call is already audited individually, with its `dry_run` flag, its `on_conflict` mode, its
+per-device counts and its fingerprint warnings. A second restore inside the window is a second
+audit record, not an unobserved one.
+
+And the legitimate workflow is iterative by design: dry run, read the report, adjust
+`on_conflict`, dry run again, then apply. ADR-0011 made the dry run default precisely to
+encourage that loop. Charging a fresh step-up for each step taxes the careful path and
+reduces blast radius by nothing.
+
+**The current implementation is worse than that argument suggests, and is the evidence for it.**
+Consumption is recorded during grant verification, so it fires on *any* request bearing the
+scope — and the dry run carries `backup:write` exactly as the apply does. The first dry run
+spends the elevation and the apply that follows is refused. The safe call burns the budget and
+the destructive one is blocked, which inverts the intent. That is not a tuning problem; it is
+what happens when a bound designed for reads is applied to a read/write pair.
+
+##### What replaces it is a better control
+
+Repeatable does not mean unbounded, and the useful bound is on **what** is applied rather than
+on how many attempts are allowed:
+
+- **An apply must reference the dry run it was previewed from.** The request carries the digest
+  of a plan the gateway produced, and the gateway refuses to apply if that plan no longer
+  matches the current inputs. Unlimited dry runs, and every destructive act bound to a plan a
+  human actually read.
+- This must be **enforced server-side.** The console already computes a preview signature and
+  marks a report stale when the inputs move, which is a good affordance and no bound at all —
+  it lives on the side of the boundary the operator controls.
+- The absolute window, the existing route rate limits, and per-call audit continue to apply.
+
+That combination targets the actual failure — applying something other than what was reviewed
+— where single-use only ever targeted the count.
+
+##### Consequence: the consumption record has no members left
+
+With `backup:export-portable` removed, `backup:read` reduced to configuration, and
+`backup:write` time-boxed, **nothing in the grant vocabulary is single-use.** The §11a
+consumption machinery — the store protocol, both implementations, and `_consumption_id` —
+becomes unreachable.
+
+ADR-0017 supersedes §11a anyway, so this is a convergence rather than a conflict: 0018 reaches
+the same deletion independently and earlier, which means it need not wait for 0017 to land.
+
+What must not be deleted is the *reasoning*. `_consumption_id` records a lesson bought against
+a real IdP — that keying on `jti` grants one spend per token refresh, and `auth_time` is the
+only value that changes exactly when a new step-up happens. The code goes; that stays here and
+in ADR-0013 §11a's record, because the next mechanism keyed to an authentication event will
+face the same choice.
 
 **This is the last moment to state it.** [ADR-0017](0017-provider-authority-is-delegated.md)
 moves grant issuance to the tenant's IdP, at which point this taxonomy is what the tenant's
@@ -236,6 +297,11 @@ copy — that line is §1 — but the TTL is now trading three things against ea
 - **Positive: the elevated-grant taxonomy loses a tier** and the axis that remains — blast
   radius — is the one that was doing the work all along (§6). One fewer concept to model in a
   tenant's IdP under ADR-0017.
+- **Positive: single-use leaves the vocabulary entirely**, taking the consumption store and its
+  Redis dependency with it (§6). The iterative dry-run loop ADR-0011 designed for becomes
+  reachable, which it currently is not.
+- **Negative: the plan digest is new machinery on the restore path** — produced by dry run,
+  carried by apply, validated server-side. It replaces a bound that was one boolean.
 - **Negative: a dispatch now depends on a secret store being reachable**, and that dependency is
   fleet-wide where the previous one was per-device. Mitigated by short-lived in-process caching
   with an explicit TTL — and the cache is a **performance** decision that must not become a
@@ -286,8 +352,9 @@ required otherwise would not describe the actual estate.
   credential to keep the fleet dispatching is the availability answer; refusing is the
   correctness one. Leaning refuse, since a rotated-away credential failing at the device is a
   worse diagnosis than an honest `ERR_SECRET_STORE_UNAVAILABLE`.
-- **Whether restore stays single-use once ADR-0017 lands.** §6 says its justification survives;
-  whether a tenant's own IdP should be asked to model a single-use grant for an operation the
-  tenant is performing on their own stack is a different question, and belongs to ADR-0017.
+- **What the restore plan digest commits to.** §6 requires an apply to name the dry run it was
+  previewed from; whether that digest covers the archive alone or also `on_conflict` and
+  `include_deadletters` decides whether changing a mode silently invalidates a preview or
+  silently does not. The second is the dangerous one.
 - **Whether the console should write to the secret store** where the backend allows it, or
   refuse on principle and keep registration a two-system operation.
