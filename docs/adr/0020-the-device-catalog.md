@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-08-17
 - **Answers:** D2 (does the provider console offer device writes?), open since ADR-0013.
-- **Prerequisite for:** [ADR-0017](0017-provider-authority-is-delegated.md) §1 — see §6.
+- **Prerequisite for:** [ADR-0017](0017-provider-authority-is-delegated.md) §1 — see §7.
 
 ## Context
 
@@ -35,6 +35,10 @@ A device type is a **template, not an instance**. It names no host, holds no cre
 belongs to no tenant. Curating one writes to provider-plane storage only — there is no code
 path from catalog curation into any tenant's registry, which is what makes this compatible
 with ADR-0017 rather than a way around it.
+
+The catalog holds a **second kind of entry** — a service the provider actually operates and
+offers to tenants, rather than a template for something the tenant owns. That is §6, and it
+is the only place the provider supplies a host.
 
 ### 2. Assignment is an offer; claiming is the tenant's act
 
@@ -81,7 +85,67 @@ own secret store at claim time.
 So a compromised catalog leaks the shape of an estate — which appliance models are in use —
 and nothing that opens any of them.
 
-### 6. Why this comes before ADR-0017 in the build order
+### 6. The provider may operate services and offer them, and the tenant reaches out
+
+A provider will want to **expose endpoints of their own** — an MCP server they run, an
+OpenAPI service they host, a normalised front end to something awkward — and make them
+available to tenants. Nothing in §1–§5 covers this: those entries are templates for hardware
+the tenant owns.
+
+The gateway already accommodates it without change. [ADR-0009](0009-mcp-passthrough.md)
+settled that *a remote MCP server is a device, not a second entity*, and an OpenAPI service is
+a device by construction. **A provider-operated endpoint is a device whose host happens to
+belong to the provider**, and it enters a tenant's fleet through the same claim in §2.
+
+So the catalog carries two kinds of entry:
+
+| | Host | Credential | Claimed by |
+|---|---|---|---|
+| **Device type** (§1) | Tenant supplies | Tenant supplies | Tenant |
+| **Provider-operated service** | Provider supplies | Provider mints, **per tenant** | Tenant |
+
+Five properties make the second kind safe, and none of them is optional:
+
+**The tenant still claims it.** It never appears in a tenant's fleet because the provider
+assigned it. Assignment is an offer; claiming is the tenant's act, exactly as in §2. A service
+that installed itself would be the provider writing into a tenant's registry, which is the
+thing ADR-0017 removes.
+
+**The credential is per tenant, always.** Never a shared secret. It is minted at claim time,
+recorded as a reference in the tenant's own secret store ([ADR-0018](0018-device-credentials-by-reference.md)),
+and revocable from either side. A shared credential would let one tenant present as another at
+the service, which is the failure this whole architecture is shaped to avoid.
+
+**The data flow is disclosed at the point of claiming.** Tool calls to this device leave the
+tenant's stack and reach the provider — arguments, results and all. The claim screen says so
+plainly, because a tenant enabling a provider-operated tool is making a data-residency
+decision and should be making it knowingly rather than discovering it later.
+
+**It is fingerprinted like any other device.** [ADR-0015](0015-endpoint-fingerprinting.md)
+applies unchanged, and the tenant pins the provider's endpoint. The tenant can therefore
+detect the provider's service changing identity underneath them — which is a control the
+tenant holds *over the provider*, and is exactly the right direction.
+
+**Egress is an ordinary allowlist entry.** ADR-0014 §3 already gives each tenant namespace an
+egress allowlist for device CIDRs and ports; a provider-operated service is one more entry in
+it. This is emphatically **not** an inter-tenant path and does not touch ADR-0014 §6 — traffic
+goes tenant → provider, never tenant → tenant.
+
+**The direction is what makes this consistent with ADR-0017 rather than a hole in it.**
+ADR-0017 removes the provider's reach *into* tenant stacks. This adds the tenant's reach *out*
+to a provider service, which is the safe direction: the tenant chooses it, the tenant can stop
+it, and a compromise of the provider service exposes the traffic tenants chose to send it —
+never their registries, their credentials or their other devices.
+
+One consequence has to be accepted openly. **A provider-operated service is a genuinely
+multi-tenant component in an architecture that otherwise refuses them** (ADR-0004), and it is
+a cross-tenant aggregation point by definition. It therefore carries obligations the tenant
+stacks do not: per-tenant authentication and authorization inside the service, no shared
+mutable state across tenants, and its own isolation review. A provider who cannot meet those
+should not operate shared services — the alternative is a per-tenant instance of the service,
+which is more expensive and is always available as the conservative option.
+
+### 7. Why this comes before ADR-0017 in the build order
 
 Once a provider cannot reach into a tenant's stack, the catalog is how they do their job.
 Building ADR-0017 first would leave a window in which the provider has lost the ability to
@@ -94,6 +158,9 @@ operational pressure.
   D2 was actually asking for.
 - **Positive: tenant onboarding stops requiring appliance expertise**, which is the ordinary
   product benefit and probably the one a customer notices.
+- **Positive: the provider gains a product surface** — services they operate become claimable
+  by every tenant without a bespoke integration each time, which is likely where the commercial
+  value of the catalog actually is.
 - **Positive: provider knowledge accumulates somewhere.** Fingerprint expectations, egress
   requirements and working auth shapes currently live in whoever set up the last one.
 - **Negative: new backend surface at every layer** — provider-plane storage, a curation API, an
@@ -102,6 +169,9 @@ operational pressure.
 - **Negative: a tenant in an estate loses the ability to register anything they like.** For
   some customers this is governance and for others it is a limitation; §3 accepts it, and the
   escape hatch is a conversation rather than a setting.
+- **Negative: a provider-operated service concentrates risk** the rest of the architecture
+  spreads. It is the one component where a single compromise touches many tenants, and §6's
+  obligations are the price of having it at all.
 - **Negative: catalog versioning is a migration problem in miniature** — N tenants on M
   versions of a device type, each needing an upgrade path. Deliberately accepted over the
   alternative in §4.
@@ -133,5 +203,8 @@ is a provider's typo changing every customer's fleet simultaneously.
   availability requirements.
 - **Whether assignment is per tenant or by group** (tier, region, contract). Per tenant is
   obviously correct and obviously tedious at scale.
+- **Whether a tenant can be required to keep a provider-operated service** — a monitoring
+  agent, say — or whether unclaiming is always the tenant's right. Leaning always theirs, since
+  the alternative is a device the tenant cannot remove, which contradicts §2.
 - **How an upgrade is offered** — notification, a console prompt, or a scheduled window — is a
   product question that interacts with §4's version pinning.

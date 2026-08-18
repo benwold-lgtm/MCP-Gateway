@@ -30,7 +30,7 @@ register were reconstructed from the codebase, the evaluation findings register,
 | [0017](0017-provider-authority-is-delegated.md) | Provider authority over a tenant is **delegated by that tenant**, never asserted by the provider — supersedes [0013](0013-two-plane-tenancy-and-the-provider-plane.md) §4/§5a/§6/§8/§11 | Proposed |
 | [0018](0018-device-credentials-by-reference.md) | Device credentials held **by reference**, never at rest in the gateway — supersedes most of [0011](0011-backup-and-restore.md) | Proposed |
 | [0019](0019-opaque-tenant-identity.md) | The tenant identifier is **opaque from birth** — supersedes [0014](0014-tenant-namespace-naming-and-network-isolation.md) §1 | Proposed |
-| [0020](0020-the-device-catalog.md) | The provider's write path is a **catalog**; tenants claim from it — answers D2 | Proposed |
+| [0020](0020-the-device-catalog.md) | The provider's write path is a **catalog**; tenants claim from it — device types *and* provider-operated services. Answers D2 | Proposed |
 | [0021](0021-separate-console-applications.md) | Provider and tenant consoles are **separate applications** — supersedes [0013](0013-two-plane-tenancy-and-the-provider-plane.md) §3 as a runtime property | Proposed |
 
 When you add an ADR: copy the template, take the next number, set status `Proposed`, and
