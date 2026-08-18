@@ -38,8 +38,12 @@ is a cross-tenant breach rather than a bug.
 ### 1. The tenant is the only source of authority over the tenant
 
 A provider operator reaches a tenant's data plane **only while that tenant has delegated
-access to them**, and the credential they present is minted by the **tenant's** identity
-provider, not the provider's.
+access to them**, and the credential they present is minted **on the tenant's side of the
+boundary** — by the tenant's own stack, or by the tenant's identity provider where it is
+capable — never by the provider's.
+
+*Which* of those mints it is a per-tenant deployment choice and is settled in §7. The invariant
+is the direction, not the mechanism.
 
 This inverts ADR-0013 §6. There, the provider asserted an identity that the tenant's gateway
 was configured to believe. Here, the tenant issues, and the provider presents what it was
@@ -131,6 +135,116 @@ The provider console becomes an estate **overview and catalog** tool (see
 tenant's data plane, they enter that tenant's console with the delegated credential — the same
 console that tenant's own staff use, showing the same audit, under the same hostname.
 
+### 7. The tenant's IdP is required to do nothing it may not be able to do
+
+§1 says the tenant issues. Read quickly, that sounds like a requirement on the tenant's
+identity provider — and if it were, this ADR would not be deployable. ADR-0013 §11b asked a
+provider's IdP to recognise a step-up context and inject a custom grant claim, and justified
+the ask on the grounds that *the provider controls that choice*. No equivalent justification
+exists here. A tenant on basic Google Workspace SSO, or any directory without an Actions or
+custom-claims surface, cannot be asked for it.
+
+Worse, the ask was already measured and already failed. §11c exists because **no product
+tested would mint that claim without custom code inside its issuance path** — and that was an
+IdP under the provider's full control. Carrying the same requirement across the boundary, to a
+directory nobody here owns, would not be a slightly harder version of a solved problem. It
+would be an unsolved one, made mandatory.
+
+#### The principle that resolves it
+
+> **The platform may require capability of software it ships. It may never require capability
+> of a directory it does not own.**
+
+ADR-0013 §11b broke this rule and got away with it because the provider was on both sides.
+Under §1 the tenant is on the other side, so the rule binds.
+
+#### What the tenant's IdP is actually needed for
+
+The two things §2 conflates are separable, and only one of them carries authority:
+
+- **The support grant is an object in the tenant's stack**, created through the tenant's
+  console, held in the tenant's registry, listed and revoked there. The gateway is both its
+  issuer and its verifier — one trust domain, no federation.
+- **The tenant's IdP authenticates the tenant administrator** who creates it. That is an
+  ordinary OIDC login.
+
+Authority lives in the first. The second is only a login. So the capability floor is:
+
+> **The tenant's IdP must be able to log a tenant administrator into their own console.**
+
+Nothing else. Every directory in the objection's list clears that, and so does a Lite or
+embedded deployment with local admin authentication and no IdP at all — which is the sharper
+test, and the design passes it.
+
+#### Three tiers, and the floor is universal
+
+How the operator's credential is presented at the wire is a per-tenant choice, not an
+architectural fork. All three mint in the same direction:
+
+| | Credential | Requires of the tenant's IdP | Closes |
+|---|---|---|---|
+| **Tier 0 — floor** | Gateway-minted, short-lived, scoped to the grant | Nothing beyond admin login | The standing-access problem |
+| **Tier 1 — recommended** | Same, **sender-constrained**: the operator submits a public key with the request and proves possession per call | Nothing | Theft of the credential in transit or at rest |
+| **Tier 2 — capable tenants** | Tenant's IdP mints for the operator as a federated principal, and may attach its own MFA/`acr` policy | Guest federation and claim shaping | Binding to a directory identity the tenant governs |
+
+**Tier 1 is the notable one:** proof-of-possession needs a key pair and a signature, both of
+which are ours to implement in code we ship. It buys most of what Tier 2 buys and asks the
+tenant's directory for nothing. Requiring capability of shipped software rather than of a
+customer's directory is precisely the principle above, applied.
+
+#### Binding without a second trusted issuer
+
+Tier 0 raises the obvious question: a bearer credential is held by whoever holds it, so what
+ties it to the named operator? The tempting answer — have the tenant's gateway verify a token
+from the *provider's* IdP — is the second-issuer arrangement this ADR exists to remove, and
+must not be reached for.
+
+The binding is the **session, not a claim**. The operator raises a request from the provider
+console; it appears as pending in the tenant's console; a tenant administrator approves it; and
+the credential is returned **only to the session that raised it**. Stealing it therefore costs
+the same as compromising that operator's session, and the tenant's gateway never has to
+believe anything the provider's IdP said.
+
+The provider's IdP is still what authenticates the operator to the provider console — an
+ordinary login, no claim shaping — and its assertion of who they are travels with the request
+as attribution, exactly as §2 says: it authorizes nothing.
+
+#### Step-up: record it, never require it
+
+A tenant whose IdP cannot express `acr` cannot be made to step up before approving a grant.
+Requiring it would reintroduce the capability demand through the back door.
+
+So the grant object **records whether it was created under a step-up-verified session**, and
+the tenant's console and audit show that plainly. A tenant with a capable directory gets a
+stronger property and can see that they have it; a tenant without one gets an honest record
+rather than a silent absence. This is the §11c lesson applied one boundary further out — assert
+what is true, never assume the capability was there.
+
+#### This does not reopen ADR-0016
+
+Worth confirming explicitly, because a fallback tier for less-capable tenants is exactly where
+a rejected design would creep back in.
+
+ADR-0016's door was **provider-asserted identity honoured by tenant gateways**, plus a console
+holding credentials for N stacks and routing between them. Tier 0 has neither. The credential
+is minted by the tenant's own stack, is valid only at that stack, expires absolutely, is listed
+and revocable in the tenant's console, and is presented by an operator reaching that one
+gateway. The provider holds something the tenant issued and can withdraw — which is §1, not a
+weakening of it.
+
+**The direction of minting is the invariant.** A tier that changed it would be 0016 regardless
+of what it was called; a tier that preserves it is a deployment choice, and the three above
+preserve it.
+
+#### The residual, stated plainly
+
+At Tier 0 the tenant is trusting the provider's internal delivery — that the approved
+credential reached the operator named in the request and stayed with them. The tenant's
+controls are the window, the single active grant, the audit and the revoke button; what they do
+not have is cryptographic assurance of *which* provider employee used it. That is the same
+residual break-glass carries (§4), it is narrowed by Tier 1 and closed by Tier 2, and it is
+named here so the choice of tier is made knowingly rather than discovered during an incident.
+
 ## Consequences
 
 - **Positive: the tenant's isolation no longer depends on the provider's IdP.** This is the
@@ -150,6 +264,12 @@ console that tenant's own staff use, showing the same audit, under the same host
   and some will consider the friction a defect; the setting in §3 is where that is negotiated.
 - **Negative: the tenant console grows an administrative surface it did not have** — issuing,
   listing and revoking support grants, plus the standing-consent setting.
+- **Positive: the capability demand on identity providers drops to ordinary login** (§7), which
+  is a lower bar than ADR-0013 §11b set for an IdP the provider controlled — and that bar was
+  already measured too high once, in §11c.
+- **Negative: three presentation tiers is a real matrix** to build, document, test and support,
+  and a tenant's tier determines what their audit can honestly claim about who acted. Accepted
+  because the alternative is a capability requirement that excludes tenants outright.
 - **Migration is a rewrite of the provider plane's authority layer, not a refactor.** The two
   designs cannot run concurrently against one tenant without reintroducing the arrangement
   this ADR removes, so the cutover is per tenant and one-way.
@@ -180,9 +300,13 @@ feature built on the current authority model.
 
 ## Open questions
 
-- **How a support grant is presented at the wire.** The natural implementation is a token the
-  tenant's IdP mints on the tenant's behalf, but a tenant-issued API credential held by the
-  gateway itself is simpler for tenants without an IdP. Probably both, chosen per tenant.
+- **Which tier is the shipped default.** §7 answers *what the tiers are*; Tier 0 is the floor
+  and Tier 1 is the recommendation, but whether a new tenant starts sender-constrained or is
+  upgraded to it deliberately is a product call with a real onboarding cost attached.
+- **Whether the pending-request channel needs its own transport.** §7's binding has the tenant
+  console showing a request raised from the provider console, which implies a path between the
+  two planes that carries no authority but must still exist and be available. Polling from the
+  provider side is the dull answer and is probably right.
 - **What happens to in-flight work when a grant is revoked mid-session** — ADR-0013's D4,
   still open and now sharper, because revocation is a deliberate act by a person who expects
   it to take effect immediately.
