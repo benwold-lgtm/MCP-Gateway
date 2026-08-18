@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-08-17
 - **Answers:** D2 (does the provider console offer device writes?), open since ADR-0013.
-- **Prerequisite for:** [ADR-0017](0017-provider-authority-is-delegated.md) §1 — see §7.
+- **Prerequisite for:** [ADR-0017](0017-provider-authority-is-delegated.md) §1 — see §8.
 
 ## Context
 
@@ -145,7 +145,34 @@ mutable state across tenants, and its own isolation review. A provider who canno
 should not operate shared services — the alternative is a per-tenant instance of the service,
 which is more expensive and is always available as the conservative option.
 
-### 7. Why this comes before ADR-0017 in the build order
+### 7. Provider-plane storage is its own component, not the BFF's
+
+The catalog gives the provider console its first persistent store, and the path of least
+resistance — put it in the BFF's own storage — is closed here rather than left open.
+
+The BFF is already audit writer and federation-credential relay. A persistent catalog store is a
+third distinct responsibility in one component, and concentration of exactly this kind is what
+[ADR-0012](0012-federation-credential-model.md) argued against when it declined to make the BFF
+a token issuer as well. The argument does not weaken because the third role is storage rather
+than signing.
+
+So the catalog store is a **separate component with its own failure domain**, and
+[ADR-0018](0018-device-credentials-by-reference.md) §7's discipline applies to it unchanged:
+
+- its unavailability is a **named condition**, not something inferred from an empty catalog —
+  a provider console showing no device types because a database is down must not look like a
+  provider who has curated none;
+- it does **not gate the console's readiness**, for §7's reason: everything except catalog
+  reads still works, and taking the console out of service removes the view that would explain
+  the outage;
+- it has its own backup, availability and restore story, which is genuinely new operational
+  surface and is the honest cost of this decision.
+
+Where it physically lives — its own database, a managed service, a schema in an existing one —
+stays a deployment choice. What is fixed is that it is not reached through the BFF's process
+boundary and does not share the BFF's availability.
+
+### 8. Why this comes before ADR-0017 in the build order
 
 Once a provider cannot reach into a tenant's stack, the catalog is how they do their job.
 Building ADR-0017 first would leave a window in which the provider has lost the ability to
@@ -198,9 +225,9 @@ is a provider's typo changing every customer's fleet simultaneously.
 
 ## Open questions
 
-- **Where provider-plane storage lives.** The provider console has had no persistent store of
-  its own; this gives it one, which is a new operational component with its own backup and
-  availability requirements.
+- **Which backing store the catalog uses.** §7 fixes that it is a separate component with its
+  own failure domain; whether that is Postgres, a managed service or something smaller is a
+  deployment question that interacts with how large an estate is expected to get.
 - **Whether assignment is per tenant or by group** (tier, region, contract). Per tenant is
   obviously correct and obviously tedious at scale.
 - **Whether a tenant can be required to keep a provider-operated service** — a monitoring

@@ -317,28 +317,72 @@ controls are the window, the single active grant, the audit and the revoke butto
 not have is cryptographic assurance of *which* provider employee used it. Tier 1 narrows this
 and Tier 2 closes it.
 
-**It is the same question as break-glass attribution, and the two must be resolved together.**
-§4's break-glass path today rests on static admin keys (`MCP_ADMIN_KEY`, ADR-0007) — shared
-credentials, which name no individual. Treating these as two open items would be a mistake,
-because they are one question asked at two doors:
+**The related question is not "individual or shared" — that is already answered.** Provider
+operators authenticate individually, through the provider's own OIDC login, and have since §6.
+ADR-0012 chose a second real issuer over a shared key precisely because accountable identity
+beats an anonymous shared credential. So the open item is not a judgment call about what the
+model should be.
 
-> **Is a provider operator an individual to this system, or is "the provider" a single
-> principal?**
+**It is whether that individual identity survives the whole chain.** The risk is a component
+downstream of the login flattening several operators into one before the tenant's stack ever
+sees them — a relay substituting its own credential, a shared service token used for the
+federation call. That is the regression ADR-0012 rejected in a BFF-held service-token-per-
+provider model, and §7's mechanics are where its shape recurs.
 
-If provider operators authenticate individually, then Tier 0's residual is narrow — the tenant
-knows a named human raised the request, and only the last hop is uncorroborated — and
-break-glass can be attributed too. If provider-side login is shared, the residual compounds
-rather than adds: the tenant learns neither who initiated nor who acted, and *every* Tier 0
-audit record and *every* break-glass event degrades to "someone at the provider". Tier 1's
-proof-of-possession then buys much less than it appears to, since it binds the credential to a
-key held by an operator the provider itself cannot name.
+So it is stated as a property to hold and to test, not a decision to make:
 
-Note the asymmetry that makes this worth settling first: the **tenant** side is already answered
-— a specific administrator, in their own session, in their own audit chain. It is only the
-provider side that is undetermined, and it determines how much the Tier decision is worth
-buying. **Individually named provider operators are the answer this ADR assumes**, and the
-work to make that true at both doors belongs to the break-glass hardening track named in §4,
-which should therefore not be deferred independently of this.
+> **No component between the provider operator's authenticated session and the record written
+> in the tenant's stack may substitute an identity of its own.** Every hop either carries the
+> operator's identity or refuses to proceed.
+
+**This needs testing rather than asserting, because the collapse is already one omission away.**
+The BFF's gateway client carries a shared admin token as its *client-level default header*, and
+a per-request bearer merely overrides it — so a call site that forgets to pass one does not
+fail, it succeeds as the shared key. `upstream_bearer` documents that outcome exactly ("recorded
+in the tenant's audit as a shared key rather than a human") and fails closed for provider-plane
+sessions. That guard is correct and it is a guard: the safe behaviour is asserted at a decision
+point rather than produced by construction, which is the same shape as a bound that must be
+remembered per call site.
+
+The test therefore has to be end-to-end and adversarial in the specific way that matters: **two
+distinct operators, two sessions, and an assertion that the tenant's audit chain distinguishes
+them** — never that each hop was individually written correctly, which is what a unit test of
+the relay would prove and is not the property.
+
+§4's break-glass keys are the one place the answer is genuinely "shared" today
+(`MCP_ADMIN_KEY`, ADR-0007), and that is a gap in the same property rather than a separate
+question. It belongs to the hardening track named in §4, which should not be deferred
+independently of this.
+
+### 8. Revocation tries to stop work in flight; expiry does not
+
+ADR-0013's D4 asked what happens to an in-flight call when a grant ends, and the answer for
+ordinary expiry — let it finish — is right: a window lapsing means nothing is wrong, and
+tearing down a half-completed device call to honour a clock would create failures rather than
+prevent them.
+
+**That answer must not be inherited by revocation, and would be if D4 stayed one question.**
+A tenant administrator pressing revoke is very often doing it *because something looks wrong
+right now* — a suspected compromise, an operator behaving unexpectedly, a session that should
+not be open. Letting an in-flight destructive call complete because it had already started
+defeats the purpose of having an emergency stop at all.
+
+So the postures differ, deliberately:
+
+| | In-flight work | Why |
+|---|---|---|
+| **Expiry** | Allowed to complete | Nothing is wrong; the window simply lapsed |
+| **Revocation** | **Interrupted where technically possible** | A human is asserting that something *is* wrong |
+
+Revocation cancels the underlying call where the transport allows it, and always stops anything
+not yet dispatched. What it cannot do is undo effects already committed at a device — a write
+that reached an appliance has happened, and the console must say so rather than implying the
+stop was total.
+
+**The default posture is "try to stop", not "let it finish"**, and it is written here because
+inertia points the other way: expiry is the common path, its answer is already settled, and
+sharing one code path is the obvious implementation. This is the one case where the settled
+answer is wrong for a reason expiry never had.
 
 ## Consequences
 
@@ -398,15 +442,16 @@ feature built on the current authority model.
 - **Which tier is the shipped default.** §7 answers *what the tiers are*; Tier 0 is the floor
   and Tier 1 is the recommendation, but whether a new tenant starts sender-constrained or is
   upgraded to it deliberately is a product call with a real onboarding cost attached.
-- **Individual vs shared provider-operator identity** — §7's residual and §4's break-glass keys
-  are the same question, and it is now the one open item that changes what several other
-  decisions are worth. Answering it is a prerequisite for valuing Tier 1, not a parallel track.
+- **How identity propagation is proven on an ongoing basis** — §7 fixes the property and the
+  shape of the test; whether that is one end-to-end audit assertion in CI or a broader
+  no-shared-credential check across relay paths is an implementation question with real
+  coverage consequences.
 - **Whether the pending-request channel needs its own transport.** §7's binding has the tenant
   console showing a request raised from the provider console, which implies a path between the
   two planes that carries no authority but must still exist and be available. Polling from the
   provider side is the dull answer and is probably right.
-- **What happens to in-flight work when a grant is revoked mid-session** — ADR-0013's D4,
-  still open and now sharper, because revocation is a deliberate act by a person who expects
-  it to take effect immediately.
+- **Which transports can actually be interrupted** — §8 fixes the posture; how much of it is
+  achievable depends per upstream, and a device call already committed cannot be recalled. The
+  honest reporting of a partial stop is a console question as much as a gateway one.
 - **Whether standing consent should have a maximum term** requiring periodic reaffirmation.
   Leaning yes; not decided here because it is a product policy question.

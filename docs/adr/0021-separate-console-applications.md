@@ -136,6 +136,29 @@ does this for its identity providers via `nip.io`, and the same mechanism serves
 costs a few lines of setup and buys an environment whose isolation properties are the same
 shape as the real one.
 
+### 8. Break-glass is the third application
+
+[ADR-0017](0017-provider-authority-is-delegated.md) §4 keeps break-glass as the one unilateral
+path into a tenant's stack. It gets its **own minimal application**, not a route inside either
+console.
+
+The cost is real and recurring — a third deployment, image and manifest set to serve a path used
+rarely — and it is accepted, because this ADR's own reasoning points directly at it. §1 splits
+the consoles so that a crossing becomes *unrepresentable* rather than guarded. Folding the
+highest-consequence path in the system into either console reintroduces exactly the ambiguity
+that reasoning exists to remove, on the one path ADR-0017 §4 requires to be impossible to use
+quietly. Three deployments is an operational cost; the alternative is an architectural
+regression, and those are not the same kind of thing to trade.
+
+A separate application also buys properties neither console can offer, because they exist to be
+reachable and this exists not to be:
+
+- **offline by default**, started deliberately rather than always listening;
+- **reachable only from a management network**, which is a sentence that cannot be written about
+  a tenant-facing console;
+- its own authentication posture, without weighing it against everyday usability;
+- an audit surface small enough to review in full.
+
 ## Consequences
 
 - **Positive: three startup refusals and the plane wall stop being necessary.** They were
@@ -183,7 +206,6 @@ a different hat.
 - **Whether the two consoles should share a registrable domain at all.** §6 says separate is
   stronger and siblings are acceptable with the `__Host-` prefix; which one an estate uses
   interacts with branding and certificate management more than with security.
-- **Whether break-glass (ADR-0017 §4) lives in the tenant console or a third, minimal
-  application.** A third application is more defensible — it can be offline by default and
-  reachable only from a management network — but three deployments to serve a rare path is a
-  real cost. Not decided here.
+- **How the break-glass application is started when it is off by default** (§8). An operator
+  who must first deploy something in order to respond to an outage has a slower emergency stop
+  than one who must only reach a restricted network. Where that line sits is undecided.

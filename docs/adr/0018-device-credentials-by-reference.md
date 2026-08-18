@@ -447,6 +447,13 @@ This also upgrades the resolution cache from a performance decision to an availa
 short TTL is what makes a brief store blip invisible. It must still never become a durable
 copy — that line is §1 — but the TTL is now trading three things against each other, not two.
 
+**The cache is instrumented from the first deployment, not when tuning begins.** Hit rate, miss
+rate, resolution latency against the store, and entry age at the moment of use ship with the
+resolver rather than being added later. The TTL cannot be reasoned to from first principles, so
+the only question is whether the data to choose it accumulates naturally in production or has to
+be manufactured by a dedicated load test that will approximate the wrong workload. Building the
+measurement in costs four metrics; leaving it out converts a tuning decision into a project.
+
 ## Consequences
 
 - **Positive: an exported archive stops being a credential.** It can be stored in Git,
@@ -506,9 +513,9 @@ required otherwise would not describe the actual estate.
 - **The reference format.** A URI is the obvious shape, but whether the scheme names the
   backend (`vault://`) or is backend-neutral (`secret://`) with resolution configured per
   deployment changes how portable an archive is between stacks. Leaning backend-neutral.
-- **Cache TTL now trades three ways, not two** — a long cache defeats rotation, a short one
-  puts the store in the hot path, and the cache is also what rides out a brief store outage
-  (§7). Needs measurement against a real store, not a guess.
+- **The TTL value itself.** §7 settles that the cache ships instrumented; the number comes from
+  the resulting data, and the three-way trade (rotation, hot path, outage tolerance) means there
+  may be no single right answer across deployment sizes.
 - **Whether a store outage should fail open on cached material past its TTL.** Serving a stale
   credential to keep the fleet dispatching is the availability answer; refusing is the
   correctness one. Leaning refuse, since a rotated-away credential failing at the device is a
