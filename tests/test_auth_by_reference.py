@@ -55,8 +55,12 @@ def test_inline_and_reference_together_are_refused():
     effect would look exactly like one that did — and the operator would believe the device
     had been migrated.
     """
-    with pytest.raises(ValueError, match="mutually exclusive"):
+    with pytest.raises(ValueError, match="mutually exclusive") as exc:
         ApiKeyAuth(api_key="inline", credential_ref=REF)
+    # The message must name the field the API actually accepts. The first version derived it
+    # as `api_key_ref`, which does not exist — an operator would go looking for it.
+    assert "credential_ref" in str(exc.value)
+    assert "api_key_ref" not in str(exc.value)
 
 
 def test_neither_inline_nor_reference_is_refused():
@@ -178,3 +182,29 @@ async def test_the_placement_options_all_work_by_reference():
             await auth.apply()
         await auth.bind(_Resolver("v"))
         assert getattr(await auth.apply(), field) == {"k": "v"}
+
+
+@pytest.mark.asyncio
+async def test_a_non_ascii_credential_in_a_header_is_named_not_opaque():
+    """Found on a live cluster with a secret that had two Cyrillic characters in it.
+
+    httpx raises ``'ascii' codec can't encode characters in position 14-15``, which names
+    neither the device nor the credential — and because it happened during MCP discovery, the
+    device recorded only "No spec available", pointing an operator at the upstream. The
+    refusal must say it is the credential and that headers are latin-1.
+    """
+    auth = ApiKeyAuth(credential_ref=REF)
+    await auth.bind(_Resolver("key-\u043e\u0442-store"))
+    with pytest.raises(CredentialNotBound) as exc:
+        await auth.apply()
+    assert "HTTP header" in str(exc.value)
+    assert "latin-1" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_non_ascii_credential_is_fine_outside_a_header():
+    """Only headers are constrained; the transport encodes a query or cookie value, so
+    refusing those too would reject credentials that work."""
+    auth = ApiKeyAuth(credential_ref=REF, location="query", name="k")
+    await auth.bind(_Resolver("key-\u043e\u0442-store"))
+    assert (await auth.apply()).params == {"k": "key-\u043e\u0442-store"}

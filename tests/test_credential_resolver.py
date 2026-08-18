@@ -169,12 +169,45 @@ async def test_an_empty_secret_is_a_bad_reference(store):
 
 
 @pytest.mark.asyncio
-async def test_a_group_or_world_readable_secret_is_refused(store):
+async def test_a_world_readable_secret_is_refused(store):
+    """World access is exposure under every deployment shape, so it is refused outright."""
     f = store / "t-3f9a1c2b7d4e8065" / "devices" / "prism" / "api-key"
     f.chmod(0o644)
     with pytest.raises(ReferenceInvalid) as exc:
         await MountedFilesResolver(store).resolve(CredentialRef.parse(REF))
-    assert "group/world" in str(exc.value)
+    assert "world-accessible" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_secret_readable_by_our_own_group_is_accepted(store):
+    """The rule that makes this check usable at all, and it was found on a real cluster.
+
+    Kubernetes cannot chown a Secret volume to an arbitrary uid, so the file is root-owned and
+    a non-root workload reaches it through ``fsGroup`` — mode 0440, root:workload. A check
+    that refused *any* group access could therefore never pass on Kubernetes, and the only way
+    to run would be to disable it, which is not a check.
+
+    Group access to *our own* group is not exposure: inside a pod-private volume, that group
+    is the workload.
+    """
+    f = store / "t-3f9a1c2b7d4e8065" / "devices" / "prism" / "api-key"
+    f.chmod(0o440)
+    os.chown(f, os.getuid(), os.getgid())  # root:us in a pod; us:us here — same gid either way
+    assert await MountedFilesResolver(store).resolve(CredentialRef.parse(REF)) == "s3cr3t-value"
+
+
+@pytest.mark.asyncio
+async def test_a_secret_readable_by_a_foreign_group_is_refused(store, monkeypatch):
+    """The other half. Our own group is fine; somebody else's is the exposure the check exists
+    for, and the two must not be collapsed just because both are "group readable"."""
+    import device_mcp_gateway.credentials.resolver as mod
+
+    monkeypatch.setattr(mod, "_own_groups", lambda: frozenset({99999}))
+    f = store / "t-3f9a1c2b7d4e8065" / "devices" / "prism" / "api-key"
+    f.chmod(0o440)
+    with pytest.raises(ReferenceInvalid) as exc:
+        await MountedFilesResolver(store).resolve(CredentialRef.parse(REF))
+    assert "not a member of" in str(exc.value)
 
 
 @pytest.mark.asyncio
@@ -268,3 +301,25 @@ def test_the_credentials_config_key_is_declared_in_the_schema():
 
     problems = validate_config({"gateway": {"credentials": {"root": "/run/secrets"}}})
     assert not [p for p in problems if "credentials" in p and "unknown" in p]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_but_unexposed_secret_names_the_ownership_cause(store):
+    """The third condition, which is neither "exposed" nor "missing".
+
+    A 0400 file owned by another user passes the exposure check and still cannot be read. On
+    Kubernetes that is the *standard* misconfiguration — a Secret volume is root-owned, so a
+    0400 mount is readable by nobody but root. The message must name ownership and fsGroup,
+    because the version this replaces said only "read failed: PermissionError", which sent an
+    operator looking at the store rather than at the mount.
+
+    Skipped when running as root, which can read anything and so cannot stage the condition.
+    """
+    if os.getuid() == 0:
+        pytest.skip("root bypasses file permissions, so the condition cannot be staged")
+    f = store / "t-3f9a1c2b7d4e8065" / "devices" / "prism" / "api-key"
+    f.chmod(0o000)
+    with pytest.raises(StoreUnavailable) as exc:
+        await MountedFilesResolver(store).resolve(CredentialRef.parse(REF))
+    assert "fsGroup" in str(exc.value)
+    assert "no access" in str(exc.value)

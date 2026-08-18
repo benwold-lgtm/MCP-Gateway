@@ -68,7 +68,27 @@ class ApiKeyAuth(AbstractAuth):
                 f"api key for {self.credential_ref!r} has not been resolved; "
                 "the dispatch path must call bind() before applying auth"
             )
-        return f"{self.value_prefix}{self.api_key}"
+        value = f"{self.value_prefix}{self.api_key}"
+        if self.location == "header":
+            # HTTP headers are latin-1 on the wire, so a non-ASCII credential fails at
+            # encoding — and the exception httpx raises names neither the device, the
+            # credential, nor the header. Measured on a live cluster, where a secret
+            # containing two Cyrillic characters surfaced only as
+            # "'ascii' codec can't encode characters in position 14-15" and then as
+            # "No spec available", which points at the upstream rather than the secret.
+            #
+            # Only headers are constrained: a query or cookie value is encoded by the
+            # transport, so those placements keep accepting any text.
+            try:
+                value.encode("latin-1")
+            except UnicodeEncodeError as exc:
+                where = f"reference {self.credential_ref!r}" if self.credential_ref else "inline api_key"
+                raise CredentialNotBound(
+                    f"the credential from {where} contains characters that cannot be sent in an "
+                    f"HTTP header (position {exc.start}); headers are latin-1. Store an "
+                    "ASCII-safe value, or place the key in a query parameter or cookie."
+                ) from exc
+        return value
 
     async def bind(self, resolver: Any) -> None:
         """Resolve ``credential_ref`` into the live key for this dispatch.
