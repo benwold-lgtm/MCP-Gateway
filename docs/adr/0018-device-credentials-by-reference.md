@@ -306,9 +306,33 @@ and anyone holding the archive plus `backup:write` can compose and submit any re
 like, reviewed by nobody. The digest constrains *an* apply to match *a* preview; it establishes
 nothing about who reviewed what.
 
-So two-person review is **not** a property this provides. If it is ever wanted it needs its own
-mechanism — a server-side plan, an approver identity distinct from the submitter, and a record
-binding them — and that is a different ADR, not a reinterpretation of this one.
+So two-person review is **not** a property this provides, and it is **not wanted**. Requiring a
+second human would need a server-side plan, an approver identity distinct from the submitter,
+and a record binding them; the operational cost of that lands on every restore, including the
+ones run at 3am by the only person available. Decided rather than deferred, so no later reading
+of "preview then apply" mistakes it for an approval workflow.
+
+**What is wanted is the audit trail, and the digest supplies it.** Both calls already record
+their actor — `audit_request` stamps `subject_of(request)` and a request id — and both already
+carry the `dry_run` flag, so *who* and *which kind* are captured today. What is missing is the
+join: nothing connects a specific preview to the apply that followed it, and with no
+server-side plan there is no object to correlate on.
+
+The plan digest is that key, at no extra cost, so **both audit records carry it**:
+
+| Record | Actor | `dry_run` | `plan_digest` |
+|---|---|---|---|
+| The preview | who previewed | `true` | the digest produced |
+| The apply | who applied | `false` | the digest submitted |
+
+"Who reviewed this exact plan, and who executed it" becomes a query on one field rather than an
+inference from timestamps. A **refused** apply is audited the same way — a stale digest is a
+denial worth having in the chain, not only in metrics — which also makes an apply that never
+had a matching preview visible as an absence rather than invisible.
+
+Note what this deliberately does not do: it **records** the two actors without **requiring**
+them to differ. An operator who previews and applies alone produces a trail showing exactly
+that, which is the honest record of what happened rather than a control pretending to be one.
 
 ##### A stale digest names the field and never the value
 
@@ -489,8 +513,9 @@ required otherwise would not describe the actual estate.
   credential to keep the fleet dispatching is the availability answer; refusing is the
   correctness one. Leaning refuse, since a rotated-away credential failing at the device is a
   worse diagnosis than an honest `ERR_SECRET_STORE_UNAVAILABLE`.
-- **Whether two-person review is wanted at all.** §6 records that this design does not provide
-  it and names what it would take. Whether any customer needs it is a product question, and the
-  answer decides whether a server-side plan object ever exists.
+- **How long a plan digest stays valid.** §6 gives it no expiry of its own beyond the grant
+  window that gates the apply. A digest previewed weeks ago and applied inside a fresh grant
+  would still match if nothing in the request changed, which is arguably correct — the
+  instruction is unaltered — and arguably too long for "reviewed".
 - **Whether the console should write to the secret store** where the backend allows it, or
   refuse on principle and keep registration a two-system operation.
