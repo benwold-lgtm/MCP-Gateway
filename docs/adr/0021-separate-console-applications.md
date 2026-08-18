@@ -70,6 +70,72 @@ authenticates against the tenant's IdP; a delegated provider operator is a princ
 now recognises for a bounded period. The provider console never needs a tenant session,
 because a provider operator doing tenant work is not using the provider console.
 
+### 5. Addressing is by hostname, never by port
+
+Each console is reached at its own **hostname**, on 443, behind the same ingress. Ports are an
+implementation detail inside the cluster and are never the thing that separates the two
+applications.
+
+This is not a preference, and it is the one place where getting it wrong would quietly undo
+the split. **Cookies do not isolate by port.** RFC 6265 §8.5 is explicit:
+
+> cookies do not provide isolation by port. If a cookie is readable by a service running on
+> one port, the cookie is also readable by a service running on another port of the same
+> server.
+
+So `console.example.com:8443` and `console.example.com:9443` are one cookie jar. Splitting the
+consoles across ports would give two applications, two processes, two IdPs — and a single
+shared session cookie between them, which is precisely the crossing this ADR exists to make
+unrepresentable. It would also silently undo the host-scoping the BFF now refuses to start
+without.
+
+The scheme is therefore:
+
+| | Host | Notes |
+|---|---|---|
+| Tenant console | `t_7f3a91c4.console.example.com` | Per-tenant, which ADR-0013 §2 already relies on to select the tenant's IdP without asking the user to name themselves. Opaque per [ADR-0019](0019-opaque-tenant-identity.md) |
+| Provider console | `provider.example.com` | One host for the estate |
+
+Each console stays **same-origin with its own BFF** — its nginx proxies `/api` and `/auth`
+under its own hostname — so neither needs CORS, and the cross-origin machinery that would
+otherwise appear never does.
+
+### 6. The browser enforces host scoping, not just our startup check
+
+The session cookie takes the **`__Host-` prefix**. A cookie so named is rejected by the
+browser unless it is `Secure`, has `Path=/`, and carries **no `Domain` attribute** — which is
+exactly the property the BFF currently protects with a startup refusal on `COOKIE_DOMAIN`.
+
+Both are kept, and they are not redundant. The startup refusal catches a *deployment* trying
+to widen the cookie and explains why. The prefix means that even if something else on the
+parent domain sets a cookie of the same name, it cannot be a `__Host-` one, so it cannot
+shadow the real session.
+
+That second case is the reason this matters when the two consoles are siblings under one
+parent. A compromised or taken-over sibling — `status.example.com`, say — cannot *read* a
+host-scoped cookie, but it can **set** one scoped to `.example.com` and have the provider
+console receive it. Cookie forcing of that kind is a real attack on a shared parent domain,
+and the prefix is what closes it.
+
+**Separate registrable domains are stronger still** and are the recommendation for a
+provider-operated estate: putting the consoles on different sites removes the shared parent
+entirely, and makes the browser treat any interaction between them as cross-site for
+`SameSite` purposes. Siblings under one parent are acceptable *with* the prefix; they are not
+acceptable without it.
+
+### 7. Development uses hostnames too
+
+The tempting shortcut — `localhost:5173` for one console and `localhost:5174` for the other —
+reproduces the port mistake from §5 in the environment where the code is actually written. Two
+dev servers on one host share a cookie jar, so a developer would see two consoles that appear
+isolated while sharing a session, and the first environment capable of revealing the defect
+would be production.
+
+Development and CI therefore use hostnames, resolved however is convenient — the lab already
+does this for its identity providers via `nip.io`, and the same mechanism serves here. This
+costs a few lines of setup and buys an environment whose isolation properties are the same
+shape as the real one.
+
 ## Consequences
 
 - **Positive: three startup refusals and the plane wall stop being necessary.** They were
@@ -86,7 +152,11 @@ because a provider operator doing tenant work is not using the provider console.
   breaking change lands in two applications at once. Mitigated by the package being *views*,
   with no session, credential or route knowledge in it.
 - **Negative: the lab and CI setups need rework**, since a single BFF currently serves both
-  consoles depending on environment.
+  consoles depending on environment — and per §7 that rework is hostname-based, which is more
+  than a port change.
+- **Negative: per-tenant DNS and certificates become a hard dependency** rather than a
+  consequence noted in ADR-0013. Wildcard certificates cover the tenant consoles; the provider
+  console needs its own.
 
 ## Alternatives considered
 
@@ -110,6 +180,9 @@ a different hat.
 - **Whether the shared package is published or vendored.** Publishing is cleaner and slower;
   vendoring is faster and rots. Probably a workspace package while both live in one
   repository, revisited if they separate.
+- **Whether the two consoles should share a registrable domain at all.** §6 says separate is
+  stronger and siblings are acceptable with the `__Host-` prefix; which one an estate uses
+  interacts with branding and certificate management more than with security.
 - **Whether break-glass (ADR-0017 §4) lives in the tenant console or a third, minimal
   application.** A third application is more defensible — it can be offline by default and
   reachable only from a management network — but three deployments to serve a rare path is a
