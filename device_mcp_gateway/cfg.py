@@ -55,6 +55,11 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         # delete working OIDC config.
         "oidc": dict,
         "tenant_id": str,
+        # Credential resolution (ADR-0018 §1/§2). Opaque for the same reason as `oidc`:
+        # the structure is validated by `build_resolver`, and a second warn-only schema
+        # here would drift. Declared so an enabled block is not reported as an unknown
+        # key and "ignored" — the defect this list already carries a fix for.
+        "credentials": dict,
     },
     "server": {"host": str, "port": int},
     "registry": {
