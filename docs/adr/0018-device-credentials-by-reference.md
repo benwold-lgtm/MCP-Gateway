@@ -277,6 +277,68 @@ So three distinct guarantees, which must not be conflated:
 
 The digest is not a promise about the world; it is a promise about the instruction.
 
+##### The digest is an integrity commitment, not a capability — so it is not session-bound
+
+The session-binding move that secures Tier 0's pending grant in
+[ADR-0017](0017-provider-authority-is-delegated.md) §7 is deliberately **not** applied here, and
+the reason is a difference in the objects rather than a preference:
+
+| | ADR-0017's request id | This digest |
+|---|---|---|
+| Holding it gets you | A credential | Nothing |
+| To use it you also need | Nothing | `backup:write`, the elevated grant, and the archive |
+| What it is | A capability | A commitment to content |
+
+Because holding a digest confers no access, protecting it like a capability would be pattern
+matching on the mechanism instead of the property. It would also couple the two: a digest with
+a session lifetime dies on a browser refresh, taking a reviewed plan with it, and the pressure
+that creates lands on the session-death rule ADR-0017 §7 just made strict. Keeping them
+separate keeps that rule unpressured.
+
+##### Cross-session apply is permitted, and the digest is not what would make it safe
+
+Whether one operator may preview and another apply is settled here so it is not discovered
+later: **it is permitted, and it is not a reviewed-handoff feature.**
+
+The deciding fact is that the gateway persists no plan. The archive travels in the request body
+on the dry run and again on the apply, so a "handoff" means transferring the archive itself —
+and anyone holding the archive plus `backup:write` can compose and submit any restore they
+like, reviewed by nobody. The digest constrains *an* apply to match *a* preview; it establishes
+nothing about who reviewed what.
+
+So two-person review is **not** a property this provides. If it is ever wanted it needs its own
+mechanism — a server-side plan, an approver identity distinct from the submitter, and a record
+binding them — and that is a different ADR, not a reinterpretation of this one.
+
+##### A stale digest names the field and never the value
+
+Because cross-session apply is permitted, the disclosure question is real rather than
+dissolved, and it is narrow. The submitter already holds the entire request they are
+submitting; what they do not hold is the previewer's value for a field that differs. So:
+
+**A stale rejection names which fields diverged. It never returns the previewed value, nor the
+previewed digest's inputs.**
+
+That is the whole usability win — an operator is told exactly where to look instead of
+re-deriving a whole request — with the one thing that could belong to somebody else's plan
+withheld. And the residual is small on its own terms: whoever can submit an apply already holds
+standing authority to run a fully destructive restore of their own choosing, audited
+identically, so learning *that* `on_conflict` differed is not capability they lacked.
+
+##### A stale digest has its own error code
+
+`ERR_PLAN_STALE`, distinct from ordinary request validation, for the same reason §7 separates
+`ERR_CREDENTIAL_UNRESOLVED` from `ERR_SECRET_STORE_UNAVAILABLE`: it is a signal in both of the
+ways it can occur, and folding it into generic 400s makes both invisible.
+
+- **Legitimate drift** — someone changed a field after previewing. The mechanism working, and
+  worth a rate rather than a page.
+- **A digest submitted from somewhere it should not be** — replayed, copied, or guessed against
+  a request it never described. Rare, and worth knowing about immediately.
+
+Those want different responses, so they must be distinguishable in monitoring rather than
+inferred from a 400 count.
+
 ##### Consequence: the consumption record has no members left
 
 With `backup:export-portable` removed, `backup:read` reduced to configuration, and
@@ -427,9 +489,8 @@ required otherwise would not describe the actual estate.
   credential to keep the fleet dispatching is the availability answer; refusing is the
   correctness one. Leaning refuse, since a rotated-away credential failing at the device is a
   worse diagnosis than an honest `ERR_SECRET_STORE_UNAVAILABLE`.
-- **Whether a stale digest should report *what* changed.** §6 settles that a mismatched apply is
-  refused; telling the operator which field moved is better usability and is also a small
-  oracle over a request they already hold, so it is probably fine and is worth deciding rather
-  than defaulting.
+- **Whether two-person review is wanted at all.** §6 records that this design does not provide
+  it and names what it would take. Whether any customer needs it is a product question, and the
+  answer decides whether a server-side plan object ever exists.
 - **Whether the console should write to the secret store** where the backend allows it, or
   refuse on principle and keep registration a two-system operation.
