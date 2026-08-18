@@ -31,15 +31,25 @@ All of that exists to hide a value we chose to make revealing.
 A tenant is assigned an opaque, stable identifier at creation:
 
 ```
-t_7f3a91c4
+t-7f3a91c4
 ```
 
 It is random, not derived. It carries no customer information, so nothing needs to hide it,
 and it is the identifier used **everywhere** — namespace names, metric labels, audit records,
 credential references, archive contents, configuration, support tickets.
 
-The namespace becomes `mcp-t_7f3a91c4`, or simply the identifier itself where the platform
+The namespace becomes `mcp-t-7f3a91c4`, or simply the identifier itself where the platform
 allows.
+
+**The separator is a hyphen, and that is not cosmetic.** `t_7f3a91c4` — the natural way to
+write a prefixed identifier — is not a valid DNS-1123 label, so it can be neither a Kubernetes
+namespace name nor a hostname label. §2 puts this identifier in both: the namespace here, and
+the per-tenant console hostname in [ADR-0021](0021-separate-console-applications.md) §5, where
+an underscore would additionally be refused a certificate by any public CA. An identifier that
+is valid everywhere it appears is worth more than one that reads slightly better in prose.
+
+Keeping the `mcp-t-` namespace prefix is a happy side effect: existing manifests, labels and
+Cilium selectors keep their shape, and only the way the suffix is produced changes.
 
 ### 2. Exactly one mapping exists, and it lives outside the cluster
 
@@ -88,7 +98,7 @@ because "hash the name" is the reflex:
 - **Positive: one fewer key in the system**, and the removal of a rule ("never reuse this key
   material") that had to be remembered rather than enforced.
 - **Positive: identifiers are readable in the sense that matters** — an operator can say
-  `t_7f3a91c4` aloud, put it in a ticket and paste it into a dashboard without disclosing a
+  `t-7f3a91c4` aloud, put it in a ticket and paste it into a dashboard without disclosing a
   customer.
 - **Negative: humans cannot tell which customer a namespace belongs to without a lookup.**
   This is the intent, and it is also a genuine day-to-day operational cost during incidents.

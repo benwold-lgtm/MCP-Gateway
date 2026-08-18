@@ -7,11 +7,12 @@
 #
 # Single-tenant (the default): `mcp-gateway` is fine.
 #
-# Multi-tenant estates: the name is a PSEUDONYM, never the customer's name —
-# `mcp-t-<16 hex>`, derived deterministically with tools/tenant_namespace.py. A namespace
+# Multi-tenant estates: the name carries the tenant's OPAQUE IDENTIFIER, never the
+# customer's name — `mcp-t-<16 hex>`, minted with `tools/tenant_id.py new`. A namespace
 # name is not encrypted, so a customer name here survives the crypto-shred that
 # ADR-0013 §10 exists to provide, and leaks into every metric label, alert and dashboard
-# in the estate. See ADR-0014 §1.
+# in the estate. The identifier is random rather than derived, so there is no key to hold
+# and nothing to reverse — see ADR-0019, which supersedes ADR-0014 §1.
 apiVersion: v1
 kind: Namespace
 metadata:

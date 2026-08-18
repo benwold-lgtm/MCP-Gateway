@@ -1,6 +1,6 @@
 # ADR-0014: Tenant namespace naming, and default-deny network isolation between tenants
 
-- **Status:** Accepted
+- **Status:** Accepted · **§1 superseded** by [ADR-0019](0019-opaque-tenant-identity.md) (2026-08-18)
 - **Date:** 2026-08-12 (Proposed) · 2026-08-12 (Accepted, on resolving §8)
 - **Related findings:** F-68 (NetworkPolicies are peer-blind — *not yet filed*, see Context),
   F-01 (no in-app tenant isolation), F-02 (SSRF / wide NetworkPolicy egress),
@@ -62,6 +62,13 @@ absolutely: there is no exception mechanism, and no supported way for the provid
 path between two tenants (§6).
 
 ### 1. The namespace name is a pseudonym, never the tenant's identity
+
+> **Superseded by [ADR-0019](0019-opaque-tenant-identity.md).** The *goal* below is kept
+> verbatim and is still correct — a namespace must never carry a customer's name. What changed
+> is the means: ADR-0019 makes the tenant identifier opaque from birth, so there is nothing
+> revealing to conceal, and the keyed HMAC, `K_ns`, the domain-separation rule and the
+> collision assertion all go with it. §2–§8 below stand unchanged.
+
 
 Tenant namespaces are named:
 

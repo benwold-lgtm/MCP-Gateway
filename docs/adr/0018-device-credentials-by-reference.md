@@ -37,7 +37,7 @@ A device record carries a **credential reference** — an opaque URI naming a lo
 secret store — and the gateway holds a **workload identity** allowed to dereference it:
 
 ```
-credential_ref: "vault://t_7f3a91c4/devices/prism#api-key"
+credential_ref: "vault://t-7f3a91c4/devices/prism#api-key"
 ```
 
 The gateway resolves the reference at dispatch time and does not persist the result beyond the

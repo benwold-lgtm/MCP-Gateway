@@ -25,6 +25,42 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 > claims with their entitlement intersection, the single-use consumption record, and the
 > `grant=<id>` audit field. The fixes and the change below are independent of it and stand.
 
+### Changed
+
+- **A tenant's identifier is now opaque from birth, and the namespace is a prefix rather than
+  a computation** ([ADR-0019](docs/adr/0019-opaque-tenant-identity.md), superseding
+  [ADR-0014](docs/adr/0014-tenant-namespace-naming-and-network-isolation.md) §1). Namespaces
+  keep the `mcp-t-<16 hex>` shape they already had, so manifests, labels and Cilium selectors
+  are untouched; what changes is that the suffix is **minted at random** rather than derived
+  by a keyed HMAC over the customer's identifier.
+
+  The goal is unchanged and was always right — a namespace name is not encrypted, so a
+  customer name written there survives crypto-shredding and leaks into every `kubectl` output,
+  metric label and dashboard in the estate. What went is the machinery for concealing a value
+  we had chosen to make revealing: `MCP_TENANT_NAMESPACE_KEY` and its generation, distribution
+  and rotation; the domain-separation construction; the standing rule never to reuse that key
+  material for the audit pseudonym; and the collision assertion that truncating a MAC requires.
+  Determinism is not lost, because nothing is computed — **the identifier is itself the durable
+  record**, read from the declarative source GitOps and restore already read.
+
+  `tools/tenant_namespace.py` is replaced by `tools/tenant_id.py` (`new`, `check`,
+  `namespace`), which has tests where its predecessor had none.
+
+  **The separator is a hyphen for a load-bearing reason.** The natural spelling of a prefixed
+  identifier, `t_7f3a91c4`, is not a valid DNS-1123 label — so it could be neither a namespace
+  name nor the per-tenant console hostname of ADR-0021 §5, where a public CA would also refuse
+  the certificate. The ADRs were corrected before implementation.
+
+  **Migration is a rename, which for a namespace means recreate.** No action for single-tenant
+  or Lite deployments, which never used the pseudonym. An identifier is never reissued, even
+  after a tenant departs (ADR-0019 §4).
+
+### Removed
+
+- **`MCP_TENANT_NAMESPACE_KEY`** and the derivation it keyed. Nothing reads it; a deployment
+  that still sets it is not broken, only ignored. Existing namespaces keep working — they are
+  valid identifiers by shape, whatever produced them.
+
 ### Fixed
 
 - **Embedded mode no longer leaks an MCP session→owner entry per abandoned session.**

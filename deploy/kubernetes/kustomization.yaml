@@ -11,12 +11,12 @@ kind: Kustomization
 # one that bites; that file omits it deliberately (an omitted selector means "my own
 # namespace", which is correct under any name).
 #
-# Multi-tenant estates: one namespace per tenant, named as a PSEUDONYM rather than after
-# the customer — `mcp-t-<16 hex>`, computed with tools/tenant_namespace.py. Deploy each
-# tenant from an overlay that sets this field and the `mcp.gateway/tenant` label; see
-# ADR-0014 §1–§2 and docs/multitenancy.md. A namespace name is not encrypted, so a
-# customer name here survives the crypto-shred of ADR-0013 §10 and leaks into every
-# metric label and dashboard in the estate.
+# Multi-tenant estates: one namespace per tenant, named after the tenant's OPAQUE
+# IDENTIFIER rather than the customer — `mcp-t-<16 hex>`, minted with
+# `tools/tenant_id.py new`. Deploy each tenant from an overlay that sets this field and the
+# `mcp.gateway/tenant` label; see ADR-0019 and docs/multitenancy.md. A namespace name is not
+# encrypted, so a customer name here survives the crypto-shred of ADR-0013 §10 and leaks
+# into every metric label and dashboard in the estate.
 namespace: mcp-gateway
 
 resources:
