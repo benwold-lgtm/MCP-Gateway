@@ -93,7 +93,7 @@ The scheme is therefore:
 
 | | Host | Notes |
 |---|---|---|
-| Tenant console | `t_7f3a91c4.console.example.com` | Per-tenant, which ADR-0013 §2 already relies on to select the tenant's IdP without asking the user to name themselves. Opaque per [ADR-0019](0019-opaque-tenant-identity.md) |
+| Tenant console | `t-7f3a91c4.console.example.com` | Per-tenant, which ADR-0013 §2 already relies on to select the tenant's IdP without asking the user to name themselves. Opaque per [ADR-0019](0019-opaque-tenant-identity.md) |
 | Provider console | `provider.example.com` | One host for the estate |
 
 Each console stays **same-origin with its own BFF** — its nginx proxies `/api` and `/auth`

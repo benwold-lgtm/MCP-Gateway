@@ -61,12 +61,14 @@ Concretely, a per-tenant stack is the unit of isolation when each tenant gets:
   issue authorize everything in *that* stack — and nothing in another.
 - **Its own network boundary / namespace.** In Kubernetes, a namespace per tenant with a
   **default-deny** NetworkPolicy in both directions, so cross-tenant denial is a
-  consequence of the default rather than a rule anyone maintains. The namespace is named
-  as a *pseudonym* (`mcp-t-<16 hex>`, via `tools/tenant_namespace.py`) and never after the
-  customer — a namespace name is not encrypted, so a customer name there survives the
-  crypto-shred of [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md) §10 and
-  leaks into every metric label and dashboard in the estate. There is deliberately **no
-  mechanism to open a path between two tenants**. See
+  consequence of the default rather than a rule anyone maintains. The namespace carries the
+  tenant's *opaque identifier* (`mcp-t-<16 hex>`, minted with `tools/tenant_id.py new`) and
+  never the customer's name — a namespace name is not encrypted, so a customer name there
+  survives the crypto-shred of [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md)
+  §10 and leaks into every metric label and dashboard in the estate. The identifier is random
+  rather than derived from anything, so there is no key to hold and nothing to reverse
+  ([ADR-0019](adr/0019-opaque-tenant-identity.md), superseding ADR-0014 §1). There is
+  deliberately **no mechanism to open a path between two tenants**. See
   [ADR-0014](adr/0014-tenant-namespace-naming-and-network-isolation.md) and
   [docs/kubernetes-architecture.md](kubernetes-architecture.md).
 

@@ -1,21 +1,25 @@
 # Per-tenant overlay — ADR-0014. COPY THIS PER TENANT; do not deploy it as-is.
 #
-#   cp -r deploy/overlays/tenant-example deploy/overlays/<pseudonym>
-#   kubectl apply -k deploy/overlays/<pseudonym>
+#   cp -r deploy/overlays/tenant-example deploy/overlays/<tenant-id>
+#   kubectl apply -k deploy/overlays/<tenant-id>
 #
 # Two values change per tenant, and they must agree:
 #
-#   1. `namespace:` below — the full name, `mcp-t-<pseudonym>`.
-#   2. the `mcp.gateway/tenant` label — the pseudonym alone, without the prefix.
+#   1. `namespace:` below — the full name, `mcp-<tenant-id>`.
+#   2. the `mcp.gateway/tenant` label — the identifier's hex suffix, without the prefix.
 #
-# Compute both at once, so they cannot drift:
+# Mint the identifier once, then print both at once so they cannot drift:
 #
-#   export MCP_TENANT_NAMESPACE_KEY="$(pass show mcp/tenant-namespace-key)"
-#   python3 tools/tenant_namespace.py <tenant-id> --label
+#   python3 tools/tenant_id.py new                       # -> t-3f9a1c2b7d4e8065
+#   python3 tools/tenant_id.py namespace t-3f9a1c2b7d4e8065 --label
 #
-# The tenant identifier is internal and is never derived from anything the tenant chooses
-# — a pseudonym over an attacker-chosen input is not a pseudonym. See ADR-0014 §1 for why
-# the namespace is not simply named after the customer.
+# There is no key. The identifier is random rather than derived (ADR-0019, superseding
+# ADR-0014 §1), so nothing needs to recompute it — record it against the customer in the
+# provider-side mapping, which is the only place the two ever appear together, and keep it
+# in the declarative source this overlay already is.
+#
+# An identifier is NEVER reissued, even after a tenant leaves (ADR-0019 §4): stale DNS,
+# cached tokens and a bookmarked console must never resolve onto a new tenant.
 #
 # ⚠️ Each tenant also needs its OWN Redis password, MCP_SECRET_KEY and RBAC keys in a
 # `gateway-secrets` Secret in ITS namespace. This overlay does not create them and cannot:
