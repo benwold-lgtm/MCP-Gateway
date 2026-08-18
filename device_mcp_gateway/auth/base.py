@@ -73,6 +73,11 @@ class AbstractAuth(ABC):
         No-op when the secret is inline. Implementations MUST NOT persist what they resolve:
         the material lives for the request, which is the line ADR-0018 §1 draws between a
         cache and a durable copy.
+
+        **This seam is for operator-provisioned secrets only** (ADR-0018 §1a). A credential the
+        gateway mints and rotates itself — an OAuth2 refresh token — has no external writer and
+        cannot be held by reference; it stays encrypted at rest. Do not extend this to one
+        without reading §1a, which explains why the boundary is where it is.
         """
         return None
 

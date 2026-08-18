@@ -41,11 +41,55 @@ credential_ref: "vault://t-7f3a91c4/devices/prism#api-key"
 ```
 
 The gateway resolves the reference at dispatch time and does not persist the result beyond the
-request. It never holds a decryptable copy of any device credential at rest.
+request. **For an operator-provisioned secret it never holds a decryptable copy at rest** —
+and that scope is not a caveat, it is the boundary, set out in §1a.
 
 **The secret store belongs to the tenant, not to the provider.** This is what makes the change
 a security improvement rather than a relocation: a provider who cannot read the store cannot
 read the credentials, whatever they hold in the gateway.
+
+### 1a. References cover operator-provisioned secrets; gateway-minted rotating ones are outside
+
+A reference model assumes **the tenant is the sole writer of a secret's lifecycle.** The
+gateway reads; somebody else provisions and rotates. Every property in §1 follows from that
+assumption, so where the assumption does not hold, neither do the properties.
+
+It does not hold for a credential the **gateway itself mints**. An OAuth2 provider that
+rotates refresh tokens hands back a new one during a token exchange, and the gateway is the
+only party present when it does. There is nobody else to write it, so it must be persisted by
+the gateway — which is why `OAuth2Auth` already carries a `CredentialsChangedHook`, and why
+the release notes carry a fix for the release where it was not persisted and every such device
+died on restart.
+
+The line is therefore **operator-provisioned versus gateway-minted**, and it is a real category
+boundary rather than a scope drawn to make the problem smaller:
+
+| | Provisioned by | Rotated by | Under ADR-0018 |
+|---|---|---|---|
+| API key, OAuth2 `client_secret`, `password` | Tenant | Tenant | **By reference.** §1 holds in full |
+| OAuth2 `refresh_token` | Gateway, mid-exchange | Gateway | **Encrypted at rest**, under `MCP_SECRET_KEY` |
+
+**State the consequence without softening it.** For a device using OAuth2 with refresh-token
+rotation, compromise of `MCP_SECRET_KEY` is not a reduced version of the pre-ADR-0018 risk —
+**it is the identical risk, untouched.** A live refresh token mints access tokens indefinitely,
+so it is worth precisely what the credential blob was worth, and this ADR does nothing for it.
+The correct summary is not that §1 is weakened at the edges: **§1's central claim holds for
+static secrets and does not hold at all for rotating ones.**
+
+Two consequences follow and are accepted deliberately:
+
+- **`MCP_SECRET_KEY` does not go away**, and neither does key rotation, for any deployment with
+  a rotating-token device. It becomes unnecessary only for a fleet that is entirely
+  operator-provisioned.
+- **A backup of such a stack still contains a live credential.** §3's "an archive is
+  configuration" is true of the reference-holding devices and false of the rotating ones, which
+  §3 now says explicitly.
+
+Closing this properly needs a resolver that can *write* — turning §3's open question about
+console writes into a requirement — or dropping persisted refresh tokens and re-authenticating
+from `client_secret` every time, which breaks `grant_type=refresh_token` devices outright.
+Neither is decided here. What is decided is that the boundary is named rather than papered
+over, so nothing downstream reasons from a property this design does not have.
 
 ### 2. Resolution is an interface, and the backend is a deployment choice
 
@@ -82,6 +126,11 @@ contains no credentials, so:
 
 **Restore keeps its dry run.** That was never about credentials; it is about a plan being read
 before it is applied, and it has already caught real mistakes.
+
+**The exception is a stack with rotating-token devices** (§1a). Their refresh tokens are still
+credentials at rest, so an archive containing one is still a credential dump and the `backup:*`
+reasoning this section retires continues to apply to it. An archive is configuration exactly
+as far as §1a's first row extends, and no further.
 
 ### 4. Offboarding is a secret-store operation
 
@@ -458,8 +507,10 @@ measurement in costs four metrics; leaving it out converts a tuning decision int
 
 - **Positive: an exported archive stops being a credential.** It can be stored in Git,
   reviewed in a pull request, diffed between environments, and handed to a customer.
-- **Positive: `MCP_SECRET_KEY` stops being the crown jewel**, and with it the awkwardness of
-  the provider holding it.
+- **Positive: `MCP_SECRET_KEY` stops being the crown jewel for an entirely
+  operator-provisioned fleet**, and with it the awkwardness of the provider holding it. It
+  remains exactly as load-bearing as before for any deployment with an OAuth2 refresh-token
+  device (§1a) — for those, this ADR changes nothing about what a key compromise costs.
 - **Positive: credential rotation stops involving the gateway.** Rotate in the store; the next
   dispatch picks it up.
 - **Positive: the elevated-grant taxonomy loses a tier** and the axis that remains — blast
