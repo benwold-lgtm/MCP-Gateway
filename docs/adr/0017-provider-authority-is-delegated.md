@@ -209,6 +209,79 @@ The provider's IdP is still what authenticates the operator to the provider cons
 ordinary login, no claim shaping — and its assertion of who they are travels with the request
 as attribution, exactly as §2 says: it authorizes nothing.
 
+##### Why the session binding is a different kind of answer
+
+Worth naming precisely, because it is what keeps the fix from being a patch. The claim-based
+answer asks the tenant's gateway to **prove who the holder is**, which requires believing an
+assertion from the provider's directory — the second issuer, restored. The session binding asks
+it to prove something else entirely:
+
+> **Not "prove who you are" — "prove you are still the thing that asked."**
+
+That property needs no claim from anywhere, because both ends of it are already inside the
+tenant's stack: the tenant's gateway issued the pending request and the tenant's gateway
+delivers against it. Nothing crosses a trust boundary in either direction. It is a different
+category of solution rather than a repair to claim verification, and the mechanics below are
+load-bearing to it rather than incidental.
+
+##### A pending request that cannot be delivered is lost
+
+If the requesting session ends before the tenant administrator approves — a closed tab, an
+expired session, a dropped connection — **the approved grant is discarded and the operator
+starts over.** There is no recovery path, no re-delivery, and no way for a later session to
+collect it.
+
+This is stated as a decision rather than left to implementation because the pressure to soften
+it is predictable and arrives dressed as usability: *the admin already approved, the operator
+is right there, let them pick it up.* Any such path needs some way to establish that the later
+session belongs to the same operator — which is a claim, from the provider's directory, and the
+second issuer walks back in through a UX ticket.
+
+Re-requesting costs one round trip and one approval. That is the correct price, and losing the
+grant is the deliberate failure mode.
+
+##### The request identifier is a capability, and must be treated as one
+
+The identifier that binds delivery to one session **is** the security property at the wire, not
+plumbing around it. Whoever presents it collects the credential, so it is a capability token
+regardless of what it is called, and it carries the requirements of one:
+
+- generated from a CSPRNG with no structure to predict, and wide enough that guessing is not a
+  strategy — the same bar as a session identifier, not the bar for a correlation id;
+- **not a sequence, timestamp, counter or operator-derived value**, any of which turns an
+  offline guess into a fetch of someone else's credential;
+- delivered once, to the raising session, and never logged, echoed in an error, or shown in a
+  URL where it lands in history and proxy logs;
+- expiring on its own short clock, whether or not it is ever approved.
+
+The delivery transport itself is an implementation choice — a held connection or a poll keyed
+by the identifier both work — and does not change any of the above, which is exactly why the
+identifier's properties are specified here and the transport is not. A guessable identifier
+breaks the binding as completely as a forged claim would, by a different route.
+
+##### The operator's name on the approval screen is informational
+
+The tenant administrator approving a request sees *who asked* — a name and an identity the
+**provider console** established through its own login. That display is attribution for a human
+decision and **carries no cryptographic weight on the tenant's side.** The tenant's gateway does
+not verify it, cannot verify it without trusting the provider's directory, and must never be
+built as though it had.
+
+Stated plainly because it is the one thing a reader is most likely to mistake for the security
+property, for the very good reason that it is what the human is actually looking at when they
+click approve. The guarantee comes entirely from session-bound delivery. The name is how the
+tenant decides whether to approve; it is not what makes the resulting credential safe.
+
+##### Lite clears the floor test but does not participate
+
+§7's floor is worded to include a Lite or embedded deployment with local admin authentication,
+and that is a test of the mechanism's minimalism — it shows the design leans on nothing beyond
+an administrator being able to log in.
+
+It is **not** a statement that Lite deployments use any of this. Lite has no provider plane, so
+there is no operator to raise a pending request and nothing to delegate to: the flow is
+**inapplicable there, not merely unnecessary**, and none of §7 becomes a Lite requirement.
+
 #### Step-up: record it, never require it
 
 A tenant whose IdP cannot express `acr` cannot be made to step up before approving a grant.
@@ -238,12 +311,34 @@ preserve it.
 
 #### The residual, stated plainly
 
-At Tier 0 the tenant is trusting the provider's internal delivery — that the approved
+At Tier 0 the tenant is trusting the provider's internal handling — that the approved
 credential reached the operator named in the request and stayed with them. The tenant's
 controls are the window, the single active grant, the audit and the revoke button; what they do
-not have is cryptographic assurance of *which* provider employee used it. That is the same
-residual break-glass carries (§4), it is narrowed by Tier 1 and closed by Tier 2, and it is
-named here so the choice of tier is made knowingly rather than discovered during an incident.
+not have is cryptographic assurance of *which* provider employee used it. Tier 1 narrows this
+and Tier 2 closes it.
+
+**It is the same question as break-glass attribution, and the two must be resolved together.**
+§4's break-glass path today rests on static admin keys (`MCP_ADMIN_KEY`, ADR-0007) — shared
+credentials, which name no individual. Treating these as two open items would be a mistake,
+because they are one question asked at two doors:
+
+> **Is a provider operator an individual to this system, or is "the provider" a single
+> principal?**
+
+If provider operators authenticate individually, then Tier 0's residual is narrow — the tenant
+knows a named human raised the request, and only the last hop is uncorroborated — and
+break-glass can be attributed too. If provider-side login is shared, the residual compounds
+rather than adds: the tenant learns neither who initiated nor who acted, and *every* Tier 0
+audit record and *every* break-glass event degrades to "someone at the provider". Tier 1's
+proof-of-possession then buys much less than it appears to, since it binds the credential to a
+key held by an operator the provider itself cannot name.
+
+Note the asymmetry that makes this worth settling first: the **tenant** side is already answered
+— a specific administrator, in their own session, in their own audit chain. It is only the
+provider side that is undetermined, and it determines how much the Tier decision is worth
+buying. **Individually named provider operators are the answer this ADR assumes**, and the
+work to make that true at both doors belongs to the break-glass hardening track named in §4,
+which should therefore not be deferred independently of this.
 
 ## Consequences
 
@@ -303,6 +398,9 @@ feature built on the current authority model.
 - **Which tier is the shipped default.** §7 answers *what the tiers are*; Tier 0 is the floor
   and Tier 1 is the recommendation, but whether a new tenant starts sender-constrained or is
   upgraded to it deliberately is a product call with a real onboarding cost attached.
+- **Individual vs shared provider-operator identity** — §7's residual and §4's break-glass keys
+  are the same question, and it is now the one open item that changes what several other
+  decisions are worth. Answering it is a prerequisite for valuing Tier 1, not a parallel track.
 - **Whether the pending-request channel needs its own transport.** §7's binding has the tenant
   console showing a request raised from the provider console, which implies a path between the
   two planes that carries no authority but must still exist and be available. Polling from the
