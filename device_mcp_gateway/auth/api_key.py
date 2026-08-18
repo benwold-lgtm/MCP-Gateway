@@ -82,11 +82,44 @@ class ApiKeyAuth(AbstractAuth):
             return
         self.api_key = await resolver.resolve(CredentialRef.parse(self.credential_ref))
 
+    def configure_credentials(self, resolver: Any | None) -> None:
+        self._resolver = resolver
+
+    async def _ensure_bound(self) -> None:
+        """Resolve the reference if this handler carries one.
+
+        **Resolved on every dispatch, deliberately, for now.** ADR-0018 makes the resolution
+        cache an explicit TTL decision with its own metrics, and a cache added here without
+        one would be an implicit unbounded copy held for the pod's lifetime — the durable copy
+        §1 draws a line against. The cache arrives with its instrumentation, not before it.
+        """
+        if self.credential_ref is None:
+            return
+        resolver = getattr(self, "_resolver", None)
+        if resolver is not None:
+            await self.bind(resolver)
+            return
+        if self.api_key is None:
+            # Fail closed, naming which of the two things is wrong: the device wants a
+            # reference resolved and this deployment has no resolver at all. Distinguishing
+            # this from "the store said no" matters — they send an operator to different
+            # systems, which is the same reasoning as §7's two failure kinds one level up.
+            raise CredentialNotBound(
+                f"device credential {self.credential_ref!r} has not been resolved: this handler was "
+                "never given a credential resolver. Either the deployment has none configured "
+                "(gateway.credentials.root / MCP_CREDENTIAL_ROOT), or this dispatch path predates "
+                "the ADR-0018 wiring — which is what a replica mid-rolling-restart looks like."
+            )
+        # Already bound out of band by a caller that resolved explicitly. Left usable rather
+        # than re-refused, so `bind()` stays meaningful on its own.
+
     async def get_headers(self) -> dict[str, str]:
         # Header-only view (back-compat); empty when the key lives in a query/cookie.
+        await self._ensure_bound()
         return {self.name: self._value} if self.location == "header" else {}
 
     async def apply(self) -> AuthMaterial:
+        await self._ensure_bound()
         if self.location == "query":
             return AuthMaterial(params={self.name: self._value})
         if self.location == "cookie":

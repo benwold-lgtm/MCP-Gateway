@@ -103,6 +103,17 @@ class AbstractAuth(ABC):
         settings (F-02, review item 9)."""
         return None
 
+    def configure_credentials(self, resolver: Any | None) -> None:
+        """Adopt the gateway's credential resolver (ADR-0018 §2). No-op when the handler
+        holds no reference, or when the deployment has no resolver configured.
+
+        Wired at the same point as :meth:`configure_egress`, and for the same reason: the
+        alternative is every dispatch call site remembering to resolve first. A resolution
+        step that must be remembered per call site is the shape of defect this codebase has
+        repeatedly found — a guard attached by convention rather than by construction.
+        """
+        return None
+
     def on_credentials_changed(self, hook: CredentialsChangedHook) -> None:
         """Register a callback for when this handler rotates its own stored credentials.
 

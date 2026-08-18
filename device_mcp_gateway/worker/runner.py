@@ -45,6 +45,7 @@ from loguru import logger
 from device_mcp_gateway import metrics
 from device_mcp_gateway.auth.base import AbstractAuth, CredentialsChangedHook
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered
+from device_mcp_gateway.credentials import build_resolver
 from device_mcp_gateway.core.spec_limits import (
     DEFAULT_MAX_SPEC_BYTES,
     DEFAULT_TRANSLATE_TIMEOUT,
@@ -117,6 +118,10 @@ class DeviceWorker:
     ) -> None:
         self._id = worker_id
         self._config = config
+        # ADR-0018 §2 — see the note in pod_supervisor: built from the config this owner
+        # already holds, not injected, so embedded and distributed cannot disagree about
+        # whether credential resolution is available.
+        self._credential_resolver = build_resolver(config)
         self._r = redis_client
         self._codec = codec or CredentialCodec(None)
         self._backend: AbstractRegistryBackend | None = None
@@ -255,6 +260,7 @@ class DeviceWorker:
             tls_profiles=self._tls,
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
+            credential_resolver=self._credential_resolver,
             # Only the worker holds the credential codec, so it supplies the auth handler
             # the health loop needs to reach an authenticated MCP upstream.
             auth_provider=lambda cfg: _auth_from_config(
@@ -721,6 +727,7 @@ class DeviceWorker:
             tls_verify=self._tls.for_device(hostname),
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
+            credential_resolver=self._credential_resolver,
         )
         await pod.start(with_sse=False)  # distributed mode: no in-process SSE transport
         self._pods[hostname] = pod
@@ -805,6 +812,7 @@ class DeviceWorker:
             verify=self._tls.for_device(cfg.hostname),
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
+            credential_resolver=self._credential_resolver,
         ) as client:
             if getattr(cfg, "upstream_kind", "openapi") == "mcp":
                 upstream = StreamableHttpClient(
