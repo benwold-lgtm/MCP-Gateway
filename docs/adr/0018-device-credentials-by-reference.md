@@ -574,6 +574,27 @@ and already assigned, so nothing in the spawn path will ever look at it again. W
 the reason has to live in the **health loop**, not only in spawn. Finding #11 was exactly this,
 and §7's dispatch-time framing is part of why it was not anticipated.
 
+### 7b. Upgrade order is a constraint, not a preference
+
+Measured on a live cluster (2026-08-19) by running a pre-wiring worker image against migrated
+devices. A replica that predates the resolver wiring **fails closed** — `ApiKeyAuth._value`
+raises before a header is built, so nothing bogus is sent upstream — but it records **no reason
+on the device record**. The device shows `reachable: false` with an empty `spawn_error`, and
+the cause exists only in that worker's log.
+
+The mechanism is worth stating because it is not obvious: the un-wired worker *successfully
+spawns* the pod, because a cached manifest needs no credential. Only the subsequent health check
+fails, and the reason channel a health check needs did not exist before this slice. So the
+window is **dark rather than wrong** — which is worse for an operator than a loud failure.
+
+It cannot be fixed in an already-released image, so it is closed by sequencing instead:
+
+> **Upgrade workers first, then the gateway, and only then migrate any device to a reference.**
+
+A device becomes by-reference through a gateway API call. If the workers are wired before that
+call is possible, no by-reference device is ever assigned to an un-wired worker and the window
+never opens. Rolling the gateway first opens it for the length of the worker rollout.
+
 ## Consequences
 
 - **Positive: an exported archive stops being a credential.** It can be stored in Git,
@@ -599,6 +620,10 @@ and §7's dispatch-time framing is part of why it was not anticipated.
 - **Negative: the health model grows a dependency and two error codes** (§7). This is net-new
   surface in diagnostics, the fleet health endpoint and alerting — and it is not optional, since
   the whole point is that a store outage must not be legible only as twenty device outages.
+- **Negative: the rollout has an order that cannot be reversed** (§7b). Gateway-first leaves a
+  window in which a migrated device assigned to an un-wired worker reports a bare failure with
+  no cause. Fails closed, so it is not a security exposure — but it is an observability one, and
+  it is invisible unless the runbook says so.
 - **Negative: registration gets a step.** Someone must put the secret in the store before
   registering the device. The console can drive this where the backend supports writes, but
   the general case is a two-system operation and will be felt.
