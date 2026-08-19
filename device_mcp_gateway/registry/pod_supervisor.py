@@ -34,6 +34,7 @@ from device_mcp_gateway.core.translator import SpecTranslator, manifest_to_dict
 from device_mcp_gateway.pods.device_pod import DevicePod
 from device_mcp_gateway.pods.mcp_proxy_pod import McpProxyPod
 from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest
+from device_mcp_gateway.credentials import build_resolver
 from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
 from device_mcp_gateway.registry.models import DeviceProfile
 from device_mcp_gateway.registry.spec_service import SpecService
@@ -74,6 +75,10 @@ class PodSupervisor:
     ) -> None:
         self._backend = backend
         self._config = config
+        # ADR-0018 §2. Built here from the config this supervisor already holds rather than
+        # injected, so embedded and distributed mode cannot end up disagreeing about whether
+        # resolution is available — the divergence that a second wiring path would invite.
+        self._credential_resolver = build_resolver(config)
         self._tls = tls_profiles
         self._retry_policy = retry_policy
         self._spec_service = spec_service
@@ -137,6 +142,7 @@ class PodSupervisor:
             tls_verify=self._tls.for_device(profile.hostname),
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
+            credential_resolver=self._credential_resolver,
         )
         await pod.start()
         profile.pod = pod

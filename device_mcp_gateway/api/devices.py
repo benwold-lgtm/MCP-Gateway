@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_request
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
+from device_mcp_gateway.credentials import ReferenceInvalid
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
@@ -76,20 +77,31 @@ def _parse_auth(
     if auth_type == "api_key":
         auth_cfg = data.get("auth", {})
         api_key = auth_cfg.get("api_key") or data.get("api_key")
+        credential_ref = auth_cfg.get("credential_ref") or data.get("credential_ref")
         header_name = auth_cfg.get("header_name") or cfg.get("auth", {}).get("api_key", {}).get(
             "header_name", "X-API-Key"
         )
-        if not api_key:
+        if not api_key and not credential_ref:
+            # Unchanged: no credential at all still means "this device needs no auth", which
+            # is a legitimate registration and must not become an error now that a second
+            # way of supplying one exists.
             return None
         # F-43: optional non-header placement + scheme prefix.
+        # ADR-0018: `credential_ref` is the by-reference form. Exclusivity and reference
+        # syntax are both enforced by the handler rather than re-checked here, so the API and
+        # a restore and a worker rehydrate all get the same answer — a second copy of the
+        # rule in this route is how the two drift.
         try:
             return ApiKeyAuth(
                 api_key=api_key,
+                credential_ref=credential_ref,
                 header_name=header_name,
                 location=auth_cfg.get("location", "header"),
                 name=auth_cfg.get("name"),
                 value_prefix=auth_cfg.get("value_prefix", ""),
             )
+        except ReferenceInvalid as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid credential_ref: {exc}")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid api_key auth: {exc}")
     if auth_type == "oauth2":

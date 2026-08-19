@@ -120,6 +120,7 @@ class BasePod(ABC):
         tls_verify: "ssl.SSLContext | bool" = True,
         allow_private: bool = False,
         allowed_ports: set[int] | None = None,
+        credential_resolver: Any = None,
     ):
         self.hostname = hostname
         self.manifest = manifest
@@ -137,8 +138,12 @@ class BasePod(ABC):
         # policy as the dispatch client.
         self._allow_private = allow_private
         self._allowed_ports = allowed_ports
+        # ADR-0018 §2. Attached beside the egress policy so a by-reference handler resolves
+        # itself inside apply(); no dispatch call site has to remember a bind step.
+        self._credential_resolver = credential_resolver
         if self.auth is not None:
             self.auth.configure_egress(allow_private=allow_private, allowed_ports=allowed_ports)
+            self.auth.configure_credentials(credential_resolver)
         # Bounded jittered retries for idempotent calls (F-05/F-44).
         self._retry_policy = retry_policy or RetryPolicy()
         # One reused HTTP client per pod (created lazily) instead of one per

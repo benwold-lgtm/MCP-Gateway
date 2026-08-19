@@ -31,6 +31,17 @@ from urllib.parse import urlsplit
 
 SCHEME = "secret"
 
+
+def _own_groups() -> frozenset[int]:
+    """Every gid this process is a member of, including the effective one.
+
+    ``os.getgroups()`` omits the effective gid on some platforms, so it is added explicitly
+    rather than assumed — the kind of gap that would make a security check pass or fail
+    depending on the host.
+    """
+    return frozenset(os.getgroups()) | {os.getgid(), os.getegid()}
+
+
 #: One path segment. Deliberately strict — a reference is written by an operator or a
 #: console, not by a user, so there is no case for permissiveness here. Excluding ``.`` and
 #: ``..`` at the pattern level is what makes traversal unrepresentable rather than filtered:
@@ -162,10 +173,14 @@ class MountedFilesResolver:
     arrive with the circuit breaker of §7, which they are the reason for.
 
     **Mode is checked, and the check is not merely advisory.** A credential file readable by
-    group or world on a shared host is a credential the host's other users hold. Kubernetes
-    mounts are 0644 inside a pod-private volume, which is why the check is opt-out via
-    ``require_private`` rather than unconditional — but it defaults to on, so the insecure
-    posture is never what you get by omission.
+    a party outside this workload is a credential that party holds. What counts as "outside"
+    is the subtle part and is settled in :meth:`_refuse_if_too_open`: world access always
+    counts, group access counts only when the group is not ours. That distinction is what lets
+    the check stay **on by default on Kubernetes**, where the file is necessarily root-owned
+    and reached through ``fsGroup``.
+
+    ``require_private=False`` remains for a backend that manages the mode itself, but it is no
+    longer the price of running on Kubernetes.
     """
 
     def __init__(self, root: str | os.PathLike[str], *, require_private: bool = True) -> None:
@@ -190,6 +205,34 @@ class MountedFilesResolver:
         if not resolved.is_relative_to(root):
             raise ReferenceInvalid(f"credential reference {ref.raw!r} escapes the secret store root")
         return resolved
+
+    @staticmethod
+    def _refuse_if_too_open(st: os.stat_result, ref: CredentialRef) -> None:
+        """Refuse a secret readable by anyone outside this workload.
+
+        **World-readable is always refused.** Group-readable is refused only when the group is
+        not one of our own — which is the distinction that makes this check usable at all.
+
+        Measured on a real cluster: Kubernetes cannot chown a Secret volume to an arbitrary
+        uid, so the file is always ``root``-owned and a non-root workload can only reach it
+        through the group (``fsGroup``) or through world. A check that refused *any* group
+        access could therefore never pass on Kubernetes — the first version of this refused
+        exactly that, and the only way to run was to disable it, which is not a check.
+
+        Group access to *our own* group is not exposure: inside a pod-private volume that
+        group is the workload. Group access to a **foreign** group is, and is still refused.
+        """
+        mode = stat.filemode(st.st_mode)
+        if st.st_mode & stat.S_IRWXO:
+            raise ReferenceInvalid(
+                f"secret for {ref.raw!r} is world-accessible (mode {mode}); refusing to read it. "
+                "chmod o-rwx the file, or mount it with a mode that grants no world access."
+            )
+        if st.st_mode & stat.S_IRWXG and st.st_gid not in _own_groups():
+            raise ReferenceInvalid(
+                f"secret for {ref.raw!r} is readable by group {st.st_gid}, which this process is "
+                f"not a member of (mode {mode}); refusing to read it."
+            )
 
     async def resolve(self, ref: CredentialRef) -> str:
         """Read the material for ``ref``.
@@ -219,15 +262,27 @@ class MountedFilesResolver:
         except OSError as exc:
             raise StoreUnavailable(f"secret store I/O error: {type(exc).__name__}") from exc
 
-        if self._require_private and st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-            raise ReferenceInvalid(
-                f"secret for {ref.raw!r} is group/world accessible (mode {stat.filemode(st.st_mode)}); "
-                "refusing to read it. chmod 600 the file, or set require_private=false for a "
-                "pod-private mount where the mode is set by the platform."
-            )
+        if self._require_private:
+            self._refuse_if_too_open(st, ref)
 
         try:
             material = path.read_text(encoding="utf-8")
+        except PermissionError as exc:
+            # The file exists, passed the exposure check, and we still cannot read it — which
+            # means it is owned by somebody else and grants us nothing. On Kubernetes that is
+            # the standard misconfiguration: a Secret volume is root-owned, so a non-root
+            # workload reaches it only via `fsGroup`, and a 0400 mount is readable by nobody
+            # but root. Measured on a live cluster, where the message this replaces said only
+            # "secret store read failed: PermissionError" and named none of that.
+            #
+            # Classified as a store outage rather than a bad reference because a mount whose
+            # ownership is wrong is wrong for *every* device on it, which is the §7 test.
+            raise StoreUnavailable(
+                f"secret store denied a read of {ref.raw!r} (uid={os.getuid()}, gid={os.getgid()}): "
+                "the file exists but grants this process no access. On Kubernetes set "
+                "securityContext.fsGroup and mount the Secret group-readable (0440); a 0400 "
+                "root-owned mount is unreadable by a non-root workload."
+            ) from exc
         except OSError as exc:
             raise StoreUnavailable(f"secret store read failed: {type(exc).__name__}") from exc
 

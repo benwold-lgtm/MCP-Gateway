@@ -43,8 +43,9 @@ from typing import Any
 from loguru import logger
 
 from device_mcp_gateway import metrics
-from device_mcp_gateway.auth.base import AbstractAuth, CredentialsChangedHook
+from device_mcp_gateway.auth.base import AbstractAuth, CredentialNotBound, CredentialsChangedHook
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered
+from device_mcp_gateway.credentials import ResolverError, build_resolver
 from device_mcp_gateway.core.spec_limits import (
     DEFAULT_MAX_SPEC_BYTES,
     DEFAULT_TRANSLATE_TIMEOUT,
@@ -117,6 +118,10 @@ class DeviceWorker:
     ) -> None:
         self._id = worker_id
         self._config = config
+        # ADR-0018 §2 — see the note in pod_supervisor: built from the config this owner
+        # already holds, not injected, so embedded and distributed cannot disagree about
+        # whether credential resolution is available.
+        self._credential_resolver = build_resolver(config)
         self._r = redis_client
         self._codec = codec or CredentialCodec(None)
         self._backend: AbstractRegistryBackend | None = None
@@ -231,6 +236,12 @@ class DeviceWorker:
         self._rebalancer = Rebalancer(self)
         # _health is initialised in run() after the backend is available
         self._health: WorkerHealthLoop | None = None
+        # Why a spec fetch last failed, handed from _fetch_spec back to the spawn path so
+        # the recorded spawn_error names the cause rather than only "No spec available".
+        # Declared here rather than at its reset in _spawn_pod: an attribute whose only
+        # assignment is ``= None`` reads to mypy as type None, so the one assignment that
+        # carries an actual reason is the one it rejects.
+        self._spec_failure_reason: str | None = None
 
     async def run(self, backend: AbstractRegistryBackend) -> None:
         """Main entry point. Runs until SIGTERM/SIGINT or stop() is called."""
@@ -257,9 +268,7 @@ class DeviceWorker:
             allowed_ports=resolve_allowed_ports(self._config),
             # Only the worker holds the credential codec, so it supplies the auth handler
             # the health loop needs to reach an authenticated MCP upstream.
-            auth_provider=lambda cfg: _auth_from_config(
-                cfg.auth_type, self._decrypt_auth(cfg.hostname, cfg.auth_config)
-            ),
+            auth_provider=self._auth_for,
         )
         self._health.on_spec_changed = self._replace_pod
         await backend.initialize()
@@ -660,9 +669,11 @@ class DeviceWorker:
         # record and the health loop seeds it on its first poll instead.
         spec_hash: str | None = None
         if manifest_dict is None:
+            self._spec_failure_reason = None
             spec = await self._fetch_spec(cfg)
             if spec is None:
-                err = f"No spec available for {hostname}"
+                reason = self._spec_failure_reason
+                err = f"No spec available for {hostname}" + (f" ({reason})" if reason else "")
                 logger.warning(err)
                 # We reached out and got nothing back, so this IS a reachability
                 # measurement — record it (F-66). A device that fails here is never
@@ -705,7 +716,7 @@ class DeviceWorker:
         else:
             manifest_obj = _dict_to_manifest(manifest_dict)
 
-        auth = _auth_from_config(cfg.auth_type, self._decrypt_auth(hostname, cfg.auth_config))
+        auth = self._auth_for(cfg)
         if auth is not None:
             auth.on_credentials_changed(self._credential_writeback(hostname))
         pod_cls = McpProxyPod if is_proxy else DevicePod
@@ -721,6 +732,7 @@ class DeviceWorker:
             tls_verify=self._tls.for_device(hostname),
             allow_private=resolve_allow_private(self._config),
             allowed_ports=resolve_allowed_ports(self._config),
+            credential_resolver=self._credential_resolver,
         )
         await pod.start(with_sse=False)  # distributed mode: no in-process SSE transport
         self._pods[hostname] = pod
@@ -772,6 +784,31 @@ class DeviceWorker:
     # Recovery on restart
     # ------------------------------------------------------------------
 
+    def _auth_for(self, cfg: Any) -> Any:
+        """Build an auth handler for ``cfg``, already wired for credential resolution.
+
+        **The resolver is attached here, where the handler is built, rather than by each
+        consumer.** The health loop reaches authenticated MCP upstreams with a handler from
+        this factory and calls ``apply()`` on it, so a by-reference device whose handler
+        arrived unconfigured would fail its *health check* and be marked unreachable — a
+        device reported down for a reason that has nothing to do with the device.
+
+        **This must stay the only place a handler is built in this module.** The first version
+        of this factory existed and was still not enough, because three other call sites went
+        straight to ``_auth_from_config``: pod spawn, MCP spec discovery, and the health
+        loop's provider. Spec discovery was the one that failed on a live cluster — a
+        by-reference device could not be discovered, so it never got a manifest and reported
+        "No spec available", which names nothing about credentials at all.
+
+        The lesson is narrower than "attach at construction": that only helps when there is
+        **one** construction point. There were four. Adding a fifth way to build a handler
+        without routing it here re-opens exactly this defect.
+        """
+        auth = _auth_from_config(cfg.auth_type, self._decrypt_auth(cfg.hostname, cfg.auth_config))
+        if auth is not None:
+            auth.configure_credentials(self._credential_resolver)
+        return auth
+
     async def _recover_assigned(self) -> None:
         """Re-spawn pods for devices this worker owned before a restart."""
         devices = await self._r.smembers(KEYS.worker_devices(self._id))
@@ -810,11 +847,21 @@ class DeviceWorker:
                 upstream = StreamableHttpClient(
                     url=cfg.base_url,
                     get_client=lambda: client,
-                    auth=_auth_from_config(cfg.auth_type, self._decrypt_auth(cfg.hostname, cfg.auth_config)),
+                    auth=self._auth_for(cfg),
                     timeout=discovery.get("timeout", 10),
                 )
                 try:
                     return {"upstream_kind": "mcp", "tools": await upstream.list_tools()}
+                except (ResolverError, CredentialNotBound) as exc:
+                    # **Do not flatten this into "no spec".** Measured on a live cluster,
+                    # four distinct credential failures — resolver unwired, mount permissions,
+                    # a non-ASCII value, and a missing secret — all reported identically as
+                    # "No spec available", which points an operator at the upstream. ADR-0018
+                    # §7 draws a careful line between a bad reference and a store outage, and
+                    # that line is worth nothing if it is erased one layer above the resolver.
+                    self._spec_failure_reason = f"credential: {exc}"
+                    logger.warning(f"MCP discovery failed for {cfg.hostname}: {exc}")
+                    return None
                 except Exception as exc:
                     logger.warning(f"MCP discovery failed for {cfg.hostname}: {exc}")
                     return None

@@ -68,7 +68,27 @@ class ApiKeyAuth(AbstractAuth):
                 f"api key for {self.credential_ref!r} has not been resolved; "
                 "the dispatch path must call bind() before applying auth"
             )
-        return f"{self.value_prefix}{self.api_key}"
+        value = f"{self.value_prefix}{self.api_key}"
+        if self.location == "header":
+            # HTTP headers are latin-1 on the wire, so a non-ASCII credential fails at
+            # encoding — and the exception httpx raises names neither the device, the
+            # credential, nor the header. Measured on a live cluster, where a secret
+            # containing two Cyrillic characters surfaced only as
+            # "'ascii' codec can't encode characters in position 14-15" and then as
+            # "No spec available", which points at the upstream rather than the secret.
+            #
+            # Only headers are constrained: a query or cookie value is encoded by the
+            # transport, so those placements keep accepting any text.
+            try:
+                value.encode("latin-1")
+            except UnicodeEncodeError as exc:
+                where = f"reference {self.credential_ref!r}" if self.credential_ref else "inline api_key"
+                raise CredentialNotBound(
+                    f"the credential from {where} contains characters that cannot be sent in an "
+                    f"HTTP header (position {exc.start}); headers are latin-1. Store an "
+                    "ASCII-safe value, or place the key in a query parameter or cookie."
+                ) from exc
+        return value
 
     async def bind(self, resolver: Any) -> None:
         """Resolve ``credential_ref`` into the live key for this dispatch.
@@ -82,11 +102,44 @@ class ApiKeyAuth(AbstractAuth):
             return
         self.api_key = await resolver.resolve(CredentialRef.parse(self.credential_ref))
 
+    def configure_credentials(self, resolver: Any | None) -> None:
+        self._resolver = resolver
+
+    async def _ensure_bound(self) -> None:
+        """Resolve the reference if this handler carries one.
+
+        **Resolved on every dispatch, deliberately, for now.** ADR-0018 makes the resolution
+        cache an explicit TTL decision with its own metrics, and a cache added here without
+        one would be an implicit unbounded copy held for the pod's lifetime — the durable copy
+        §1 draws a line against. The cache arrives with its instrumentation, not before it.
+        """
+        if self.credential_ref is None:
+            return
+        resolver = getattr(self, "_resolver", None)
+        if resolver is not None:
+            await self.bind(resolver)
+            return
+        if self.api_key is None:
+            # Fail closed, naming which of the two things is wrong: the device wants a
+            # reference resolved and this deployment has no resolver at all. Distinguishing
+            # this from "the store said no" matters — they send an operator to different
+            # systems, which is the same reasoning as §7's two failure kinds one level up.
+            raise CredentialNotBound(
+                f"device credential {self.credential_ref!r} has not been resolved: this handler was "
+                "never given a credential resolver. Either the deployment has none configured "
+                "(gateway.credentials.root / MCP_CREDENTIAL_ROOT), or this dispatch path predates "
+                "the ADR-0018 wiring — which is what a replica mid-rolling-restart looks like."
+            )
+        # Already bound out of band by a caller that resolved explicitly. Left usable rather
+        # than re-refused, so `bind()` stays meaningful on its own.
+
     async def get_headers(self) -> dict[str, str]:
         # Header-only view (back-compat); empty when the key lives in a query/cookie.
+        await self._ensure_bound()
         return {self.name: self._value} if self.location == "header" else {}
 
     async def apply(self) -> AuthMaterial:
+        await self._ensure_bound()
         if self.location == "query":
             return AuthMaterial(params={self.name: self._value})
         if self.location == "cookie":

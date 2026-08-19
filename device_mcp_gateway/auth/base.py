@@ -41,7 +41,7 @@ class CredentialNotBound(RuntimeError):
     """
 
 
-def exclusive_secret(literal: Any, ref: Any, *, field: str) -> None:
+def exclusive_secret(literal: Any, ref: Any, *, field: str, ref_field: str = "credential_ref") -> None:
     """Enforce ADR-0018's migration rule: a secret is inline **or** by reference, never both.
 
     Both is refused rather than resolved by precedence. A record carrying an inline value and
@@ -51,12 +51,16 @@ def exclusive_secret(literal: Any, ref: Any, *, field: str) -> None:
     cannot authenticate, and finding that out at registration beats finding out at dispatch.
     """
     if literal is not None and ref is not None:
+        # Both names come from the caller rather than being derived, because deriving the
+        # second one produced a message naming `api_key_ref` — a field that does not exist in
+        # the API. An operator reading that goes looking for it and finds nothing, which is a
+        # worse failure than no message at all. Verified on a live cluster.
         raise ValueError(
-            f"{field} and {field}_ref are mutually exclusive (ADR-0018): a device holds its "
+            f"{field} and {ref_field} are mutually exclusive (ADR-0018): a device holds its "
             "secret inline or by reference, never both."
         )
     if literal is None and ref is None:
-        raise ValueError(f"one of {field} or {field}_ref is required")
+        raise ValueError(f"one of {field} or {ref_field} is required")
 
 
 class AbstractAuth(ABC):
@@ -101,6 +105,17 @@ class AbstractAuth(ABC):
         their own network calls. The owning pod calls this at wire-up so the handler's
         egress posture matches the configured ``allow_private`` / ``allowed_target_ports``
         settings (F-02, review item 9)."""
+        return None
+
+    def configure_credentials(self, resolver: Any | None) -> None:
+        """Adopt the gateway's credential resolver (ADR-0018 §2). No-op when the handler
+        holds no reference, or when the deployment has no resolver configured.
+
+        Wired at the same point as :meth:`configure_egress`, and for the same reason: the
+        alternative is every dispatch call site remembering to resolve first. A resolution
+        step that must be remembered per call site is the shape of defect this codebase has
+        repeatedly found — a guard attached by convention rather than by construction.
+        """
         return None
 
     def on_credentials_changed(self, hook: CredentialsChangedHook) -> None:

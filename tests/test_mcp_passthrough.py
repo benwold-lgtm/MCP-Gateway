@@ -513,6 +513,12 @@ async def test_stored_credentials_are_applied_to_the_upstream_call():
         def configure_egress(self, allow_private, allowed_ports):
             pass
 
+        def configure_credentials(self, resolver):
+            # ADR-0018 wire-up seam. Present because the base calls it unconditionally, the
+            # same way it calls configure_egress — a double missing it is a double that has
+            # drifted from the interface it stands in for.
+            pass
+
         async def apply(self):
             from device_mcp_gateway.auth.base import AuthMaterial
 

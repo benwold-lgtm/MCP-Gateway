@@ -202,6 +202,12 @@ def test_egress_posture_is_configured_on_auth_by_the_base():
         def configure_egress(self, allow_private, allowed_ports):
             _Auth.configured = {"allow_private": allow_private, "allowed_ports": allowed_ports}
 
+        def configure_credentials(self, resolver):
+            # ADR-0018 wire-up seam. Present because the base calls it unconditionally, the
+            # same way it calls configure_egress — a double missing it is a double that has
+            # drifted from the interface it stands in for.
+            pass
+
     _MinimalPod(
         hostname="test-device",
         manifest=_manifest(),
