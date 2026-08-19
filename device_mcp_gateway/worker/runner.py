@@ -236,6 +236,12 @@ class DeviceWorker:
         self._rebalancer = Rebalancer(self)
         # _health is initialised in run() after the backend is available
         self._health: WorkerHealthLoop | None = None
+        # Why a spec fetch last failed, handed from _fetch_spec back to the spawn path so
+        # the recorded spawn_error names the cause rather than only "No spec available".
+        # Declared here rather than at its reset in _spawn_pod: an attribute whose only
+        # assignment is ``= None`` reads to mypy as type None, so the one assignment that
+        # carries an actual reason is the one it rejects.
+        self._spec_failure_reason: str | None = None
 
     async def run(self, backend: AbstractRegistryBackend) -> None:
         """Main entry point. Runs until SIGTERM/SIGINT or stop() is called."""
