@@ -138,9 +138,26 @@ ADR-0013 §10 buys erasure by destroying a per-tenant content key so that hashes
 content does not. For *audit* content that remains exactly right and is untouched here.
 
 For *credentials* it stops being the gateway's problem. Deleting the tenant's namespace in the
-secret store revokes every device credential at once, whatever archives exist and wherever
-they are. The archive-retention hole — a backup expiring on its own schedule, outliving the
-shred — closes because there is nothing in the archive to outlive.
+secret store revokes every device credential, whatever archives exist and wherever they are.
+The archive-retention hole — a backup expiring on its own schedule, outliving the shred —
+closes because there is nothing in the archive to outlive.
+
+**Not "at once", on the mounted-files backend.** An earlier draft of this section said
+revocation takes effect immediately. Measured on a live cluster (2026-08-19), it does not:
+
+- **Deleting** a Secret does **not** reach a pod that already has it mounted. The kubelet has
+  no source to re-project from, so the last projected content stays readable in the volume —
+  observed unchanged for 4+ minutes, and there is no mechanism that would ever remove it.
+- **Modifying** a Secret *does* propagate, in ~30–60s, because the kubelet re-projects it.
+- The deletion only bites at **pod restart**, and then it bites hard: the replacement pod gets
+  `FailedMount` and never becomes Ready.
+
+So for a mounted-files deployment, offboarding is: delete the secret **and then restart every
+pod holding the mount**. Until that restart the credential is live in the volume, in a pod the
+operator believes they have just deprived of it. Where revocation must be immediate, rotate or
+empty the secret's *key* rather than deleting the secret — that path re-projects and is the one
+this ADR should recommend. A networked backend does not have this gap, because it holds nothing
+locally to go stale.
 
 ### 5. What survives of ADR-0011
 
@@ -435,6 +452,12 @@ would make the tenant's IdP configuration harder for no reason.
 
 ### 7. The secret store is its own failure domain, with its own state
 
+> **Scope: this section describes the NETWORKED backends** — Vault, a cloud secret manager,
+> §2's middle row. It was written as though it covered all three, and it does not. The
+> mounted-files backends (§2 rows 1 and 3 — a Kubernetes Secret/CSI volume, and Lite's local
+> file tree) have a different failure model, set out in §7a. Read §7a first if you are
+> deploying either of those, which today is most deployments.
+
 §2's first draft said a resolver failure is a device failure. That is right for one case and
 badly wrong for the other, and the difference matters more than the similarity.
 
@@ -502,6 +525,54 @@ resolver rather than being added later. The TTL cannot be reasoned to from first
 the only question is whether the data to choose it accumulates naturally in production or has to
 be manufactured by a dedicated load test that will approximate the wrong workload. Building the
 measurement in costs four metrics; leaving it out converts a tuning decision into a project.
+
+### 7a. The mounted-files backend is a deploy-time dependency, not a dispatch-time one
+
+§7's scenario — a store that vanishes underneath a running process, a fleet-wide breaker,
+`StoreUnavailable` surfacing at dispatch — is a real description of a networked store. For a
+Kubernetes Secret or CSI volume, and for Lite's local file tree, **it does not occur**, and
+designing for it there produces machinery that cannot be exercised.
+
+Established by measurement on a live cluster (2026-08-19), not by reasoning:
+
+| Event | What actually happens |
+|---|---|
+| Secret **deleted** while pods run | Nothing, from the pod's side. The volume keeps its last projected content indefinitely — the kubelet has no source to re-project from. Dispatch keeps succeeding |
+| Secret **modified** (key renamed, value changed) | Re-projected in ~30–60s. This is the *only* way a running pod sees a credential change |
+| Pod **restarts** while the Secret is absent | `FailedMount`; the pod sticks in `ContainerCreating` and never becomes Ready. The old pods, still running, keep serving |
+| Node/kubelet cannot reach the API server | The mount is already materialised on local disk; reads do not consult the API server |
+
+The store is therefore a dependency of **starting a pod**, not of **serving a request**. Its
+failure mode is a deployment that will not roll — loud, visible in `kubectl get pods`, and
+caught by exactly the readiness machinery that already exists — rather than a fleet of healthy
+pods that suddenly cannot authenticate.
+
+Three consequences for what gets built:
+
+1. **No fleet-wide breaker for this backend.** There is no transient shared outage for it to
+   ride out. A resolution failure here is `ReferenceInvalid` — a missing file, a wrong key
+   name, a mode the check refuses — and every one of those is permanent and scoped to one
+   device, which is §7's *first* row, not its second. `StoreUnavailable` remains reachable for
+   one cause only: the mount itself is unreadable (wrong ownership, wrong `fsGroup`), which is
+   genuinely fleet-wide and genuinely the operator's to fix.
+2. **The resolution cache buys nothing here.** §7 upgrades the cache from a performance
+   decision to an availability one, on the reasoning that a short TTL makes a store blip
+   invisible. A local file read has no blip to hide and costs microseconds. The cache and its
+   four metrics belong with the networked backend that motivates them; adding them now would
+   mean shipping an unbounded in-memory copy of every credential — the thing §1 exists to
+   prevent — in exchange for nothing.
+3. **What a mounted-files deployment actually needs to monitor** is the credential *file set*:
+   a reference naming a file that is not there, and a mount whose ownership the resolver
+   refuses. Both are configuration errors that surface at the first resolution, and neither is
+   improved by a breaker.
+
+**The warm-path corollary, which cost a defect to learn.** Because the mount survives its
+Secret and only re-projects on modification, the realistic credential outage on this backend is
+not "the store went away" but "a live device's credential changed underneath it" — a rotation
+that removed the old key, an operator editing the wrong entry. That device is *already running*
+and already assigned, so nothing in the spawn path will ever look at it again. Whatever records
+the reason has to live in the **health loop**, not only in spawn. Finding #11 was exactly this,
+and §7's dispatch-time framing is part of why it was not anticipated.
 
 ## Consequences
 
