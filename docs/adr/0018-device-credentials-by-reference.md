@@ -82,10 +82,14 @@ One consequence follows and is accepted deliberately:
   a rotating-token device. It becomes unnecessary only for a fleet that is entirely
   operator-provisioned.
 
-**The archive question is settled, and settled by exclusion.** A rotating token is **never
-exported, in any archive, unconditionally** — see §3. That is a change from this section's
-first draft, which said an archive of such a stack is still a credential dump and left the old
-`backup:*` apparatus alive to protect it.
+**The archive question is settled, and settled by exclusion.** A backup of such a stack **no
+longer contains a live credential.** The rotating value is excluded from every archive, the same
+way `session:*`, `claim:` and `health_lock:` already are — it is gateway-accumulated **runtime
+state**, not tenant-declared configuration, and **restoring it would be the wrong operation
+regardless of how well it was encrypted.** §3 excludes it unconditionally rather than carrying a
+conditional for it. That is a change from this section's first draft, which said an archive of
+such a stack is still a credential dump and left the old `backup:*` apparatus alive to protect
+it.
 
 **What is *not* settled** is the at-rest question, which is the one this section exists to name:
 a live refresh token is still held encrypted under `MCP_SECRET_KEY` in the running registry, and
@@ -93,6 +97,18 @@ compromise of that key still costs exactly what it did before ADR-0018. Closing 
 resolver which can **write** — turning §3's open question about console writes into a
 requirement. Excluding the token from archives narrows the blast radius to a running stack; it
 does not shrink it to nothing, and this ADR does not claim otherwise.
+
+**This is separate from closing §1a fully, and it is easy to misread the two as the same fix.**
+Backup no longer waits on the resolver-writes question — **it never needed the credential to be
+writable, only excludable.** The two were coupled only by an assumption that an archive had to
+carry everything a stack needs to run, and §3 abandons that assumption rather than satisfying it.
+
+That decoupling is worth naming, because it is now a **pattern in this ADR set rather than a
+coincidence**: the same shape appeared when §6 deleted the single-use consumption machinery
+without waiting for ADR-0017 to land its replacement for the provider plane. In both cases a
+dependency looked structural and turned out to be an artefact of one requirement stated too
+strongly. It is worth asking of the remaining open questions — a blocked item may be blocked on
+a property nothing actually needs.
 
 ### 2. Resolution is an interface, and the backend is a deployment choice
 
@@ -175,9 +191,17 @@ That distinction is what bounds the cost, and the cost differs by grant:
 | `password` | **Seamless.** `username` and `password` survived; same path |
 | `refresh_token` | **Needs re-authorization.** The token *was* the credential; nothing surviving the archive can re-mint it |
 
-(The `authorization_code` grant is out of scope for this gateway — it needs an interactive
-redirect — so the affected population is exactly `grant_type=refresh_token` devices, not every
-OAuth2 device.)
+**No archive design can avoid the third row**, and it is worth being precise about why: a
+refresh token generally exists because a human consented to it once, out of band. Nothing that
+could be put in an archive can re-mint a token that required consent — only the consent can. So
+this is not a limitation of excluding it; excluding it merely stops the archive from *pretending*
+otherwise while carrying a copy that may already be dead server-side.
+
+(The `authorization_code` grant, the other place consent shows up, is **out of scope for this
+gateway** — `auth/oauth2.py` restricts `grant_type` to `client_credentials`, `password` and
+`refresh_token` and raises on anything else, because authorization_code needs an interactive
+redirect. So the affected population today is exactly `grant_type=refresh_token`. Were a
+consent-requiring grant added later, this row is where it would land.)
 
 **The one real cost must be visible, not discovered.** A `grant_type=refresh_token` device
 arrives from a restore unable to authenticate, and that must surface as an explicit tenant-facing
@@ -185,8 +209,27 @@ state — *this device needs reconnecting* — reported by the restore itself an
 device's status afterwards. It must not be a device that looks restored and fails on its first
 tool call. This is the same standard §7 sets for a credential failure at dispatch: the operator
 is told what is wrong and where, rather than being handed a symptom. ADR-0011's per-device
-outcomes and reasons, which §5 keeps, are the reporting channel — this is a new outcome kind in
-an existing mechanism, not new machinery.
+outcomes and reasons, which §5 keeps, are the reporting channel for the restore *report* — this
+is a new outcome kind in an existing mechanism, not new machinery.
+
+**The persistent state it leaves behind is a different question, and it is decided here rather
+than during a UI slice.** *Needs reconnecting* is **not a health signal** — the device may be
+perfectly reachable, its pod running, its spec fetching — so it must not become another value of
+whatever reachability is rendered as. It is an **authorization** condition requiring a human.
+
+It is therefore modelled as its own orthogonal field, exactly as `fingerprint_state` already is.
+That precedent is close enough to be decisive: `fingerprint_state: pending_approval` is likewise
+a device that works but needs a human decision, likewise not a health reading, and it is already
+carried as a separate field rather than folded into reachability.
+
+**And that precedent carries a defect worth not repeating.** `fingerprint_state` is absent from
+`DeviceSummary`, the list projection — so a device awaiting approval is invisible in the fleet
+list and discoverable only by opening its detail view. A device needing reconnection after a
+restore is *precisely* the case an operator scans a list for, and it would arrive with the same
+gap on day one. **The field ships on the list projection, not only on the detail view.**
+
+This is the same standard finding #11 established: a device that reports clearly and looks bad is
+strictly better than one that looks fine and is not.
 
 ### 4. Offboarding is a secret-store operation
 
