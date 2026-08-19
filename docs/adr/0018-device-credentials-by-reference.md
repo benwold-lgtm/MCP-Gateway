@@ -67,7 +67,7 @@ boundary rather than a scope drawn to make the problem smaller:
 | | Provisioned by | Rotated by | Under ADR-0018 |
 |---|---|---|---|
 | API key, OAuth2 `client_secret`, `password` | Tenant | Tenant | **By reference.** §1 holds in full |
-| OAuth2 `refresh_token` | Gateway, mid-exchange | Gateway | **Encrypted at rest**, under `MCP_SECRET_KEY` |
+| OAuth2 `refresh_token` | Gateway, mid-exchange | Gateway | **Encrypted at rest** under `MCP_SECRET_KEY`, and **never exported** in any archive (§3) |
 
 **State the consequence without softening it.** For a device using OAuth2 with refresh-token
 rotation, compromise of `MCP_SECRET_KEY` is not a reduced version of the pre-ADR-0018 risk —
@@ -76,20 +76,23 @@ so it is worth precisely what the credential blob was worth, and this ADR does n
 The correct summary is not that §1 is weakened at the edges: **§1's central claim holds for
 static secrets and does not hold at all for rotating ones.**
 
-Two consequences follow and are accepted deliberately:
+One consequence follows and is accepted deliberately:
 
 - **`MCP_SECRET_KEY` does not go away**, and neither does key rotation, for any deployment with
   a rotating-token device. It becomes unnecessary only for a fleet that is entirely
   operator-provisioned.
-- **A backup of such a stack still contains a live credential.** §3's "an archive is
-  configuration" is true of the reference-holding devices and false of the rotating ones, which
-  §3 now says explicitly.
 
-Closing this properly needs a resolver that can *write* — turning §3's open question about
-console writes into a requirement — or dropping persisted refresh tokens and re-authenticating
-from `client_secret` every time, which breaks `grant_type=refresh_token` devices outright.
-Neither is decided here. What is decided is that the boundary is named rather than papered
-over, so nothing downstream reasons from a property this design does not have.
+**The archive question is settled, and settled by exclusion.** A rotating token is **never
+exported, in any archive, unconditionally** — see §3. That is a change from this section's
+first draft, which said an archive of such a stack is still a credential dump and left the old
+`backup:*` apparatus alive to protect it.
+
+**What is *not* settled** is the at-rest question, which is the one this section exists to name:
+a live refresh token is still held encrypted under `MCP_SECRET_KEY` in the running registry, and
+compromise of that key still costs exactly what it did before ADR-0018. Closing *that* needs a
+resolver which can **write** — turning §3's open question about console writes into a
+requirement. Excluding the token from archives narrows the blast radius to a running stack; it
+does not shrink it to nothing, and this ADR does not claim otherwise.
 
 ### 2. Resolution is an interface, and the backend is a deployment choice
 
@@ -127,10 +130,63 @@ contains no credentials, so:
 **Restore keeps its dry run.** That was never about credentials; it is about a plan being read
 before it is applied, and it has already caught real mistakes.
 
-**The exception is a stack with rotating-token devices** (§1a). Their refresh tokens are still
-credentials at rest, so an archive containing one is still a credential dump and the `backup:*`
-reasoning this section retires continues to apply to it. An archive is configuration exactly
-as far as §1a's first row extends, and no further.
+**There is no exception for rotating-token devices.** An earlier draft made one: a stack with
+such a device would keep the whole `backup:*` apparatus, so an archive was configuration only as
+far as §1a's first row extended. That conditional is **withdrawn**. A gateway-minted rotating
+token is **excluded from every archive, unconditionally**, and the claims above hold for every
+stack rather than for entirely-operator-provisioned ones.
+
+#### Why exclusion beats a mixed-fleet conditional
+
+**The conditional keeps the crypto apparatus alive as a rarely-exercised path.** Passphrase,
+KDF, envelope and canary would survive as code that fires only for stacks that happen to own a
+rotating-token device — which in this project is a specific and well-evidenced liability, not a
+general worry. The live-cluster verification standard exists *because* a 1321-test suite passed
+while the feature under it did not work. A protection path that almost never executes is the
+exact shape of code that rots quietly and fails the one time an incident depends on it.
+
+**The guarantee the conditional protects frequently does not hold anyway.** Many OAuth2
+providers invalidate the previous refresh token the moment a new one is issued. A token backed
+up a week ago can already be dead server-side by the time anyone restores it, for reasons no
+archive design controls. Carrying full protection machinery to preserve seamless restore, when
+seamless restore is not reliably available, is a bad trade twice over.
+
+**It is the same category this project already excludes**, and the principle simply had not been
+carried through. `backup/export.py` omits claims and leases, worker membership, assignment and
+call streams, sessions, idempotency markers and rate-limit counters, and says why: *"Restoring a
+stale claim or a half-consumed stream would actively harm a fresh stack, so the omission is a
+feature, not a gap."* Its rule is that the archive carries **registration inputs, not runtime
+state.** A refresh token is gateway-accumulated runtime state, not a tenant-declared input — it
+was slipping through only because it is stored inside `auth_config` next to genuine registration
+inputs. Excluding it applies the existing rule; it does not add an exception to it.
+
+#### What "excluded" means precisely
+
+**Only the live token value.** Everything that makes the device a device is still exported as
+ordinary configuration: its registration, its `credential_ref`, and — per §1a's first row — the
+operator-provisioned `client_secret` or `password` that reference points at. Nothing about the
+device's identity or its ability to be re-established is lost.
+
+That distinction is what bounds the cost, and the cost differs by grant:
+
+| Grant | After restore |
+|---|---|
+| `client_credentials` | **Seamless.** `client_secret` survived, so the gateway re-runs the token exchange on first use. No human, indistinguishable from normal operation |
+| `password` | **Seamless.** `username` and `password` survived; same path |
+| `refresh_token` | **Needs re-authorization.** The token *was* the credential; nothing surviving the archive can re-mint it |
+
+(The `authorization_code` grant is out of scope for this gateway — it needs an interactive
+redirect — so the affected population is exactly `grant_type=refresh_token` devices, not every
+OAuth2 device.)
+
+**The one real cost must be visible, not discovered.** A `grant_type=refresh_token` device
+arrives from a restore unable to authenticate, and that must surface as an explicit tenant-facing
+state — *this device needs reconnecting* — reported by the restore itself and visible in the
+device's status afterwards. It must not be a device that looks restored and fails on its first
+tool call. This is the same standard §7 sets for a credential failure at dispatch: the operator
+is told what is wrong and where, rather than being handed a symptom. ADR-0011's per-device
+outcomes and reasons, which §5 keeps, are the reporting channel — this is a new outcome kind in
+an existing mechanism, not new machinery.
 
 ### 4. Offboarding is a secret-store operation
 
@@ -624,6 +680,12 @@ never opens. Rolling the gateway first opens it for the length of the worker rol
   window in which a migrated device assigned to an un-wired worker reports a bare failure with
   no cause. Fails closed, so it is not a security exposure — but it is an observability one, and
   it is invisible unless the runbook says so.
+- **Negative: a `grant_type=refresh_token` device does not survive a restore unaided** (§3). Its
+  token is excluded from the archive and nothing else can re-mint it, so it arrives needing
+  re-authorization. `client_credentials` and `password` devices are unaffected — their
+  operator-provisioned secret survives and the exchange re-runs on first use. The cost is real
+  but bounded, and it buys the retirement of the passphrase/KDF/envelope/canary path for every
+  stack rather than only for entirely-operator-provisioned ones.
 - **Negative: registration gets a step.** Someone must put the secret in the store before
   registering the device. The console can drive this where the backend supports writes, but
   the general case is a two-system operation and will be felt.
@@ -657,9 +719,10 @@ required otherwise would not describe the actual estate.
 
 ## Open questions
 
-- **The reference format.** A URI is the obvious shape, but whether the scheme names the
-  backend (`vault://`) or is backend-neutral (`secret://`) with resolution configured per
-  deployment changes how portable an archive is between stacks. Leaning backend-neutral.
+- ~~**The reference format.**~~ **Resolved** (implemented in #129/#130): backend-neutral
+  `secret://`, in the direction this leaned. Naming the backend would bake a deployment choice
+  into every device record, so an archive could only be restored into a stack running the same
+  product — which is precisely the portability §3 is built on.
 - **The TTL value itself.** §7 settles that the cache ships instrumented; the number comes from
   the resulting data, and the three-way trade (rotation, hot path, outage tolerance) means there
   may be no single right answer across deployment sizes.
