@@ -651,6 +651,77 @@ A device becomes by-reference through a gateway API call. If the workers are wir
 call is possible, no by-reference device is ever assigned to an un-wired worker and the window
 never opens. Rolling the gateway first opens it for the length of the worker rollout.
 
+### 7c. The cache, the breaker and their metrics are backend-conditional
+
+§7a established that the mounted-files backend fails at **deploy time** rather than dispatch
+time. That finding does not stop at the cache: it invalidates a premise under **three** pieces
+of §7's machinery, and all three are named here rather than discovered one at a time during
+implementation. None of them is built yet, so this costs nothing to adopt.
+
+**The rule, stated once:** §7's dispatch-time machinery is **on for networked backends and inert
+for mounted-files ones**. It is scoped, not deleted — the networked backends are precisely why it
+exists.
+
+#### The cache: on for networked, TTL 0 and read-through for mounted files
+
+§7 promotes the cache from a performance decision to an availability one, trading against two
+things: hot-path latency, and tolerance of a brief store outage. **For mounted files both axes
+are moot.** A local file read has no network round-trip to amortise, and §7a's measurements show
+availability does not degrade transiently — the volume is mounted before the pod is ready, or the
+pod never becomes ready at all. There is no blip to hide and no latency to spend.
+
+What does not go away is the cache's **cost**: a resolved plaintext credential held in process
+memory for as long as the TTL. That is not "at rest" on disk, but it is the same *shape* as the
+durable copy §1 exists to prevent, and §1's line is worth more than a saving that is structurally
+zero. So on a mounted-files backend the cache is **TTL 0, read-through** — resolution reads the
+file every time, which is what the implementation already does today and should keep doing.
+
+#### The breaker: keep it, but do not pretend it is uniformly exercised
+
+`StoreUnavailable`, the per-backend circuit and its backoff describe a **dispatch-time**
+fleet-wide failure. §7a establishes that a mounted-files store does not fail at dispatch time, so
+for that backend **there is no state the breaker can meaningfully trip on.** The one residual
+fleet-wide fault — a mount whose ownership the resolver refuses — is present from the first
+resolution and is not transient, so a circuit that opens and later probes for recovery is the
+wrong instrument for it too.
+
+The breaker is **not wrong to keep**; it is the correct design for the backends it was written
+for, and `credentials/resolver.py` already says so — the networked backends "arrive with the
+circuit breaker of §7, which they are the reason for."
+
+**The risk this section exists to head off is a test suite that appears to cover the breaker and
+does not.** On a mounted-files deployment the breaker path is unreachable, so tests exercising it
+can only do so against a fabricated resolver — and a test that proves a policy against an
+in-repo double proves nothing about the production implementation. That mistake has already been
+made in this project once. The breaker's tests must be written against a **networked** resolver
+when one exists, and until then its coverage should be honestly recorded as absent rather than
+simulated. This is the same treatment verification rows C1–C3 received: restated against the real
+failure mode, not deleted and not faked.
+
+#### The metrics inherit the scoping
+
+Hit rate, miss rate, resolution latency and entry age at use are only meaningful where there is a
+cache and a store to be latent. Shipping them as blanket resolver-wide instrumentation would emit
+series that are **structurally zero or undefined** on every mounted-files deployment — which is
+every Lite and embedded install, and the default Kubernetes path.
+
+So the instrumentation, its dashboards and its alerts are **scoped by backend kind from the
+start**, not filtered afterwards when someone notices a Lite deployment reporting a 0% cache hit
+rate and opens an incident about it. A panel that is empty because the mechanism does not apply
+is indistinguishable, at a glance, from one that is empty because the mechanism is broken.
+
+#### This needs a first-class backend kind, not string matching
+
+Three behaviours now branch on which backend is in use, so the discriminator becomes load-bearing.
+`CredentialResolver` today exposes only `backend: str` (`"files:/run/secrets/mcp"`), and
+conditioning on `backend.startswith("files:")` would put a policy decision behind a string prefix
+— the kind of implicit contract that breaks quietly when a fourth backend is added.
+
+The resolver protocol should carry the distinction explicitly — a `kind` discriminator, or a
+capability flag such as "resolution can fail transiently at dispatch" — so the cache, the breaker
+and the metrics all read the same declared property rather than three call sites each inferring
+it. The name is an implementation choice; that it is declared rather than inferred is not.
+
 ## Consequences
 
 - **Positive: an exported archive stops being a credential.** It can be stored in Git,
@@ -669,13 +740,21 @@ never opens. Rolling the gateway first opens it for the length of the worker rol
   reachable, which it currently is not.
 - **Negative: the plan digest is new machinery on the restore path** — produced by dry run,
   carried by apply, validated server-side. It replaces a bound that was one boolean.
-- **Negative: a dispatch now depends on a secret store being reachable**, and that dependency is
-  fleet-wide where the previous one was per-device. Mitigated by short-lived in-process caching
-  with an explicit TTL — and the cache is a **performance** decision that must not become a
-  durable copy, which is exactly the line this ADR draws.
+- **Negative: a dispatch depends on a secret store being reachable — on networked backends**,
+  and that dependency is fleet-wide where the previous one was per-device. Mitigated by
+  short-lived in-process caching with an explicit TTL — a **performance** decision that must not
+  become a durable copy, which is exactly the line this ADR draws. **On a mounted-files backend
+  this cost does not arise at all** (§7a): the dependency is at pod start, and the cache is
+  therefore TTL 0 (§7c).
 - **Negative: the health model grows a dependency and two error codes** (§7). This is net-new
   surface in diagnostics, the fleet health endpoint and alerting — and it is not optional, since
   the whole point is that a store outage must not be legible only as twenty device outages.
+- **Negative: three behaviours now branch on backend kind** (§7c) — the cache, the resolver
+  breaker, and the cache metrics. That is a real increase in conditional surface, and it is
+  accepted because the alternative is worse in a specific way: uniform machinery whose
+  dispatch-time paths **cannot be reached** on the backend most deployments use, carrying tests
+  that appear to cover them and metrics that are structurally zero. The branch is made explicit,
+  on a declared property of the resolver rather than inferred from its name.
 - **Negative: the rollout has an order that cannot be reversed** (§7b). Gateway-first leaves a
   window in which a migrated device assigned to an un-wired worker reports a bare failure with
   no cause. Fails closed, so it is not a security exposure — but it is an observability one, and
@@ -723,11 +802,13 @@ required otherwise would not describe the actual estate.
   `secret://`, in the direction this leaned. Naming the backend would bake a deployment choice
   into every device record, so an archive could only be restored into a stack running the same
   product — which is precisely the portability §3 is built on.
-- **The TTL value itself.** §7 settles that the cache ships instrumented; the number comes from
-  the resulting data, and the three-way trade (rotation, hot path, outage tolerance) means there
-  may be no single right answer across deployment sizes.
-- **Whether a store outage should fail open on cached material past its TTL.** Serving a stale
-  credential to keep the fleet dispatching is the availability answer; refusing is the
+- **The TTL value itself — for networked backends only** (§7c; on mounted files the TTL is 0 and
+  the question does not arise). §7 settles that the cache ships instrumented; the number comes
+  from the resulting data, and the three-way trade (rotation, hot path, outage tolerance) means
+  there may be no single right answer across deployment sizes.
+- **Whether a store outage should fail open on cached material past its TTL — networked backends
+  only** (§7c; a mounted-files store has no dispatch-time outage for this to arise from). Serving
+  a stale credential to keep the fleet dispatching is the availability answer; refusing is the
   correctness one. Leaning refuse, since a rotated-away credential failing at the device is a
   worse diagnosis than an honest `ERR_SECRET_STORE_UNAVAILABLE`.
 - **How long a plan digest stays valid.** §6 gives it no expiry of its own beyond the grant
