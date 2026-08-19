@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from device_mcp_gateway.auth.base import CredentialNotBound
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
 from device_mcp_gateway.core.manifest_diff import record_tool_change
 from device_mcp_gateway.core.spec_limits import (
@@ -31,6 +32,7 @@ from device_mcp_gateway.core.spec_limits import (
     run_translation,
 )
 from device_mcp_gateway.core.translator import manifest_to_dict
+from device_mcp_gateway.credentials.resolver import ResolverError
 from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.security import fingerprint as fp
 from device_mcp_gateway.security.url_policy import build_guarded_client, observation_from_client
@@ -59,6 +61,12 @@ def spec_fingerprint(spec: dict[str, Any], *, is_proxy: bool) -> str:
     if is_proxy:
         return canonical_tools_hash(spec.get("tools", []))
     return hashlib.sha256(str(spec).encode()).hexdigest()[:16]
+
+
+#: Marker embedded in every ``spawn_error`` this loop writes for a credential failure.
+#: Present so the loop can clear its OWN reason when a device recovers without clobbering
+#: a reason some other component wrote — the spawn path's cold-path message carries it too.
+CREDENTIAL_REASON_MARKER = "(credential: "
 
 
 def _shutdown_spec_executor() -> None:
@@ -134,8 +142,31 @@ class WorkerHealthLoop:
         # which would make an unreachable device look freshly verified.
         self._last_seen: dict[str, fp.Observation] = {}
         self._last_declared: dict[str, tuple[str | None, str | None]] = {}
+        # Why the current check failed, when the cause was a credential rather than the
+        # device. Set by the probe/spec helpers and consumed by _check_device, which is the
+        # only place holding both the reason and the hostname to write it against.
+        #
+        # The WARM path's equivalent of worker.runner's _spec_failure_reason (finding #9).
+        # That fix covered a device that never spawned; a device that spawned and later lost
+        # its credential recorded nothing at all, so the fleet view showed a bare failure
+        # with no cause. Measured on the cluster: revoking a live device's secret flipped it
+        # unreachable inside one 30s cycle with an empty spawn_error, and the reconciler then
+        # churned reassign/decline for as long as the secret was missing.
+        self._probe_reason: dict[str, str] = {}
         # Callback set by DeviceWorker: (hostname) -> coroutine — replace pod
         self.on_spec_changed: Any = None
+
+    @staticmethod
+    def _credential_error(hostname: str, reason: str) -> str:
+        """The operator-facing message for a credential failure on a live device.
+
+        Deliberately worded like the spawn path's, and carrying the same
+        ``(credential: ...)`` marker, so the two paths are greppable as one thing and an
+        operator does not have to know which of them noticed. The distinction that matters
+        is a bad reference vs an unavailable store (ADR-0018 §7), and that lives in
+        ``reason`` — which is the resolver's own message, passed through unaltered.
+        """
+        return f"Device unavailable for {hostname} {CREDENTIAL_REASON_MARKER}{reason})"
 
     def _client(self, hostname: str | None) -> httpx.AsyncClient:
         """The guarded client carrying ``hostname``'s TLS profile (``None`` = fleet)."""
@@ -182,6 +213,10 @@ class WorkerHealthLoop:
             if cfg is None:
                 return
 
+            # Discard any reason left by the previous cycle before probing, so a stale cause
+            # can never be attached to a fresh failure (the same reasoning as _last_seen).
+            self._probe_reason.pop(hostname, None)
+
             # Reachability check
             reachable = await self._check_reachability(cfg)
             await self._backend.update_device_fields(hostname, reachable=reachable, last_check=time.time())
@@ -194,10 +229,25 @@ class WorkerHealthLoop:
                 await self._update_fingerprint(hostname, cfg)
 
             if not reachable:
+                updates: dict[str, Any] = {}
                 if cfg.pod_active:
-                    await self._backend.update_device_fields(hostname, pod_active=False)
+                    updates["pod_active"] = False
+                reason = self._probe_reason.get(hostname)
+                if reason:
+                    # Written even when pod_active was already False: the reconciler keeps
+                    # re-assigning a device it cannot spawn, so without this the record
+                    # stays blank for every cycle after the first.
+                    updates["spawn_error"] = self._credential_error(hostname, reason)
+                if updates:
+                    await self._backend.update_device_fields(hostname, **updates)
+                if cfg.pod_active:
                     await self._backend.publish_assignment("unassign", hostname)
                 return
+
+            # Reachable again. Clear only a reason THIS loop wrote — a spawn_error from the
+            # spawn path describes a different attempt and is not ours to discard.
+            if cfg.spawn_error and CREDENTIAL_REASON_MARKER in cfg.spawn_error:
+                await self._backend.update_device_fields(hostname, spawn_error=None)
 
             # Spec polling — throttled by its own timestamp, not cfg.last_check
             # (which is rewritten every cycle above and would always short-circuit).
@@ -213,6 +263,11 @@ class WorkerHealthLoop:
             self._last_spec_check[hostname] = now
             spec = await self._fetch_spec(cfg)
             if spec is None:
+                reason = self._probe_reason.get(hostname)
+                if reason:
+                    await self._backend.update_device_fields(
+                        hostname, spawn_error=self._credential_error(hostname, reason)
+                    )
                 return
 
             is_proxy = getattr(cfg, "upstream_kind", "openapi") == "mcp"
@@ -401,6 +456,16 @@ class WorkerHealthLoop:
                     )
                 self._record_observation(cfg.hostname)
                 return True
+            except (ResolverError, CredentialNotBound) as exc:
+                # An MCP upstream authenticates during `initialize`, so this — not the spec
+                # poll — is where a revoked credential lands, and it lands within one health
+                # interval. Scored unreachable exactly as before: what the device's
+                # reachability MEANS is a separate question from whether we say why it
+                # failed. Recording the cause here is what stops a credential failure being
+                # laundered into an unexplained "unreachable".
+                self._probe_reason[cfg.hostname] = str(exc)
+                logger.warning(f"Reachability probe for {cfg.hostname} failed on its credential: {exc}")
+                return False
             except Exception:
                 return False
             finally:
@@ -458,6 +523,13 @@ class WorkerHealthLoop:
             upstream = self._upstream_for(cfg)
             try:
                 return {"upstream_kind": "mcp", "tools": await upstream.list_tools()}
+            except (ResolverError, CredentialNotBound) as exc:
+                # Reached only when `initialize` authenticated and `tools/list` did not —
+                # a credential that lapsed between the two calls. Rare next to the
+                # reachability site above, but silent in exactly the same way if unhandled.
+                self._probe_reason[cfg.hostname] = str(exc)
+                logger.warning(f"MCP discovery for {cfg.hostname} failed on its credential: {exc}")
+                return None
             except Exception as exc:
                 logger.debug(f"MCP discovery failed for {cfg.hostname}: {exc}")
                 return None
