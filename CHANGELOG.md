@@ -25,7 +25,68 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 > claims with their entitlement intersection, the single-use consumption record, and the
 > `grant=<id>` audit field. The fixes and the change below are independent of it and stand.
 
+### Added
+
+- **A device's upstream credential can now be held by reference instead of at rest in the
+  gateway** ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md), slices 1–3).
+  Registration accepts `auth.credential_ref` in place of `auth.api_key`:
+
+      secret://t-<tenant>/devices/<device>#<key>
+
+  The registry stores the *reference*; the material is resolved at dispatch, held for that
+  dispatch, and never written back, cached to disk, or included in an archive. The scheme is
+  deliberately backend-neutral — naming the backend (`vault://`) would bake a deployment choice
+  into every device record, so an archive could only be restored into a stack running the same
+  product.
+
+  **An exported archive of an entirely operator-provisioned fleet therefore stops being a
+  credential.** It can be stored in Git, reviewed in a pull request, and diffed between
+  environments.
+
+  Three resolver backends share one interface: a Kubernetes Secret or CSI volume, an external
+  manager, and a local file tree for Lite and embedded mode. Lite gains a file it already
+  effectively had — not a dependency on a secrets product.
+
+  **This does not cover gateway-minted credentials** (§1a). An OAuth2 `refresh_token` is minted
+  mid-exchange and stays encrypted under `MCP_SECRET_KEY`; for a device using one, a key
+  compromise carries exactly the same cost as before.
+
+- **Registration refuses a credential it cannot honour, at registration rather than at first
+  call.** Inline and by-reference together is a 400 naming the exclusivity — refused rather
+  than resolved by precedence, because any precedence rule makes the losing value invisible and
+  a reference that never took effect would look exactly like one that did. A malformed
+  reference is also a 400 at registration, not a device that looked fine when it was added and
+  fails on its first dispatch.
+
+- **Two dispatch error codes that do not collide with `ERR_CIRCUIT_OPEN`**:
+  `ERR_CREDENTIAL_UNRESOLVED` (this device's reference is bad — permanent, one device) and
+  `ERR_SECRET_STORE_UNAVAILABLE` (the store is unreachable — transient, fleet-wide). Collapsing
+  the two makes a sealed store look like twenty broken devices and opens every device's breaker
+  on a fault none of them had.
+
 ### Changed
+
+- **Upgrade order is now a constraint for deployments using by-reference credentials**
+  ([ADR-0018 §7b](docs/adr/0018-device-credentials-by-reference.md)). **Upgrade workers first,
+  then the gateway, and only then migrate any device to a reference.**
+
+  A worker that predates the resolver wiring fails *closed* — nothing invalid is sent upstream —
+  but it records no reason on the device record, because it successfully spawns the pod from a
+  cached manifest and only the later health check fails. The device shows as unreachable with an
+  empty `spawn_error`. A device only becomes by-reference through a gateway API call, so wiring
+  the workers first means the window never opens; rolling the gateway first opens it for the
+  length of the worker rollout.
+
+- **Secret-store guidance corrected for mounted files** ([ADR-0018 §7a](docs/adr/0018-device-credentials-by-reference.md)).
+  For a Kubernetes Secret or CSI volume the store is a dependency of *starting a pod*, not of
+  serving a request: deleting the Secret does not reach a pod that already mounted it, modifying
+  it re-projects within ~30–60s, and a pod that restarts without it fails `FailedMount` while the
+  running pods keep serving. §7's fleet-wide breaker and its resolution cache describe the
+  *networked* backends only.
+
+  **Consequently, offboarding by deleting a secret is not immediate.** The credential stays
+  readable in every pod that already mounted it until that pod restarts. Where revocation must
+  take effect at once, rotate or empty the secret's *key* — only modification re-projects.
 
 - **A tenant's identifier is now opaque from birth, and the namespace is a prefix rather than
   a computation** ([ADR-0019](docs/adr/0019-opaque-tenant-identity.md), superseding
