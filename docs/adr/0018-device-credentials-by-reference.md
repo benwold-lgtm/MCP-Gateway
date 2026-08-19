@@ -274,7 +274,7 @@ ADR-0011 is not superseded wholesale, and the parts that survive are the parts t
 | Generated passphrase + `X-Backup-Passphrase` header | Removed |
 | `backup:export-portable` scope | Removed |
 | `provider:credentials` grant | Removed as a category — see §6 |
-| A gate on `backup:write` (restore) | **Survives**, on destructiveness rather than disclosure — but time-boxed, not single-use (§6) |
+| A gate on `backup:write` (restore) | **Survives** for the *apply*, on destructiveness rather than disclosure — time-boxed, not single-use, and no longer covering the dry run (§6) |
 
 ### 6. `provider:credentials` disappears as a category, and its mechanism must re-earn its place
 
@@ -317,7 +317,8 @@ So the elevated taxonomy loses a tier and gains a clearer axis. It was implicitl
 | | Grant | Duration | Why |
 |---|---|---|---|
 | Acts on one device, reversibly | `provider:invoke` | Time-boxed | ADR-0013 §5, unchanged |
-| Overwrites the registry | `backup:write` | **Time-boxed, repeatable** | Destructive, not credential-bearing — every call audited |
+| Overwrites the registry (apply) | `backup:write` | **Time-boxed, repeatable** | Destructive, not credential-bearing — every call audited |
+| Previews a restore (dry run) | `backup:read` / `devices:read` | Ordinary | Writes nothing; discloses registry existence, which those scopes already cover |
 | Reads configuration | `devices:read` / `backup:read` | Ordinary | Nothing elevated remains |
 
 That axis is the better one. It explains why restore is gated without appealing to a fact
@@ -394,9 +395,77 @@ Two mechanical requirements follow:
 - **The gateway computes the digest over its own parsed, canonicalized representation**, at dry
   run and again at apply — never over the client's bytes. Otherwise the client chooses the
   canonicalization, and equality becomes a property of their serializer.
-- **Canonicalization is specified** — key ordering, numeric form, absent-versus-null — because
-  a digest whose inputs re-serialize differently is a correctness bug that presents as a
-  spurious refusal, and the fix under time pressure is always to weaken the check.
+- **Canonicalization is specified here, not left to the implementer.** A digest whose inputs
+  re-serialize differently is a correctness bug that presents as a *spurious refusal*, and the
+  fix under time pressure is always to weaken the check — so "specified" must not mean "someone
+  will specify it later." The scheme is **RFC 8785 (JSON Canonicalization Scheme)**, which
+  settles two of the four axes: object keys sorted by UTF-16 code unit, and numbers in
+  ECMAScript `Number::toString` form. JCS does **not** settle the other two, so this ADR does:
+
+  | Axis | Rule |
+  |---|---|
+  | Key ordering | RFC 8785 — sorted by UTF-16 code unit |
+  | Numeric form | RFC 8785 — ECMAScript `Number::toString` |
+  | Absent vs null | **Normalize to absent.** A field with no value is omitted; an explicit `null` is never emitted. Otherwise a client that spells a default as `null` and one that omits it produce different digests for the same instruction |
+  | **Order of set-valued fields** | **Sorted before hashing**, and any such field must be *declared* set-valued |
+
+  **The fourth axis does not apply to today's request and is stated because of that, not despite
+  it.** The current body is `{archive, passphrase?, dry_run?, on_conflict?, include_deadletters?}`
+  — no field whose order is semantically insignificant. But the rule above binds the **whole
+  request by construction**, precisely so a new parameter is covered without anyone remembering
+  to add it. A device-selector list is the obvious next parameter, and it would be swept into
+  the digest automatically while its *ordering* silently became load-bearing: two requests
+  identical in intent, digesting differently, refused. That is the same equivalence-class gap
+  that motivated whole-request binding one level up, and leaving it for whoever adds the field
+  reintroduces exactly the remembering-at-a-site-that-does-not-exist-yet failure this rule was
+  written to avoid.
+
+- **The algorithm and the field name are fixed here**, since both are decided once or decided
+  inconsistently by whoever implements first. The digest is **SHA-256**, hex-encoded lowercase.
+  The field is **`plan_digest`** — the same literal name in the apply request, in the dry-run
+  response that produces it, and in the audit record, so the API contract and the audit schema
+  cannot quietly diverge. Neither exists in the code today, so there is nothing to migrate.
+
+##### A dry run does not need `backup:write` at all
+
+The section above fixes the *consequence* of the dry run carrying `backup:write` — removing
+single-use, so a preview no longer burns the elevation. It left the premise unexamined, and the
+premise is wrong: **a preview is read-level work and should require a read-level scope.**
+
+A dry run parses a caller-supplied archive and simulates it against the live registry. It writes
+nothing. What it discloses is which devices exist and which would conflict — registry-existence
+information, which is exactly what `devices:read` / `backup:read` already covers (and `backup:read`
+is configuration-only now, per §3). Nothing in it is destructive and nothing in it is
+credential-bearing.
+
+The current shape is worse than "the dry run carries `backup:write`" suggests. `POST
+/admin/restore` declares a single route-level `require_scope(SCOPE_BACKUP_WRITE)`, while
+`dry_run` is read from the request body **inside the handler** — so the scope gate necessarily
+runs before anything knows which of the two operations was asked for. One scope for both was not
+a decision; it is what the endpoint's shape forced.
+
+**So: the preview requires read-level scope, and only the apply requires `backup:write`.** The
+whole iterative loop — preview, read the report, adjust `on_conflict`, preview again — then runs
+with **no elevation held at all**, and elevation is acquired once, for the destructive call. That
+is a stronger result than "repeatable, so it is not consumed": it removes the coupling rather
+than loosening it.
+
+This is the [§1a decoupling pattern](#1a-references-cover-operator-provisioned-secrets-gateway-minted-rotating-ones-are-outside)
+a third time — a dependency that looked structural (*"restore is one endpoint, so it takes one
+scope"*) turning out to be an artefact of a shape nobody chose deliberately.
+
+**The split must be structural, not a check inside the handler.** Resolving the scope after
+parsing `dry_run` would put the destructive path behind a guard someone has to remember to apply,
+and it fails in the dangerous direction: `dry_run` defaults to `true`, so a bug in the escalation
+means an apply proceeding on read-level authority. The preview and the apply are therefore
+**separate routes**, each with its own route-level scope dependency, and the apply route has no
+`dry_run` parameter to get wrong.
+
+**This does not conflict with the rule below.** That rule prohibits splitting *digest validation*
+from execution, because a validate-then-apply pair opens a window between the check and the
+write. Preview and apply are already two calls — that is the digest's entire premise — and the
+apply still validates and writes inside one request. Splitting by *scope* is not splitting the
+*apply*.
 
 ##### Validation and execution are one call, with no validate endpoint
 
