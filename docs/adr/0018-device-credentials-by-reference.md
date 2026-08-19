@@ -91,12 +91,20 @@ conditional for it. That is a change from this section's first draft, which said
 such a stack is still a credential dump and left the old `backup:*` apparatus alive to protect
 it.
 
-**What is *not* settled** is the at-rest question, which is the one this section exists to name:
-a live refresh token is still held encrypted under `MCP_SECRET_KEY` in the running registry, and
-compromise of that key still costs exactly what it did before ADR-0018. Closing *that* needs a
-resolver which can **write** — turning §3's open question about console writes into a
-requirement. Excluding the token from archives narrows the blast radius to a running stack; it
-does not shrink it to nothing, and this ADR does not claim otherwise.
+**The at-rest question is settled too, and settled by ACCEPTING it rather than closing it.** A
+live refresh token remains held encrypted under `MCP_SECRET_KEY` in the running registry, and
+compromise of that key costs exactly what it did before ADR-0018. Excluding the token from
+archives narrows the blast radius to a running stack; it does not shrink it to nothing.
+
+An earlier draft treated this as pending a mechanism — a resolver that could **write**, turning
+§3's console-write question into a requirement. **That question is now answered: no** (§2a). So
+there is no mechanism coming, and the honest statement is not "not yet closed" but **closed as
+accepted**: `MCP_SECRET_KEY` is a permanent, narrow, *named* exception covering exactly one thing
+— gateway-minted rotating tokens on a running stack — rather than a debt to be engineered away.
+
+Naming it that way is the point. An exception with a boundary, written down, is a thing an
+operator can reason about and a threat model can state. An exception described as temporary is
+one nobody scopes, because it is always about to disappear.
 
 **This is separate from closing §1a fully, and it is easy to misread the two as the same fix.**
 Backup no longer waits on the resolver-writes question — **it never needed the credential to be
@@ -130,6 +138,43 @@ dependency on a secrets product.
 device's problem; an unreachable store is the fleet's, and the two must not present
 identically. §7 makes that distinction, because getting it wrong turns a brief outage in a
 shared dependency into a long one across every device.
+
+### 2a. The console does not write to the secret store
+
+The gateway **reads** from the secret store and never writes to it, and the console does not
+either — including where the backend would allow it. Registration and rotation stay two-system
+operations. This is refused on principle rather than deferred on effort.
+
+**The principle is §1's, applied to the write direction.** §1 holds because the tenant is the
+sole writer of a secret's lifecycle: the gateway reads, somebody else provisions and rotates.
+A console write inverts exactly that. The moment the gateway can write to the store it needs an
+identity that can write to the store, and the property §1 sells — *the provider holds a reader,
+not a holder* — is gone, whether or not the feature is used. A capability that exists is a
+capability in the threat model.
+
+**The convenience it buys is real and is still not worth it.** Registration becomes one screen
+instead of two, and onboarding gets meaningfully nicer. But the two-system shape is not
+friction to be smoothed away; it *is* the boundary. Smoothing it produces a system that looks
+like ADR-0018 and has ADR-0011's trust properties, which is the worst of both — the ceremony of
+references with none of the separation that justifies it.
+
+**Three consequences, accepted:**
+
+- **Onboarding stays a two-system operation, permanently.** Put the secret in the store, then
+  register the device. The console can *show* what reference a device needs and whether it
+  currently resolves — that is read-shaped and useful — but it does not create it.
+- **Rotation stays outside the gateway**, which §1 already claimed as a benefit and this makes
+  literal: rotate in the store, and the next dispatch picks it up.
+- **`MCP_SECRET_KEY` does not go away, and stops being treated as debt** (§1a). Gateway-minted
+  rotating tokens are the one thing the gateway must write, so they stay encrypted under it. The
+  route that would have removed that — a writable resolver — is the route being refused here, so
+  the exception is **permanent by decision**. Named, bounded, and stated, rather than described
+  as temporary and therefore never scoped.
+
+**What would reopen this** is a backend that offers a genuinely write-only credential path — one
+where the gateway's identity can create a secret it cannot subsequently read. That is a different
+capability from "the backend supports writes", and it would have to be demonstrated rather than
+assumed for a specific backend before any of the above changes.
 
 ### 3. Backup becomes configuration backup
 
@@ -877,9 +922,11 @@ it. The name is an implementation choice; that it is declared rather than inferr
   operator-provisioned secret survives and the exchange re-runs on first use. The cost is real
   but bounded, and it buys the retirement of the passphrase/KDF/envelope/canary path for every
   stack rather than only for entirely-operator-provisioned ones.
-- **Negative: registration gets a step.** Someone must put the secret in the store before
-  registering the device. The console can drive this where the backend supports writes, but
-  the general case is a two-system operation and will be felt.
+- **Negative: registration and rotation are two-system operations, permanently.** Someone must
+  put the secret in the store before registering the device, and rotate it there afterwards. The
+  console will **not** paper over this even where the backend supports writes (§2a). It is the
+  cost the design is buying its central property with, it will be felt on every onboarding, and
+  it is not a gap awaiting a convenience feature.
 - **Negative: a restore into a fresh stack no longer carries everything needed to run.** This
   reads as a regression and is the honest form of a property the old design only appeared to
   have: the credentials were always the tenant's, and an archive that carried them was a copy
@@ -927,5 +974,7 @@ required otherwise would not describe the actual estate.
   window that gates the apply. A digest previewed weeks ago and applied inside a fresh grant
   would still match if nothing in the request changed, which is arguably correct — the
   instruction is unaltered — and arguably too long for "reviewed".
-- **Whether the console should write to the secret store** where the backend allows it, or
-  refuse on principle and keep registration a two-system operation.
+- ~~**Whether the console should write to the secret store.**~~ **Resolved: no** — refused on
+  principle, see §2a. Registration and rotation stay two-system operations, and `MCP_SECRET_KEY`
+  remains a permanent named exception for rotating tokens (§1a) rather than something to
+  engineer away.
