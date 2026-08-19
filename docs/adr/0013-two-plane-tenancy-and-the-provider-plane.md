@@ -1,12 +1,42 @@
 # ADR-0013: Two-plane tenancy — isolated tenant stacks, and a provider plane above them
 
-- **Status:** Accepted
+- **Status:** Accepted · **§4, §5a, §6, §6a, §8, §11a–§11d superseded** by [ADR-0017](0017-provider-authority-is-delegated.md) (2026-08-19); **§5b superseded** by [ADR-0018](0018-device-credentials-by-reference.md) §6
 - **Date:** 2026-08-11 (Proposed) · 2026-08-11 (Accepted, on resolving §8–§10)
 - **Related findings:** F-01 (no in-app tenant isolation), F-30 (end-to-end identity),
   F-32 (global RBAC scopes), F-57 (hash-chained audit)
 - **Builds on:** [ADR-0004](0004-single-tenant-per-stack.md) (one stack per tenant),
   [ADR-0007](0007-federated-identity-oidc-and-gateway-rbac.md) (OIDC, gateway owns RBAC),
   [ADR-0012](0012-federation-credential-model.md) (BFF federation credentials)
+
+> ## Partly superseded — read this first
+>
+> **[ADR-0017](0017-provider-authority-is-delegated.md) replaces the parts of this ADR that let
+> the provider assert authority over a tenant.** Authority is now *delegated by the tenant*, so
+> §4, §5a, §6, §6a, §8 and §11a–§11d below are **history, not current design**. They were built,
+> verified against real identity providers (Keycloak and Authentik), and replaced in design
+> before they ever shipped in a release — the implementation is still in `main` and is being
+> removed rather than announced. See [ADR-0016](0016-reaching-many-tenant-gateways.md)
+> (Rejected) for why the direction changed.
+>
+> **[ADR-0018](0018-device-credentials-by-reference.md) §6 supersedes §5b**, removing
+> `provider:credentials` as a category: a credential held by reference is not the gateway's to
+> disclose, so the tier it was a tier of no longer exists.
+>
+> **These sections still stand and are current design:**
+>
+> | | |
+> |---|---|
+> | **§1** | The tenant plane is single-tenant end to end |
+> | **§2** | The provider plane is a separate population with its own IdP — ADR-0017 builds *on* this |
+> | **§3** | The plane is immutable for the life of a session |
+> | **§7** | Mass monitoring does not use the tenant API plane |
+> | **§9** | A tenant sees every *human* provider act, with the actor pseudonymized |
+> | **§10** | Offboarding: crypto-shred the content, tombstone the name — **referenced by ADR-0018 §4** |
+>
+> Kept rather than deleted, as [ADR-0014](0014-tenant-namespace-naming-and-network-isolation.md)
+> and [ADR-0016](0016-reaching-many-tenant-gateways.md) are: the reasoning that produced a
+> replaced decision is the part that stops it being re-proposed. ADR-0014 also *builds on* §7,
+> §9 and §10, so this document remains load-bearing.
 
 ## Context
 
@@ -75,6 +105,10 @@ Immutability prevents escalation. It is not sufficient on its own, so:
 
 ### 4. Cross-tenant power is exercised, not held
 
+> **Superseded by [ADR-0017](0017-provider-authority-is-delegated.md).** The provider no longer
+> holds cross-tenant power to exercise; the tenant delegates it.
+
+
 A provider session does not carry ambient authority over every tenant for eight hours.
 Acting on a tenant is a **discrete, audited, time-boxed act** — "act on tenant X" — scoped
 to that tenant and recorded on both sides. Standing estate-wide access is what turns one
@@ -98,6 +132,9 @@ independently liftable, restorable ([ADR-0011](0011-backup-and-restore.md)) and 
 
 ### 5a. `provider:admin` does not map to gateway `admin`
 
+> **Superseded by [ADR-0017](0017-provider-authority-is-delegated.md).**
+
+
 Mapping it onto the tenant gateway's full `admin` role would break §4 at the one point
 where it matters most. **Tool invocation is the most consequential thing the gateway does** —
 it is why the F-25 header denylist exists, why passthrough permanently excludes
@@ -116,6 +153,10 @@ design; being inconsistent about it here is what would make the rest of this ADR
 decorative.
 
 ### 5b. Credential visibility is the same question as tool invocation
+
+> **Superseded by [ADR-0018](0018-device-credentials-by-reference.md) §6**, which removes
+> `provider:credentials` as a category rather than re-scoping it.
+
 
 `provider:credentials` exists because the naive answer — "the device API never returns
 credentials, so there is nothing to carve out" — is true and irrelevant. `auth_config` is
@@ -142,6 +183,11 @@ separation is not mistaken for a cryptographic guarantee.
 
 ### 6. A tenant gateway trusts the provider IdP as a second issuer
 
+> **Superseded by [ADR-0017](0017-provider-authority-is-delegated.md).** A tenant gateway no
+> longer trusts a second issuer. The multi-issuer implementation is still in `main` and is
+> being removed.
+
+
 `gateway.oidc.issuer` / `audience` become **lists**. Each tenant gateway trusts its own
 tenant IdP *and* the provider IdP, mapping provider groups to gateway roles through the
 existing `group_roles` table.
@@ -162,6 +208,9 @@ the provider IdP as a second issuer does not create access that did not exist; i
 existing access attributable in the tenant's own audit chain.
 
 #### 6a. The issuer must gate scope eligibility **server-side**
+
+> **Superseded by [ADR-0017](0017-provider-authority-is-delegated.md)**, with §6.
+
 
 §3's plane-fixing happens in the BFF at login. That is a session-flow guarantee, **not an
 enforcement boundary**: once a provider-plane token is minted it can be replayed straight at
@@ -276,6 +325,9 @@ grants §5 defines. It is recorded here rather than in the implementation notes 
 a decision about the consent model, not a detail of how the multi-issuer code is written.
 
 ### 8. Grant lifetimes are absolute, and the elevated grants step up
+
+> **Superseded by [ADR-0017](0017-provider-authority-is-delegated.md).**
+
 
 **All windows are absolute, never sliding.** A sliding window renews on activity, so a
 stolen session that keeps working never expires — which is exactly an attacker's behaviour
@@ -409,6 +461,11 @@ grant may raise an issuer's ceiling; `provider:invoke` and `provider:credentials
 scopes and never appear in `ROLE_SCOPES`.
 
 #### 11a. Three constraints that follow, named now rather than found in implementation
+
+> **§11a–§11d are superseded by [ADR-0017](0017-provider-authority-is-delegated.md).** They are
+> kept in full because they record what was actually measured against two real IdPs — including
+> §11c's three-way split, which held up in live testing and may inform the replacement.
+
 
 - **The grant claim must name exactly one tenant.** Single-use has to be consumed somewhere,
   and there is deliberately no shared state across tenant stacks (§1, [ADR-0004](0004-single-tenant-per-stack.md)).
