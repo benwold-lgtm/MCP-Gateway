@@ -126,9 +126,17 @@ is commercially sensitive in a way a customer's name is not, and they invite enu
 
 ## Open questions
 
-- **Width and format.** 32 bits of randomness is enough to avoid accidental collision at any
-  plausible estate size, but not enough to resist enumeration if identifiers are ever exposed
-  to a party who should not enumerate them. Whether that matters depends on where identifiers
-  appear, which §2 has deliberately made broad.
+- ~~**Width and format.**~~ **Resolved before implementation, and shipped in #128: 64 bits,
+  rendered as 16 hex characters with a `t-` prefix** (`t-3f9a1c2b7d4e8065`); `tools/tenant_id.py`
+  mints them. 32 bits satisfies collision-resistance at any plausible estate size but the
+  identifier appears in a **hostname**, where it is enumerable by a party who should not
+  enumerate it — and §2 deliberately made that surface broad. 64 bits costs nothing and moves
+  the birthday bound from ~1% at 10k tenants to ~3e-15.
+
+  **The separator is a hyphen for a load-bearing reason.** The natural spelling `t_3f9a1c2b`
+  is not a valid DNS-1123 label, so it could be neither a namespace name nor the per-tenant
+  console hostname of [ADR-0021](0021-separate-console-applications.md) §5 — and a public CA
+  would refuse the certificate. Corrected across ADRs 0018/0019/0021 before any code was
+  written.
 - **Whether the tenant should ever see their own identifier.** They must, for support; the
   question is whether it appears in their console by default or only when asked for.
