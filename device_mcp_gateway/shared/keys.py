@@ -163,24 +163,6 @@ class KeyBuilder:
         """Fixed-window counter. ``key`` is the caller-derived bucket ("scope:client")."""
         return self._k(f"rl:{key}")
 
-    # --- elevated grants (ADR-0013 §11a) -------------------------------------
-
-    def grant_consumed(self, consumption_id: str) -> str:
-        """Marker that a single-use elevated grant has been spent.
-
-        ``consumption_id`` identifies an *elevation* — subject, grant id and step-up time
-        together (see ``grants._consumption_id``) — not the grant claim's ``id``. It arrives
-        already hashed, so no operator identifier ends up in a key name.
-
-        This argument used to read "keyed on the grant id and nothing coarser", on the
-        reasoning that a coarser key would refuse a support engineer's second grant of the
-        day. The reasoning was right and the conclusion did not follow: a real IdP's claim
-        mapper emits a *constant* id, which made the finer key refuse their second grant
-        ever. The subject is in the key as one component of a composite, which is not the
-        coarsening that argument was warning about.
-        """
-        return self._k(f"grant:used:{consumption_id}")
-
 
 def device_resource_uri(hostname: str, path: str = "") -> str:
     """An MCP resource URI for a device path.

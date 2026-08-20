@@ -62,7 +62,6 @@ _PARITY = [
     # New in ADR-0013 §11a — no previous literal to be byte-compatible with, but pinned
     # here for the same reason as the rest: renaming it would let a spent single-use grant
     # be spent again, and nothing else would notice.
-    (K.grant_consumed("g-7f2"), "grant:used:g-7f2"),
 ]
 
 
@@ -101,7 +100,6 @@ def test_parity_table_covers_every_key_building_member():
         "exec_marker",
         "result_marker",
         "ratelimit",
-        "grant_consumed",
     }
     assert members == covered, f"parity table out of sync with KeyBuilder: {members ^ covered}"
 

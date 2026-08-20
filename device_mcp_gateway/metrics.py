@@ -254,17 +254,6 @@ oidc_validation_failures_total = Counter(
     "means someone is probing with forged tokens.",
     ["reason"],
 )
-elevated_grants_total = Counter(
-    "mcp_elevated_grants_total",
-    "Elevated grant claims presented to this gateway, by outcome (ADR-0013 §11). These are "
-    "the two highest-consequence grants in the system — invoking a tool against a customer's "
-    "hardware, and credential-bearing reads — so both series matter: outcome=accepted should "
-    "be rare and each one should correspond to a named, justified act in the provider "
-    "console's audit, while a rise in outcome=refused means expired or replayed grants, a "
-    "misconfigured "
-    "IdP claims hook, or someone probing.",
-    ["outcome"],
-)
 worker_calls_throttled_total = Counter(
     "mcp_worker_calls_throttled_total",
     "Tool-call dispatches that had to wait on the worker-wide concurrency cap "

@@ -90,11 +90,11 @@ explicitly; the full knob list is in [config.yaml](../config.yaml).
 The audit subject is `oidc:{issuer}#{sub}`. The issuer is part of the identity because `sub`
 is unique *within* an issuer, not globally — which matters as soon as there is more than one.
 
-#### More than one issuer (ADR-0013 §6)
+#### More than one issuer
 
-A tenant gateway can additionally trust the **provider IdP**, so a support engineer acts as
-themselves in the tenant's audit chain rather than behind a shared admin key. Use `issuers`
-instead of the single-issuer keys — setting both is refused at startup:
+A deployment may trust more than one identity provider — two of the tenant's own IdPs, say,
+during a migration. Use `issuers` instead of the single-issuer keys; setting both is refused at
+startup:
 
 ```yaml
 gateway:
@@ -103,79 +103,31 @@ gateway:
     issuers:
       - issuer: https://login.example.com/realms/corp
         audience: device-mcp-gateway
-        plane: tenant
         group_roles:
           mcp-admins: admin
-      - issuer: https://provider-idp.example.com
+      - issuer: https://login.example.com/realms/contractors
         audience: device-mcp-gateway
-        plane: provider
         group_roles:
-          provider-support: operator
+          mcp-operators: operator
 ```
 
-Three rules, each of which exists because its absence fails **silently** — the token still
+Two rules, each of which exists because its absence fails **silently** — the token still
 validates and the request still succeeds:
 
 | Rule | Without it |
 |---|---|
-| The issuer is resolved from `iss` **first**, and the decode is pinned to that one issuer with only that issuer's keys | A token signed by issuer A's key while claiming `iss: B` is accepted — a tenant IdP operator mints themselves provider identity on their own gateway |
-| `group_roles` is **per issuer**, with no shared or fallback mapping | A tenant's own IdP admin creates a group named whatever the provider mapping keys on, adds themselves, and their gateway grants them provider-level scopes |
-| `plane` caps the scopes reachable from an issuer, **server-side** | The console's login-time plane-fixing is a session-flow guarantee; a minted provider token replayed straight at this API bypasses it entirely |
+| The issuer is resolved from `iss` **first**, and the decode is pinned to that one issuer with only that issuer's keys | A token signed by issuer A's key while claiming `iss: B` is accepted — the holder of one IdP mints themselves an identity from another |
+| `group_roles` is **per issuer**, with no shared or fallback mapping | An administrator of one trusted IdP creates a group named whatever another issuer's mapping keys on, adds themselves, and the gateway grants them that issuer's scopes |
 
-The **provider** plane is capped at `devices:read`, `devices:write`, `metrics:read`. It can
-never reach `tools:call` — invoking a tool actuates the customer's real hardware, and routine
-debugging should not carry that ambiently — nor any `backup:*` scope, because the provider
-holds `MCP_SECRET_KEY` and so a ciphertext archive is as much a credential dump as a portable
-one. A provider group mapped to a role that exceeds the cap is refused at startup. The
-**tenant** plane has no cap: a tenant's own administrator legitimately holds everything on
-their own stack.
-
-#### Lifting the cap for one request — elevated grants (ADR-0013 §11)
-
-The cap is what makes provider access everyday debugging rather than standing authority, so
-it also blocks the two operations that sometimes genuinely need to happen: invoking a tool,
-and touching backups. Those arrive as an **elevated grant** — a claim on the token, minted by
-the provider IdP after a step-up, raising that issuer's cap for **that request only**:
-
-```yaml
-gateway:
-  tenant_id: acme                        # which tenant this stack is; required for a
-  oidc:                                  # provider-plane issuer, refused at startup without
-    issuers:
-      - issuer: https://provider-idp.example.com
-        plane: provider
-        step_up_acr: ["urn:mcp:provider:step-up"]
-        grant_claim: mcp_grant           # default; namespaced names are common
-        group_roles:
-          provider-support: operator
-```
-
-```json
-{"id": "g-7f2", "tenant": "acme", "scopes": ["tools:call"], "exp": 1755200000}
-```
-
-What is worth knowing operationally:
-
-- **`tools:call` grants last 900s and are replayable inside that window** (a debugging session
-  is several calls); **`backup:*` grants are single-use**, consumed in this gateway's Redis.
-  A grant naming both is single-use and takes the shorter window.
-- **The window is the gateway's, measured from the token's `auth_time`.** A claim `exp` may
-  only shorten it. A grant does not become long-lived because an IdP hook says so.
-- **`acr` is checked in the issued token**, not assumed from what was requested — an IdP may
-  decline a step-up and issue anyway.
-- **Embedded mode refuses every grant**: single-use needs the shared store that only the
-  distributed mode has.
-- **An invalid grant refuses the whole token** — a 401 naming the grant, not a quiet
-  downgrade to the unelevated principal that would surface later as a confusing 403.
-- **A grant on a tenant-plane issuer is ignored** (no cap to lift), and it cannot rescue a
-  subject whose groups map to no role — it lifts a ceiling, it is not a route to authority.
-- **Audit:** every record produced under a grant carries `grant=<id>`. Unelevated records are
-  unchanged and carry no such field.
-
-### Local static keys — bootstrap, CI/test, break-glass
-Independent of any IdP and always available (ADR-0007): `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY`,
-or an explicit `gateway.rbac: [{name, key, role}]` list. These keep working when the IdP is
-unreachable — keep at least one admin key as documented **break-glass**.
+> **Removed:** earlier releases described a second *provider* IdP, a per-issuer `plane` with a
+> server-side scope ceiling, and elevated grants that lifted that ceiling for one request
+> ([ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md) §6/§6a/§11). That
+> arrangement was replaced in design by
+> [ADR-0017](adr/0017-provider-authority-is-delegated.md), where authority over a tenant is
+> **delegated by that tenant** rather than asserted by the provider, and the implementation has
+> been removed. `plane`, `step_up_acr`, `grant_claim` and `entitlement_claim` are no longer
+> read; a config that still sets them is not broken, only ignored. No released version ever
+> offered them.
 
 ## Future granularity
 

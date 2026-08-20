@@ -22,7 +22,7 @@ from sse_starlette import EventSourceResponse
 
 from device_mcp_gateway import API_V1_PREFIX, __version__, fleet_service, metrics
 from device_mcp_gateway.api.dispatch import _GATEWAY_ID, spawn_timeout_watcher
-from device_mcp_gateway.audit import audit_log, grant_fields
+from device_mcp_gateway.audit import audit_log
 from device_mcp_gateway.core.errors import RPC_METHOD_NOT_FOUND, rpc_error
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
@@ -202,7 +202,6 @@ async def fleet_sse_message(request: Request, session_id: str = Query(...)):
                     subject=_subject,
                     status="rejected_overload",
                     rid=_rid,
-                    **grant_fields(request),
                 )
                 raise HTTPException(
                     status_code=429,
@@ -235,7 +234,6 @@ async def fleet_sse_message(request: Request, session_id: str = Query(...)):
                 method="tools/call",
                 status="dispatched",
                 rid=_rid,
-                **grant_fields(request),
             )
             return {"status": "accepted"}
 
@@ -263,6 +261,5 @@ async def fleet_sse_message(request: Request, session_id: str = Query(...)):
         method=payload.get("method", "?") if isinstance(payload, dict) else "?",
         status="error" if isinstance(response, dict) and "error" in response else "accepted",
         rid=_rid,
-        **grant_fields(request),
     )
     return response
