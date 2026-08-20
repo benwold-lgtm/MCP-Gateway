@@ -32,6 +32,7 @@ register were reconstructed from the codebase, the evaluation findings register,
 | [0019](0019-opaque-tenant-identity.md) | The tenant identifier is **opaque from birth** — supersedes [0014](0014-tenant-namespace-naming-and-network-isolation.md) §1 | Proposed |
 | [0020](0020-the-device-catalog.md) | The provider's write path is a **catalog**; tenants claim from it — device types *and* provider-operated services. Answers D2 | Proposed |
 | [0021](0021-separate-console-applications.md) | Provider and tenant consoles are **separate applications** — supersedes [0013](0013-two-plane-tenancy-and-the-provider-plane.md) §3 as a runtime property | Proposed |
+| [0022](0022-agent-initiated-device-writes-are-plan-bound.md) | Agent-initiated device writes are **plan-bound**, not standing access — `caller` keeps its baseline and elevation is per reviewed plan | Proposed — **blocked** on ADR-0018 §6's plan digest, which is specified but not built |
 
 When you add an ADR: copy the template, take the next number, set status `Proposed`, and
 add a row here. Flip to `Accepted` when merged.
