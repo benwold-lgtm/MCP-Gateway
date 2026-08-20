@@ -259,32 +259,13 @@ def subject_of(request: Any) -> str:
     return principal.subject if principal is not None else "unauthenticated"
 
 
-def grant_fields(request: Any) -> dict[str, str]:
-    """The ``grant=<id>`` field for a request acting under an elevated grant (ADR-0013 §11).
-
-    Returns ``{}`` when there is none. The absence is deliberate rather than a ``grant=None``:
-    the hash chain commits to the record's field *set*, so an always-present field would make
-    every record written from here on differ in shape from every record already written, for
-    no information. Only requests that actually used a grant carry the field.
-
-    Why a field at all, when the scopes are already in the principal: "held ``tools:call``
-    because their role grants it" and "held it for ninety seconds under grant ``g-7f2``" are
-    the same scope set and very different records. §8's invoke class is replayable *within*
-    its window, so one grant id legitimately appears across several records — which is exactly
-    what makes it the join key when reconstructing what an elevated session did.
-    """
-    principal = getattr(getattr(request, "state", None), "principal", None)
-    grant_id = getattr(principal, "grant_id", None)
-    return {"grant": grant_id} if isinstance(grant_id, str) and grant_id else {}
-
-
 def audit_request(request: Any, action: str, *, outcome: str, target: str | None = None, **extra: Any) -> None:
     """Emit an audit record for an HTTP request, pulling subject + rid off ``request``."""
     rid = getattr(getattr(request, "state", None), "request_id", "-")
     # ``extra`` wins on a key collision rather than raising: a caller that passes its own
     # ``grant=`` is being explicit, and an audit emitter must never be the thing that 500s a
     # route it is only observing.
-    fields = {**grant_fields(request), **extra}
+    fields = dict(extra)
     audit_event(action, subject=subject_of(request), outcome=outcome, rid=rid, target=target, **fields)
 
 

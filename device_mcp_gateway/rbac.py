@@ -85,12 +85,6 @@ class Principal:
     subject: str
     scopes: frozenset[str]
     auth_method: str
-    #: The elevated grant that raised this principal's ceiling for this request, if any
-    #: (ADR-0013 §11). Carried on the principal rather than inferred from the scope set,
-    #: because "held `tools:call` because their role grants it" and "held it for ninety
-    #: seconds under grant g-7f2" are the same scopes and very different audit records.
-    #: Never set for a tenant-plane principal — the tenant plane has no ceiling to raise.
-    grant_id: Optional[str] = None
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -235,9 +229,9 @@ class CompositeAuthenticator:
         self._oidc_warn_suppressed = 0
         extra = f" ({suppressed} similar suppressed in the last {int(_OIDC_WARN_INTERVAL)}s)" if suppressed else ""
         # The "check whether your IdP is reachable" advice is only true for the reachability
-        # class. Appended unconditionally it actively misdirects: a refused elevated grant
-        # (ADR-0013 §11) or a forged token is the gateway working as designed, and sending
-        # the operator to look at IdP connectivity buries the real reason under a wrong one.
+        # class. Appended unconditionally it actively misdirects: a forged or expired token is
+        # the gateway working as designed, and sending the operator to look at IdP
+        # connectivity buries the real reason under a wrong one.
         advice = (
             " If this persists, the IdP or its JWKS endpoint is unreachable and only "
             "break-glass keys can authenticate — see mcp_oidc_validation_failures_total."
@@ -261,9 +255,7 @@ class CompositeAuthenticator:
 
     @property
     def oidc(self) -> "MultiIssuerValidator":
-        """The federated half — exposed so the lifespan can hand it the elevated-grant
-        consumption store once Redis is up (ADR-0013 §11a). It cannot be constructed with
-        one: the authenticator is built at import time, well before Redis exists."""
+        """The federated (OIDC) half of the composite authenticator."""
         return self._oidc
 
     async def authenticate_async(self, credentials: Optional[HTTPAuthorizationCredentials]) -> Principal:

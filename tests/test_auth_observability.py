@@ -92,21 +92,16 @@ async def test_first_failure_warns_and_the_flood_is_rate_limited(monkeypatch):
     "message, expect_reachability_advice",
     [
         ("no JWKS key for kid='x' (unknown key or IdP unreachable)", True),
-        (
-            "elevated grant refused: token acr 'x' is not one of the configured step-up "
-            "contexts ['urn:mcp:provider:step-up']",
-            False,
-        ),
+        ("JWT validation failed: Audience doesn't match", False),
         ("JWT validation failed: Signature verification failed", False),
     ],
 )
 async def test_reachability_advice_only_for_reachability_failures(monkeypatch, message, expect_reachability_advice):
     """ "Your IdP may be unreachable" must not be appended to every failure.
 
-    A refused elevated grant (ADR-0013 §11) and a forged signature are the gateway
-    working as designed. Telling the operator to go and check IdP connectivity buries
-    the real reason under a wrong one — which matters most for the grant refusal,
-    since that is the path someone reads during an incident.
+    A wrong audience and a forged signature are the gateway working as designed. Telling
+    the operator to go and check IdP connectivity buries the real reason under a wrong one,
+    and it is the path someone reads during an incident.
     """
     from device_mcp_gateway.oidc import OIDCError
     from device_mcp_gateway.rbac import CompositeAuthenticator

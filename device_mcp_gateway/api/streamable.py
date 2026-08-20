@@ -41,7 +41,7 @@ from device_mcp_gateway.api.exchange import (
     ExchangeUnavailable,
     ResultExchange,
 )
-from device_mcp_gateway.audit import audit_log, grant_fields
+from device_mcp_gateway.audit import audit_log
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
 from device_mcp_gateway.rbac import SCOPE_TOOLS_CALL, require_scope
 from device_mcp_gateway.registry.server import Registry
@@ -220,7 +220,6 @@ async def device_streamable_post(hostname: str, request: Request, response: Resp
         duration_ms=round(_dur, 1),
         rid=_rid,
         transport="streamable-http",
-        **grant_fields(request),
     )
 
     if result is None:

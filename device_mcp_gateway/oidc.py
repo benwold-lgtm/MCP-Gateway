@@ -36,19 +36,7 @@ from typing import Any, Optional
 import jwt
 from loguru import logger
 
-from device_mcp_gateway import metrics
-from device_mcp_gateway.grants import (
-    ENTITLEMENT_CLAIM_DEFAULT,
-    GRANT_CLAIM_DEFAULT,
-    ElevatedGrant,
-    GrantConsumptionStore,
-    GrantError,
-    verify_grant,
-)
 from device_mcp_gateway.rbac import (
-    SCOPE_DEVICES_READ,
-    SCOPE_DEVICES_WRITE,
-    SCOPE_METRICS_READ,
     Principal,
     scopes_for_role,
 )
@@ -57,39 +45,6 @@ from device_mcp_gateway.security.url_policy import (
     build_guarded_client,
     validate_target_url,
 )
-
-# --- Planes (ADR-0013 §6a) ---------------------------------------------------
-#
-# An issuer is not just a key source; it identifies which *population* a token comes from,
-# and that has to bind the eligible scope set **server-side**. The BFF fixes the plane at
-# login (§3), but that is a session-flow guarantee: once a provider-plane token is minted it
-# can be replayed straight at a tenant gateway with the BFF nowhere in the path.
-
-PLANE_TENANT = "tenant"
-PLANE_PROVIDER = "provider"
-
-# The maximum scope set reachable from an issuer on each plane. ``None`` means no ceiling.
-#
-# Tenant: none. A tenant's own administrator legitimately holds everything on their own
-# stack — the ceiling exists to constrain the provider issuer, not to re-litigate tenant RBAC.
-#
-# Provider: the §5a everyday-debugging carve-out. Deliberately excludes:
-#   * ``tools:call`` — tool invocation is the most consequential thing the gateway does, and
-#     a support engineer debugging a device's configuration should not carry standing
-#     authority to actuate the customer's physical hardware (§5a).
-#   * every ``backup:*`` scope — the provider holds ``MCP_SECRET_KEY``, so for them a
-#     ciphertext archive and a portable one are equally a credential dump, and ADR-0011's
-#     ciphertext/portable safety argument carries none of its force here (§5b).
-#
-# The two elevated grants (`provider:invoke`, `provider:credentials`) are BFF scopes
-# exercised as named, time-boxed, individually audited acts — they are not reached by
-# widening this ceiling. They reach a tenant gateway as a verifiable claim on the token
-# which raises this ceiling for one request; see `device_mcp_gateway/grants.py` and
-# ADR-0013 §11.
-PLANE_SCOPE_CEILING: dict[str, Optional[frozenset[str]]] = {
-    PLANE_TENANT: None,
-    PLANE_PROVIDER: frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_METRICS_READ}),
-}
 
 # Bound the installed JWKS key set (TM-I-09). A spoofed/oversized JWKS response must
 # not be able to install an unbounded number of keys (memory / lookup cost). Real IdPs
@@ -116,23 +71,6 @@ class OIDCConfig:
     issuer: str
     audience: str
     group_roles: dict[str, str]
-    # Which population this issuer speaks for, and therefore its scope ceiling (§6a).
-    # Defaults to tenant so an existing single-issuer deployment is unchanged.
-    plane: str = PLANE_TENANT
-    # This gateway's own tenant identity — one gateway, one tenant (ADR-0004). Knowing its
-    # own name is not knowing that other tenants exist; it is what lets it check that a
-    # grant claim names *it* rather than the estate (§11a). Required for a provider-plane
-    # issuer, meaningless for a tenant-plane one, which honours no grants.
-    tenant_id: Optional[str] = None
-    # The authentication context that counts as a step-up for this issuer, and the name of
-    # the custom claim carrying a grant. With no step_up_acr configured, elevated grants are
-    # refused: an unverifiable step-up is not a satisfied one (§11b).
-    step_up_acr: tuple[str, ...] = ()
-    grant_claim: str = GRANT_CLAIM_DEFAULT
-    # The claim naming the tenants this operator may act on at all (§11c). The grant
-    # claim above is *selected* by the request; this one is derived by the IdP from the
-    # directory. The gateway honours a grant only where the two intersect.
-    entitlement_claim: str = ENTITLEMENT_CLAIM_DEFAULT
     jwks_uri: Optional[str] = None
     groups_claim: str = "groups"
     subject_claim: str = "sub"
@@ -155,39 +93,10 @@ class OIDCConfig:
                 f"gateway.oidc.algorithms must be a non-empty subset of asymmetric algorithms "
                 f"{sorted(ASYMMETRIC_ALGORITHMS)}; rejected {bad or 'empty'} (HS*/none are not allowed)"
             )
-        if self.plane not in PLANE_SCOPE_CEILING:
-            raise ValueError(f"gateway.oidc plane must be one of {sorted(PLANE_SCOPE_CEILING)}; got {self.plane!r}")
-        if self.plane == PLANE_PROVIDER and not self.tenant_id:
-            # Fail fast rather than on the first elevation. A provider-plane issuer whose
-            # gateway has no tenant identity can never honour a grant, and finding that out
-            # during an incident — the only time an elevation is wanted — is the worst
-            # possible moment. Tenant-plane issuers are unaffected, so no existing
-            # single-issuer deployment is forced through a config change.
-            raise ValueError(
-                f"gateway.oidc issuer {self.issuer!r} is on the provider plane, so gateway.tenant_id must "
-                f"be set: an elevated grant names exactly one tenant and this gateway has to know whether "
-                f"that is itself (ADR-0013 §11a)."
-            )
         # Validate every configured group→role now so a typo fails fast at startup, not
         # on the first login. Roles must be known scope bundles.
-        ceiling = PLANE_SCOPE_CEILING[self.plane]
-        for grp, role in self.group_roles.items():
-            granted = scopes_for_role(role)  # raises ValueError on unknown role
-            if ceiling is None:
-                continue
-            # Refuse the mapping outright rather than silently trimming it. A config that
-            # says "provider-admins are gateway admins" is a misunderstanding of §5a, and
-            # quietly granting a narrower set would leave the operator believing something
-            # false about their own deployment.
-            excess = granted - ceiling
-            if excess:
-                raise ValueError(
-                    f"gateway.oidc issuer {self.issuer!r} is on the {self.plane!r} plane, so group "
-                    f"{grp!r} cannot map to role {role!r}: that role grants {sorted(excess)}, which is "
-                    f"outside the {self.plane} ceiling {sorted(ceiling)} (ADR-0013 §5a/§5b). Tool "
-                    f"invocation and credential-bearing reads are elevated, individually audited "
-                    f"grants — they are not reached by widening a role mapping."
-                )
+        for role in self.group_roles.values():
+            scopes_for_role(role)  # raises ValueError on unknown role
         # The issuer (and an explicit JWKS URI) are operator config but still fetched
         # server-side — run them through the same egress policy as device targets (TM-I-10).
         self._check_url(self.issuer, "gateway.oidc.issuer")
@@ -320,10 +229,6 @@ class OIDCValidator:
     def __init__(self, cfg: OIDCConfig, jwks: Optional[JWKSCache] = None) -> None:
         self._cfg = cfg
         self._jwks = jwks or JWKSCache(cfg)
-        # Attached after startup, once Redis exists (the validator is built before it).
-        # Until then it is None, and every elevated grant is refused — which is also the
-        # permanent state in embedded mode, where there is no shared store at all.
-        self._grant_store: Optional[GrantConsumptionStore] = None
 
     @property
     def jwks(self) -> JWKSCache:
@@ -332,9 +237,6 @@ class OIDCValidator:
     @property
     def config(self) -> OIDCConfig:
         return self._cfg
-
-    def attach_grant_store(self, store: Optional[GrantConsumptionStore]) -> None:
-        self._grant_store = store
 
     async def validate(self, token: str) -> Principal:
         """Return the Principal for a valid JWT, or raise ``OIDCError``."""
@@ -370,83 +272,7 @@ class OIDCValidator:
         except jwt.PyJWTError as exc:
             raise OIDCError(f"JWT validation failed: {exc}")
 
-        principal = self._principal_from_claims(claims)
-        return await self._apply_grant(claims, principal)
-
-    async def _apply_grant(self, claims: dict[str, Any], principal: Principal) -> Principal:
-        """Raise this principal's ceiling if the token carries a valid grant (ADR-0013 §11).
-
-        Two orderings here are load-bearing and both are easy to get backwards.
-
-        **The plane is consulted before the union.** A grant lifts a *ceiling*, so on an
-        issuer that has none there is nothing to lift and the claim is ignored outright. Do
-        the union first and a tenant `viewer` whose own IdP can be made to emit the claim
-        gains `tools:call` on their own stack — §6a's escalation one layer up, sourced from
-        the tenant's own IdP.
-
-        **The union happens after the ceiling has been applied**, not instead of it. The
-        grant adds exactly what it names on top of the capped base; it is not an alternative
-        route to authority, so a subject whose groups map to nothing still ends up with
-        nothing.
-        """
-        raw = claims.get(self._cfg.grant_claim)
-        if raw is None:
-            return principal
-
-        ceiling = PLANE_SCOPE_CEILING[self._cfg.plane]
-        if ceiling is None:
-            # Anomalous rather than dangerous — but worth a line, because a tenant IdP
-            # emitting this claim means either a misconfigured hook or someone probing.
-            logger.warning(
-                f"token from {self._cfg.issuer!r} carries a {self._cfg.grant_claim!r} claim, but that "
-                f"issuer is on the {self._cfg.plane!r} plane and has no scope ceiling to raise. "
-                f"Ignoring the claim; it grants nothing (ADR-0013 §11)."
-            )
-            return principal
-
-        if not principal.scopes:
-            # An authenticated subject whose groups map to no role. The grant lifts a
-            # ceiling; it does not replace the group mapping, which stays load-bearing for
-            # exactly the population §6a exists to constrain.
-            logger.warning(
-                f"subject {principal.subject!r} presented an elevated grant but no group maps to a "
-                f"role; the grant raises a ceiling and is not an alternative route to authority."
-            )
-            return principal
-
-        try:
-            grant: ElevatedGrant = await verify_grant(
-                raw,
-                tenant_id=self._cfg.tenant_id,
-                # Already issuer-qualified (see _build_principal): `sub` is unique within an
-                # issuer, not across, and the single-use record is keyed on this.
-                subject=principal.subject,
-                step_up_acr=self._cfg.step_up_acr,
-                entitlement=claims.get(self._cfg.entitlement_claim),
-                entitlement_claim=self._cfg.entitlement_claim,
-                acr=claims.get("acr"),
-                auth_time=claims.get("auth_time"),
-                store=self._grant_store,
-                leeway=self._cfg.leeway,
-            )
-        except GrantError as exc:
-            metrics.elevated_grants_total.labels(outcome="refused").inc()
-            logger.warning(f"elevated grant refused for subject from {self._cfg.issuer!r}: {exc}")
-            # Refuse the whole token rather than serving the unelevated principal — see
-            # GrantError's docstring for why the quiet fall-back is the worse failure.
-            raise OIDCError(f"elevated grant refused: {exc}")
-
-        metrics.elevated_grants_total.labels(outcome="accepted").inc()
-        logger.info(
-            f"elevated grant {grant.id!r} accepted for {principal.subject!r} on tenant {grant.tenant!r}: "
-            f"+{sorted(grant.scopes)} until {grant.expires_at:.0f} (single_use={grant.single_use})"
-        )
-        return Principal(
-            subject=principal.subject,
-            scopes=principal.scopes | grant.scopes,
-            auth_method=principal.auth_method,
-            grant_id=grant.id,
-        )
+        return self._principal_from_claims(claims)
 
     def _principal_from_claims(self, claims: dict[str, Any]) -> Principal:
         subject = claims.get(self._cfg.subject_claim) or claims.get("sub")
@@ -473,20 +299,6 @@ class OIDCValidator:
             # scopes. Every route guard then 403s, and the audit shows *who* was denied
             # (better than a blanket 401 that hides the identity).
             logger.info(f"OIDC subject {subject!r} authenticated but no group maps to a role (groups={groups})")
-
-        # Apply the plane ceiling again at validation time (§6a). Not redundant with the
-        # startup check: config can be reloaded and ROLE_SCOPES can gain a scope, and a
-        # startup-only check is a claim about one moment rather than about every request.
-        ceiling = PLANE_SCOPE_CEILING[self._cfg.plane]
-        if ceiling is not None:
-            dropped = scopes - ceiling
-            if dropped:
-                logger.warning(
-                    f"OIDC issuer {self._cfg.issuer!r} ({self._cfg.plane} plane) yielded scopes outside its "
-                    f"ceiling and they were dropped: {sorted(dropped)}. This should have been refused at "
-                    f"startup — treat it as a configuration or role-table drift."
-                )
-            scopes &= ceiling
 
         # The subject is qualified by its issuer. `sub` is unique *within* an issuer, not
         # globally: `admin` at the tenant IdP and `admin` at the provider IdP are two
@@ -542,16 +354,6 @@ class MultiIssuerValidator:
         """Install a key set for one issuer (startup warm-up / tests)."""
         self._validators[issuer].jwks.seed(jwks)
 
-    def attach_grant_store(self, store: Optional[GrantConsumptionStore]) -> None:
-        """Give every issuer the elevated-grant consumption store (ADR-0013 §11a).
-
-        Called from the lifespan once Redis exists, because the authenticator is built at
-        import time and Redis is not up then. Before this runs — and forever in embedded
-        mode, which never calls it — elevated grants are refused.
-        """
-        for validator in self._validators.values():
-            validator.attach_grant_store(store)
-
     async def validate(self, token: str) -> Principal:
         try:
             unverified = jwt.decode(token, options={"verify_signature": False})
@@ -568,23 +370,13 @@ class MultiIssuerValidator:
         return await validator.validate(token)
 
 
-def _issuer_config(entry: dict, cfg: dict, *, default_plane: str = PLANE_TENANT) -> OIDCConfig:
+def _issuer_config(entry: dict, cfg: dict) -> OIDCConfig:
     from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
-
-    # The gateway's own tenant identity is a property of the deployment, not of an issuer —
-    # one gateway serves one tenant (ADR-0004) — so it is read from `gateway.tenant_id` and
-    # handed to every issuer entry rather than repeated per entry.
-    tenant_id = (cfg.get("gateway", {}) or {}).get("tenant_id") or None
 
     return OIDCConfig(
         issuer=entry.get("issuer", ""),
         audience=entry.get("audience", ""),
         group_roles=dict(entry.get("group_roles", {}) or {}),
-        plane=entry.get("plane", default_plane),
-        tenant_id=tenant_id,
-        step_up_acr=tuple(entry.get("step_up_acr") or ()),
-        grant_claim=entry.get("grant_claim", GRANT_CLAIM_DEFAULT),
-        entitlement_claim=entry.get("entitlement_claim", ENTITLEMENT_CLAIM_DEFAULT),
         jwks_uri=entry.get("jwks_uri"),
         groups_claim=entry.get("groups_claim", "groups"),
         subject_claim=entry.get("subject_claim", "sub"),
@@ -605,12 +397,16 @@ def build_oidc_validator(cfg: dict) -> Optional[MultiIssuerValidator]:
     ``api_key`` / ``rbac``). Resolution failures raise ``ValueError`` so a misconfigured
     IdP fails fast at startup rather than on the first login.
 
-    Two accepted shapes. The **legacy single-issuer** form (``issuer``/``audience``/
-    ``group_roles`` at the top level) keeps working untouched and lands on the tenant
-    plane — a security change that forced every existing operator through a config
-    migration would get deferred, and then nobody would get the isolation. The
-    **multi-issuer** form takes a list under ``issuers``, each entry declaring its own
-    ``plane`` and its own ``group_roles`` (ADR-0013 §6a: no shared or fallback mapping).
+    Two accepted shapes. The **single-issuer** form puts ``issuer``/``audience``/
+    ``group_roles`` at the top level. The **multi-issuer** form takes a list under
+    ``issuers``, each entry declaring its own ``group_roles`` — no shared or fallback
+    mapping, so a group is never resolved against an issuer that did not declare it.
+
+    Multi-issuer is retained as a neutral capability: a deployment may legitimately trust
+    more than one of *its own* identity providers. What ADR-0017 removed is the specific
+    arrangement where the trusted second issuer was the **provider's** IdP, carrying a
+    scope ceiling and elevated grants — that machinery is gone, and an issuer entry now
+    declares nothing beyond its own key source and role mapping.
     """
     oidc_cfg = (cfg.get("gateway", {}) or {}).get("oidc", {}) or {}
     if not oidc_cfg.get("enabled", False):
@@ -630,7 +426,7 @@ def build_oidc_validator(cfg: dict) -> Optional[MultiIssuerValidator]:
     validator = MultiIssuerValidator(configs)
     for c in configs:
         logger.info(
-            f"OIDC inbound auth enabled: issuer={c.issuer} plane={c.plane} audience={c.audience} "
+            f"OIDC inbound auth enabled: issuer={c.issuer} audience={c.audience} "
             f"algs={list(c.algorithms)} groups_claim={c.groups_claim} "
             f"roles={sorted(set(c.group_roles.values()))}"
         )

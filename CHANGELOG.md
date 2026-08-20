@@ -21,9 +21,15 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 > [ADR-0016](docs/adr/0016-reaching-many-tenant-gateways.md) (Rejected) for why the direction
 > changed.
 >
-> Withdrawn on that basis: the second trusted issuer (`gateway.oidc.issuers`), elevated grant
-> claims with their entitlement intersection, the single-use consumption record, and the
-> `grant=<id>` audit field. The fixes and the change below are independent of it and stand.
+> Withdrawn on that basis, and **now removed from the code**: the *provider* second issuer with
+> its per-issuer `plane` and server-side scope ceiling, elevated grant claims with their
+> entitlement intersection, the single-use consumption record, and the `grant=<id>` audit field.
+> The fixes and the changes below are independent of it and stand.
+>
+> `gateway.oidc.issuers` itself **survives** as a neutral capability — a deployment may trust
+> more than one of *its own* identity providers — minus everything that made it the provider
+> arrangement. `plane`, `step_up_acr`, `grant_claim` and `entitlement_claim` are no longer read;
+> a config still setting them is ignored, not refused.
 
 ### Added
 
@@ -117,6 +123,23 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   after a tenant departs (ADR-0019 §4).
 
 ### Removed
+
+- **The ADR-0013 provider plane, in full** — `device_mcp_gateway/grants.py` (the elevated-grant
+  verifier, the entitlement intersection and the Redis consumption store), the per-issuer `plane`
+  and its server-side scope ceiling in `oidc.py`, the `grant=<id>` audit field, the
+  `mcp_elevated_grants_total` metric, and the `grant:used:*` Redis key. Superseded in design by
+  [ADR-0017](docs/adr/0017-provider-authority-is-delegated.md), where authority over a tenant is
+  **delegated by that tenant** rather than asserted by the provider.
+
+  **No released version ever offered any of it**, so there is nothing to migrate and no
+  deprecation period to serve — which is exactly why it is being removed rather than announced.
+  A deployment whose config still carries `plane`, `step_up_acr`, `grant_claim` or
+  `entitlement_claim` keeps working; those keys are ignored.
+
+  Multi-issuer OIDC (`gateway.oidc.issuers`) is **kept**, with the two rules that make it safe —
+  the issuer resolved from `iss` first with the decode pinned to that issuer's keys, and
+  `group_roles` per issuer with no shared fallback. Trusting two of your own IdPs is a reasonable
+  thing to want; trusting the provider's was the part ADR-0017 removed.
 
 - **`MCP_TENANT_NAMESPACE_KEY`** and the derivation it keyed. Nothing reads it; a deployment
   that still sets it is not broken, only ignored. Existing namespaces keep working — they are

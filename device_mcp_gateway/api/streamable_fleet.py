@@ -40,7 +40,7 @@ from device_mcp_gateway.api.streamable import (
     _exchange_for,
     _read_payload,
 )
-from device_mcp_gateway.audit import audit_log, grant_fields
+from device_mcp_gateway.audit import audit_log
 from device_mcp_gateway.core.errors import RPC_METHOD_NOT_FOUND, RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.fleet_service import FleetManifest
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
@@ -271,7 +271,6 @@ async def fleet_streamable_post(request: Request, response: Response, devices: s
             duration_ms=round(_dur, 1),
             rid=_rid,
             transport="streamable-http",
-            **grant_fields(request),
         )
         if result is None:
             return Response(status_code=202, headers=dict(response.headers))
