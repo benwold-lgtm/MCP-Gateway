@@ -225,13 +225,37 @@ is a provider's typo changing every customer's fleet simultaneously.
 
 ## Open questions
 
-- **Which backing store the catalog uses.** §7 fixes that it is a separate component with its
-  own failure domain; whether that is Postgres, a managed service or something smaller is a
-  deployment question that interacts with how large an estate is expected to get.
-- **Whether assignment is per tenant or by group** (tier, region, contract). Per tenant is
-  obviously correct and obviously tedious at scale.
-- **Whether a tenant can be required to keep a provider-operated service** — a monitoring
-  agent, say — or whether unclaiming is always the tenant's right. Leaning always theirs, since
-  the alternative is a device the tenant cannot remove, which contradicts §2.
-- **How an upgrade is offered** — notification, a console prompt, or a scheduled window — is a
-  product question that interacts with §4's version pinning.
+**All four were answered in the 2026-08-20 design pass; the record was not updated at the time
+and the resolutions were restored here on 2026-08-21 from the working tracker
+(`~/.claude/plans/adr-open-questions-tracker.md`).**
+
+- ~~**Which backing store the catalog uses.**~~ **Resolved: PostgreSQL.** A managed cloud
+  instance where one is available, self-hosted HA on-prem as the default otherwise. SQLite
+  stays available but as an **explicitly small-scale-only** option, not a supported path to
+  growth — §7 gives the catalog its own failure domain, and a store that cannot be replicated
+  cannot honour that at estate scale. This is the deployment dependency the implementation
+  order (`README.md`) weighs 0020 as the largest item for.
+
+- ~~**Whether assignment is per tenant or by group.**~~ **Resolved: per tenant.** Tedious at
+  scale and correct anyway — a group (tier, region, contract) is a *property* a tenant happens
+  to hold at a moment, and binding entitlement to it means a tenant's fleet changes as a side
+  effect of an administrative reclassification nobody connected to their devices. Grouping can
+  be layered on later as a bulk-assignment convenience over per-tenant records; it cannot be
+  unpicked from underneath them.
+
+- ~~**Whether a tenant can be required to keep a provider-operated service.**~~ **Resolved:
+  unclaiming is always the tenant's right**, in the direction this leaned. The alternative is a
+  device the tenant cannot remove from their own fleet, which contradicts §2 directly and, more
+  practically, is the provider asserting standing authority inside a tenant stack — exactly
+  what [ADR-0017](0017-provider-authority-is-delegated.md) removes. A provider who needs a
+  monitoring agent in place makes that a contractual condition, not a technical one the tenant
+  cannot exercise.
+
+- ~~**How an upgrade is offered.**~~ **Resolved: reuse tool-diff governance.** The catalog does
+  not need a second, parallel notion of "a change the tenant should look at" — the
+  breaking/non-breaking classification and approval pattern already built for device tool
+  changes covers it. A catalog upgrade surfaces **on the fleet list**, is **never blocking**,
+  and is **never scheduled or forced**. That keeps §4's version pinning meaningful: pinning is
+  the tenant's, and an upgrade is an offer they accept, which is also why the blast-radius
+  objection to automatic following (see the rejected alternative above) does not come back
+  through the notification path.

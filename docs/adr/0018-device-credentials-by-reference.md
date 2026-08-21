@@ -965,11 +965,17 @@ required otherwise would not describe the actual estate.
   the question does not arise). §7 settles that the cache ships instrumented; the number comes
   from the resulting data, and the three-way trade (rotation, hot path, outage tolerance) means
   there may be no single right answer across deployment sizes.
-- **Whether a store outage should fail open on cached material past its TTL — networked backends
-  only** (§7c; a mounted-files store has no dispatch-time outage for this to arise from). Serving
-  a stale credential to keep the fleet dispatching is the availability answer; refusing is the
-  correctness one. Leaning refuse, since a rotated-away credential failing at the device is a
-  worse diagnosis than an honest `ERR_SECRET_STORE_UNAVAILABLE`.
+- ~~**Whether a store outage should fail open on cached material past its TTL — networked
+  backends only**~~ (§7c; a mounted-files store has no dispatch-time outage for this to arise
+  from). **Resolved: refuse**, in the direction this leaned. Serving a stale credential to keep
+  the fleet dispatching is the availability answer and it is the wrong one here: a
+  rotated-away credential failing at the device is a worse diagnosis than an honest
+  `ERR_SECRET_STORE_UNAVAILABLE`, because the failure surfaces somewhere the operator cannot
+  attribute to the secret store at all. Availability is answered where it belongs instead — by
+  running the store itself HA — rather than bought back with a correctness exception on the
+  dispatch path. **Outstanding:** that HA guidance is not yet in `README.md` or
+  [kubernetes-architecture.md](../kubernetes-architecture.md); neither mentions the secret store.
+  Refusing without telling an operator how to avoid needing to is half a decision.
 - **How long a plan digest stays valid.** §6 gives it no expiry of its own beyond the grant
   window that gates the apply. A digest previewed weeks ago and applied inside a fresh grant
   would still match if nothing in the request changed, which is arguably correct — the

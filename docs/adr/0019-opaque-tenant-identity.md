@@ -138,5 +138,11 @@ is commercially sensitive in a way a customer's name is not, and they invite enu
   console hostname of [ADR-0021](0021-separate-console-applications.md) §5 — and a public CA
   would refuse the certificate. Corrected across ADRs 0018/0019/0021 before any code was
   written.
-- **Whether the tenant should ever see their own identifier.** They must, for support; the
-  question is whether it appears in their console by default or only when asked for.
+- ~~**Whether the tenant should ever see their own identifier.**~~ **Resolved by reframing it:
+  it was never a visibility question.** The identifier is already unavoidably visible in the
+  console's own URL (`<tenant-id>.yourdomain.com`) per §5's hostname structure, and §2 makes it
+  deliberately safe to expose broadly — so there is no security angle either way, and nothing to
+  decide about whether to reveal it. The real, actionable question underneath was usability:
+  **add a low-prominence copy affordance** in the account/settings area or the footer, so a
+  support interaction does not depend on someone transcribing 16 hex characters out of a URL
+  bar. Recorded in the SyncGate UI spec §4.
