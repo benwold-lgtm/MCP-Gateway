@@ -14,8 +14,11 @@ and became the acceptance criteria for the auth-core work.
 > evidence gate for flipping ADR-0007 from Proposed to Accepted. Every row now carries its
 > real status and a code pointer instead of `[planned]`. Result: **10 built, 1 accepted as
 > designed, 1 satisfied by construction, 3 not applicable (Mode A), 2 gaps** — TM-I-05 and
-> TM-I-13, written up in §5a. **TM-I-05's substantive half was fixed the following day**; what
-> remains under it is scheme enforcement, a deployment-posture item like TM-I-13. **I4 mode is A (token passthrough)**, decided in code
+> TM-I-13, written up in §5a. **TM-I-05 is now closed entirely** — fixed the following day
+> across all three of its halves: BFF issuer pinning (05a), plaintext refusal on both sides
+> (05b), and the gateway's own discovery pinning (05c), which the walk **missed** and which was
+> the most consequential of the three. **TM-I-13 is the only gap left**, and it is deployment
+> posture rather than code. **I4 mode is A (token passthrough)**, decided in code
 > rather than in a document: `bff/app/security.py::upstream_bearer` relays the user's own access
 > token and the BFF mints no assertion, which is what makes TM-I-14/15/17 inapplicable —
 > confirmed by reading every path through `upstream_bearer` and `relay.py`: each resolves to
@@ -114,7 +117,7 @@ a row with neither is a gap, same rule as the base model.
 
 | STRIDE | Threat | Control (requirement) |
 |--------|--------|------------------------|
-| **S**poofing (of the IdP) | BFF talks to an impostor authorize/token endpoint | **TM-I-05 [built — issuer pinned to config in `bff/app/oidc.py::_discover`; plaintext `http://` refused at startup on both halves unless explicitly allowed, §5a]:** discovery + endpoints over TLS with standard cert validation; `issuer` pinned in config; no plaintext HTTP |
+| **S**poofing (of the IdP) | BFF talks to an impostor authorize/token endpoint | **TM-I-05 [built — issuer pinned to config in `bff/app/oidc.py::_discover` *and* `device_mcp_gateway/oidc.py::_resolve_jwks_uri`; plaintext `http://` refused at startup on both halves, and on a discovered `jwks_uri` as it resolves, unless explicitly allowed, §5a]:** discovery + endpoints over TLS with standard cert validation; `issuer` pinned in config; no plaintext HTTP |
 | **T**ampering | Authorization-code interception / replay | **TM-I-06 [built — `bff/app/oidc.py:68-71,179-180`]:** Authorization Code **+ PKCE (S256)** mandatory; one-time code exchange server-side |
 | **I**nformation disclosure | `client_secret` / tokens exposed | **TM-I-07 [built — `bff/app/config.py:222,235`]:** confidential-client secret injected via env (never ConfigMap, per existing secret hygiene); token endpoint called server-to-server only |
 | **R**epudiation | — | IdP-side; out of scope (the IdP is authoritative) |
@@ -220,6 +223,38 @@ Both halves warn loudly when the flag is set, matching the `allow_weak_keys` and
 RBAC-disabled conventions. Tests on both sides cover default refusal, the flag, the loopback
 non-exemption, and https needing no flag; the gateway additionally covers a plaintext
 `jwks_uri` behind an https issuer.
+
+**TM-I-05c (gateway) — ✅ FIXED 2026-08-21, and it was the consequential one.** The same bug
+class as TM-I-05a, on the side that actually enforces authorization rather than relaying
+identity. `_resolve_jwks_uri` (`device_mcp_gateway/oidc.py`) pulled `jwks_uri` out of the
+discovery document with no check that the document declared the configured issuer, then cached
+it in `self._discovered_jwks_uri` **for the lifetime of the process**.
+
+**Why pinning `iss`/`aud` at decode did not cover it.** `jwt.decode(..., issuer=self._cfg.issuer,
+audience=self._cfg.audience)` looks like the check, and is not: those are claims in a token the
+attacker mints, so they can be set to exactly what this code expects. What decides forgery is
+*whose keys* the signature is verified against — and that came from the document. A spoofed
+response (an on-path attacker where the fetch is plaintext, or a compromised or misconfigured
+proxy in front of the real IdP) naming an attacker-controlled `jwks_uri` gets the attacker's
+keys installed, and **one successful spoof poisons every subsequent validation until restart.**
+
+Demonstrated, not argued: on the pre-fix code the regression suite logs
+`OIDC JWKS refreshed from https://evil.test/jwks (1 key(s))` and a token minted with the
+attacker's own key, claiming `groups: ["mcp-admins"]`, validates to an admin principal.
+
+Closed the same way as TM-I-05a — compare the declared issuer against `self._cfg.issuer`
+(trailing slashes normalised, everything else exact), refuse on mismatch, and assign the cache
+only after every check, so a refused document leaves nothing behind. **A second hole in the same
+function was found while fixing it and is closed too:** a *discovered* `jwks_uri` had never
+passed the startup checks a configured one gets, so a document could downgrade the key fetch to
+plaintext `http` on a deployment that refused a plaintext issuer at boot. It now runs through
+`OIDCConfig._check_url` — the same rule, not a second copy of it.
+
+Regression tests: `tests/test_oidc_discovery_pinning.py`, 8 of them, driving the real HTTP path
+rather than monkeypatching `_refresh` (every existing JWKS test stubbed `_refresh`, which is
+exactly why the defect survived — it lived entirely in the code between the response and the
+cache). **6 fail on the pre-fix code**, verified by reverting; the other two are boundary guards
+that must pass either way (trailing-slash equivalence, and the plaintext flag still working).
 
 **TM-I-13 — partial.** `GATEWAY_URL` defaults to `http://localhost:8000` (`bff/app/config.py:190`)
 and nothing enforces TLS on the BFF→gateway leg; it is a property of how the stack is deployed,
