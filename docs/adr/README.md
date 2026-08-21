@@ -34,6 +34,7 @@ register were reconstructed from the codebase, the evaluation findings register,
 | [0021](0021-separate-console-applications.md) | Provider and tenant consoles are **separate applications** — supersedes [0013](0013-two-plane-tenancy-and-the-provider-plane.md) §3 as a runtime property | Accepted |
 | [0022](0022-agent-initiated-device-writes-are-plan-bound.md) | Agent-initiated device writes are **plan-bound**, not standing access — `caller` keeps its baseline and elevation is per reviewed plan | Accepted — implementation still blocked on ADR-0018 §6's plan digest slice, which is specified but not yet built |
 | [0023](0023-gateway-break-glass-attribution.md) | Gateway break-glass is individually attributable, rate-limited, and loud — hardens [0007](0007-federated-identity-oidc-and-gateway-rbac.md)'s static-key mechanism to meet [0017](0017-provider-authority-is-delegated.md) §4's four required properties | Accepted |
+| [0024](0024-tenant-provisioning-is-a-request.md) | Tenant provisioning is a **request** the console files and GitOps fulfils — the console never provisions a stack. Defines the mechanism [0014](0014-tenant-namespace-naming-and-network-isolation.md)/[0017](0017-provider-authority-is-delegated.md)/[0019](0019-opaque-tenant-identity.md)/[0021](0021-separate-console-applications.md)/[0023](0023-gateway-break-glass-attribution.md) all already depend on | Accepted |
 
 When you add an ADR: copy the template, take the next number, set status `Proposed`, and
 add a row here. Flip to `Accepted` when merged.
@@ -76,6 +77,14 @@ not exist yet:** [0018](0018-device-credentials-by-reference.md)'s credential-ca
 (networked backends only) and its **plan-digest validity window**. Neither blocks acceptance;
 the digest window sits on build item 4 and will want an answer as that work starts. Everything
 else in 0007 and 0017–0023 is decided.
+
+**[0024](0024-tenant-provisioning-is-a-request.md) is a prerequisite for 7 and 8**, and is
+cited by 0014/0019/0023 in already-shipped or near-term work. It defines the provisioning
+workflow those five records assume — ADR-0021 refers to "the provisioning-workflow checklist
+gate" as an established mechanism, which until 0024 was established only in a document outside
+both repositories. It is not sequenced into the table above because it is a decision to record
+rather than a slice to build; the code it implies (a request object, its status machine, its
+gates) belongs to the provider console and lands with 8.
 
 [0022](0022-agent-initiated-device-writes-are-plan-bound.md) and
 [0023](0023-gateway-break-glass-attribution.md) are later, independent additions — not part of
