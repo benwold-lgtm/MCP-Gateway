@@ -14,8 +14,8 @@
 > the provider assert authority over a tenant.** Authority is now *delegated by the tenant*, so
 > §4, §5a, §6, §6a, §8 and §11a–§11d below are **history, not current design**. They were built,
 > verified against real identity providers (Keycloak and Authentik), and replaced in design
-> before they ever shipped in a release — the implementation is still in `main` and is being
-> removed rather than announced. See [ADR-0016](0016-reaching-many-tenant-gateways.md)
+> before they ever shipped in a release — the implementation was removed from `main` (#139)
+> rather than announced, and no version ever offered it. See [ADR-0016](0016-reaching-many-tenant-gateways.md)
 > (Rejected) for why the direction changed.
 >
 > **[ADR-0018](0018-device-credentials-by-reference.md) §6 supersedes §5b**, removing
