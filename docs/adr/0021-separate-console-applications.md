@@ -1,6 +1,6 @@
 # ADR-0021: The provider console and the tenant console are separate applications
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-17
 - **Supersedes:** [ADR-0013](0013-two-plane-tenancy-and-the-provider-plane.md) §3 (plane
   immutability) as an enforced runtime property — see §3.

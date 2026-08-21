@@ -1,6 +1,11 @@
 # ADR-0007: Federated identity (OIDC) with break-glass local keys; the gateway owns RBAC
 
-- **Status:** Proposed
+- **Status:** Accepted — 2026-08-21, on the evidence of a control-by-control walk of
+  [threat-model-identity.md](../threat-model-identity.md)'s `TM-I-nn` gate against the code
+  (all six gate items met; the gateway half clean). Hardened by
+  [ADR-0023](0023-gateway-break-glass-attribution.md), which closes three of the four
+  break-glass properties [ADR-0017](0017-provider-authority-is-delegated.md) §4 requires and
+  this ADR's static-key mechanism predates.
 - **Date:** 2026-06-26
 - **Related findings:** F-15 (inbound RBAC), F-30 (end-to-end identity propagation)
 - **Builds on:** [ADR-0006](0006-fail-closed-distributed-defaults.md) (fail-closed auth gates); intersects [ADR-0004](0004-single-tenant-per-stack.md) (tenancy)

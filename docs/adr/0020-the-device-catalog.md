@@ -1,6 +1,6 @@
 # ADR-0020: The provider's write path is a catalog; tenants claim from it
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-17
 - **Answers:** D2 (does the provider console offer device writes?), open since ADR-0013.
 - **Prerequisite for:** [ADR-0017](0017-provider-authority-is-delegated.md) §1 — see §8.

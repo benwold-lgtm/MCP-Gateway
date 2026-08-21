@@ -17,30 +17,59 @@ register were reconstructed from the codebase, the evaluation findings register,
 | [0004](0004-single-tenant-per-stack.md) | Single-tenant-per-stack — tenancy by deployment boundary, not in-app isolation (D-1) | Accepted — extended by [0013](0013-two-plane-tenancy-and-the-provider-plane.md) |
 | [0005](0005-at-least-once-with-idempotency-guard.md) | At-least-once stream delivery + an at-most-once idempotency guard for writes | Accepted |
 | [0006](0006-fail-closed-distributed-defaults.md) | Fail-closed security gates in distributed mode (auth + Redis) | Accepted |
-| [0007](0007-federated-identity-oidc-and-gateway-rbac.md) | Federated identity (OIDC) + break-glass local keys; gateway owns RBAC | Proposed |
+| [0007](0007-federated-identity-oidc-and-gateway-rbac.md) | Federated identity (OIDC) + break-glass local keys; gateway owns RBAC | Accepted — its `TM-I-nn` threat-model gate walked against the code 2026-08-21; hardened by [0023](0023-gateway-break-glass-attribution.md) |
 | [0008](0008-fleet-sessions.md) | Fleet MCP sessions — aggregate multiple devices into one client-facing session | Accepted |
 | [0009](0009-mcp-passthrough.md) | MCP passthrough — a remote MCP server is a device, not a second entity | Accepted |
 | [0010](0010-tool-derived-request-headers.md) | Tool-derived request headers — adopt SEP-2243 for OpenAPI, exclude passthrough permanently | Accepted |
 | [0011](0011-backup-and-restore.md) | Backup/restore — ciphertext archives by default, portable export behind its own scope | Accepted |
 | [0012](0012-federation-credential-model.md) | Credential model for BFF provider federation — preserve per-user relay, BFF audit first | Proposed |
-| [0013](0013-two-plane-tenancy-and-the-provider-plane.md) | Two-plane tenancy — isolated tenant stacks, and a provider plane above them | Accepted |
+| [0013](0013-two-plane-tenancy-and-the-provider-plane.md) | Two-plane tenancy — isolated tenant stacks, and a provider plane above them | Accepted — §4/§5a/§6/§6a/§8/§11 superseded by [0017](0017-provider-authority-is-delegated.md), §5b by [0018](0018-device-credentials-by-reference.md) §6; **provider-plane code removed** (PR #139). §1/§2/§3/§7/§9/§10 stand |
 | [0014](0014-tenant-namespace-naming-and-network-isolation.md) | Tenant namespace naming (pseudonymous, deterministic) + default-deny network isolation between tenants | Accepted |
 | [0015](0015-endpoint-fingerprinting.md) | Endpoint fingerprinting — pin TLS SPKI + declared identity, warn on change, opt-in fail-closed | Accepted |
 | [0016](0016-reaching-many-tenant-gateways.md) | Reaching many tenant gateways — routing, not fan-out | **Rejected** — superseded before acceptance by [0017](0017-provider-authority-is-delegated.md)–[0021](0021-separate-console-applications.md); kept for its rejected alternatives |
-| [0017](0017-provider-authority-is-delegated.md) | Provider authority over a tenant is **delegated by that tenant**, never asserted by the provider — supersedes [0013](0013-two-plane-tenancy-and-the-provider-plane.md) §4/§5a/§6/§8/§11 | Proposed |
-| [0018](0018-device-credentials-by-reference.md) | Device credentials held **by reference**, never at rest in the gateway — supersedes most of [0011](0011-backup-and-restore.md) | Proposed |
-| [0019](0019-opaque-tenant-identity.md) | The tenant identifier is **opaque from birth** — supersedes [0014](0014-tenant-namespace-naming-and-network-isolation.md) §1 | Proposed |
-| [0020](0020-the-device-catalog.md) | The provider's write path is a **catalog**; tenants claim from it — device types *and* provider-operated services. Answers D2 | Proposed |
-| [0021](0021-separate-console-applications.md) | Provider and tenant consoles are **separate applications** — supersedes [0013](0013-two-plane-tenancy-and-the-provider-plane.md) §3 as a runtime property | Proposed |
-| [0022](0022-agent-initiated-device-writes-are-plan-bound.md) | Agent-initiated device writes are **plan-bound**, not standing access — `caller` keeps its baseline and elevation is per reviewed plan | Proposed — **blocked** on ADR-0018 §6's plan digest, which is specified but not built |
+| [0017](0017-provider-authority-is-delegated.md) | Provider authority over a tenant is **delegated by that tenant**, never asserted by the provider — supersedes [0013](0013-two-plane-tenancy-and-the-provider-plane.md) §4/§5a/§6/§8/§11 | Accepted |
+| [0018](0018-device-credentials-by-reference.md) | Device credentials held **by reference**, never at rest in the gateway — supersedes most of [0011](0011-backup-and-restore.md) | Accepted |
+| [0019](0019-opaque-tenant-identity.md) | The tenant identifier is **opaque from birth** — supersedes [0014](0014-tenant-namespace-naming-and-network-isolation.md) §1 | Accepted |
+| [0020](0020-the-device-catalog.md) | The provider's write path is a **catalog**; tenants claim from it — device types *and* provider-operated services. Answers D2 | Accepted |
+| [0021](0021-separate-console-applications.md) | Provider and tenant consoles are **separate applications** — supersedes [0013](0013-two-plane-tenancy-and-the-provider-plane.md) §3 as a runtime property | Accepted |
+| [0022](0022-agent-initiated-device-writes-are-plan-bound.md) | Agent-initiated device writes are **plan-bound**, not standing access — `caller` keeps its baseline and elevation is per reviewed plan | Accepted — implementation still blocked on ADR-0018 §6's plan digest slice, which is specified but not yet built |
+| [0023](0023-gateway-break-glass-attribution.md) | Gateway break-glass is individually attributable, rate-limited, and loud — hardens [0007](0007-federated-identity-oidc-and-gateway-rbac.md)'s static-key mechanism to meet [0017](0017-provider-authority-is-delegated.md) §4's four required properties | Accepted |
 
 When you add an ADR: copy the template, take the next number, set status `Proposed`, and
 add a row here. Flip to `Accepted` when merged.
 
 **0017–0021 are one decision in five records.** They reorient the tenancy model on a single
 principle — *the provider holds less and reaches less* — and each supersedes a different part
-of what came before. Read [0017](0017-provider-authority-is-delegated.md) first; the other
-four follow from it. Build order is **0019 → 0018 → 0020 → 0017 → 0021**, which is not the
-order of leverage: [0020](0020-the-device-catalog.md) must exist before
+of what came before. Read [0017](0017-provider-authority-is-delegated.md) first; the other four
+follow from it.
+
+## Implementation order
+
+Re-ranked 2026-08-20, once every open question in the set was closed. The original ordering —
+0019 → 0018 → 0020 → 0017 → 0021 — assumed all five records were unbuilt. Two are now wholly or
+partly shipped, and 0022/0023 have since joined, so the live order is:
+
+| # | Work | Why it sits here |
+|---|------|------------------|
+| — | [0019](0019-opaque-tenant-identity.md) | **Done** — shipped in #128 (`tools/tenant_id.py`) |
+| 1 | [0018](0018-device-credentials-by-reference.md) §7c prerequisite: a declared `kind`/capability on `CredentialResolver` | The smallest unit in the set, and three behaviours — cache, breaker, metrics — are all blocked behind it. Today the resolver exposes only `backend: str`, and none of the three may branch on `backend.startswith("files:")` |
+| 2 | [0023](0023-gateway-break-glass-attribution.md) | Closes a gap in **shipped** code, depends on nothing else here, and [0017](0017-provider-authority-is-delegated.md) §4 cannot be satisfied until it lands |
+| 3 | [0018](0018-device-credentials-by-reference.md) §3: archive exclusion, plus *needs reconnecting* on the device-list projection | Completes the backup simplification; no new dependencies |
+| 4 | [0018](0018-device-credentials-by-reference.md) §6: the plan digest | The critical path. Both restore and [0022](0022-agent-initiated-device-writes-are-plan-bound.md) wait on it, and it is specified but not yet built |
+| 5 | [0022](0022-agent-initiated-device-writes-are-plan-bound.md) | Directly gated by 4 |
+| 6 | [0020](0020-the-device-catalog.md) | The largest single item, and the one that introduces PostgreSQL as a new deployment dependency |
+| 7 | [0017](0017-provider-authority-is-delegated.md) | Must follow the catalog — see below |
+| 8 | [0021](0021-separate-console-applications.md) | Mostly console work in the UI repository; can run in parallel with 7 |
+
+**Why 0017 sits behind 0020 rather than ahead of it**, despite being the record the other four
+follow from: [0020](0020-the-device-catalog.md) must exist before
 [0017](0017-provider-authority-is-delegated.md) removes the provider's reach, or there is a
-window where the provider cannot help and has no replacement path.
+window where the provider cannot help and has no replacement path. That constraint is unchanged
+from the original ordering.
+
+[0022](0022-agent-initiated-device-writes-are-plan-bound.md) and
+[0023](0023-gateway-break-glass-attribution.md) are later, independent additions — not part of
+the five above. 0022 stems from the IBN-controller use case; 0023 was surfaced while reviewing
+0017 §4's break-glass requirements against ADR-0007's original, unhardened mechanism. Neither is
+part of the tenancy decision, but each attaches to it: 0023 is a prerequisite for 0017 §4, and
+0022 is a dependent of 0018 §6.

@@ -1,6 +1,6 @@
 # ADR-0018: Device credentials are held by reference, never at rest in the gateway
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-17
 - **Supersedes:** most of [ADR-0011](0011-backup-and-restore.md) — see §5.
   Affects [ADR-0013](0013-two-plane-tenancy-and-the-provider-plane.md) §5b and §10,

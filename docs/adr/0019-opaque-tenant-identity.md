@@ -1,6 +1,6 @@
 # ADR-0019: The tenant identifier is opaque from birth
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-17
 - **Supersedes:** [ADR-0014](0014-tenant-namespace-naming-and-network-isolation.md) §1.
   ADR-0014 §2–§8 stand unchanged.

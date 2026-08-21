@@ -7,10 +7,17 @@ threat model does not cover, and §7 of that model names "the auth model changes
 as a trigger to revisit. This addendum is that revisit.
 
 It is **gating**: ADR-0007 marks it *required before implementation*. The controls below are
-therefore stated as **requirements to build** (`TM-I-nn`, status **[planned]**), not as
-controls already shipped. They become the acceptance criteria for the auth-core work. When a
-requirement lands it should be re-tagged with its implementation finding ID, exactly as the
-base model rows carry `F-nn`.
+They were originally stated as **requirements to build** (`TM-I-nn`, status **[planned]**),
+and became the acceptance criteria for the auth-core work.
+
+> **Walked against the code 2026-08-20**, control by control, across both repositories, as the
+> evidence gate for flipping ADR-0007 from Proposed to Accepted. Every row now carries its
+> real status and a code pointer instead of `[planned]`. Result: **10 built, 1 accepted as
+> designed, 1 satisfied by construction, 3 not applicable (Mode A), 2 gaps** — TM-I-05 and
+> TM-I-13, written up in §5a. **TM-I-05's substantive half was fixed the following day**; what
+> remains under it is scheme enforcement, a deployment-posture item like TM-I-13. **I4 mode is A (token passthrough)**, decided in code
+> rather than in a document: `bff/app/security.py::upstream_bearer` relays the user's own access
+> token and the BFF mints no assertion, which is what makes TM-I-14/15/17 inapplicable.
 
 Companion docs: [rbac-roles.md](rbac-roles.md) (the scope/role matrix this protects),
 [security-mtls.md](security-mtls.md) (the authenticated-channel option for I4),
@@ -93,10 +100,10 @@ a row with neither is a gap, same rule as the base model.
 
 | STRIDE | Threat | Control (requirement) |
 |--------|--------|------------------------|
-| **S**poofing | Login-CSRF / fixation — attacker completes a flow into the victim's session | **TM-I-01 [planned]:** unguessable, single-use, session-bound `state` **and** `nonce`; reject callback on mismatch; rotate session ID on login (ADR-0007 §Decision 4 callback CSRF/state) |
-| **T**ampering | Forged/altered session cookie elevates role at the BFF | **TM-I-02 [planned]:** keep the existing signed, opaque, `HttpOnly`/`Secure`/`SameSite` session; the BFF's role view is **advisory only** — the gateway re-authorizes every call on scopes (no BFF-side authz is load-bearing) |
-| **R**epudiation | "I didn't log in / didn't do that" | **TM-I-03 [planned]:** record login + the resolved `subject` to the audit trail; downstream actions already attributed at the gateway (F-55/F-56) |
-| **I**nformation disclosure | Tokens leak to the browser / JS / logs | **TM-I-04 [planned]:** tokens stay **server-side** in the BFF session store; never in `localStorage`, URL, or response body; redact in logs (consistent with F-59) |
+| **S**poofing | Login-CSRF / fixation — attacker completes a flow into the victim's session | **TM-I-01 [built — `bff/app/routers/auth.py:218-248`, `bff/app/sessions.py:185-198`]:** unguessable, single-use, session-bound `state` **and** `nonce`; reject callback on mismatch; rotate session ID on login (ADR-0007 §Decision 4 callback CSRF/state) |
+| **T**ampering | Forged/altered session cookie elevates role at the BFF | **TM-I-02 [built — `bff/app/main.py:137`; ⚠️ `COOKIE_SECURE` defaults false]:** keep the existing signed, opaque, `HttpOnly`/`Secure`/`SameSite` session; the BFF's role view is **advisory only** — the gateway re-authorizes every call on scopes (no BFF-side authz is load-bearing) |
+| **R**epudiation | "I didn't log in / didn't do that" | **TM-I-03 [built — `bff/app/routers/auth.py:247,279`]:** record login + the resolved `subject` to the audit trail; downstream actions already attributed at the gateway (F-55/F-56) |
+| **I**nformation disclosure | Tokens leak to the browser / JS / logs | **TM-I-04 [built — `bff/app/routers/auth.py:259-261`; no token logging in `gateway_client.py`]:** tokens stay **server-side** in the BFF session store; never in `localStorage`, URL, or response body; redact in logs (consistent with F-59) |
 | **D**enial of service | Callback / token-exchange flood | Reuse the existing edge rate limits (F-16) at the BFF login routes — **accepted via existing control** |
 | **E**levation | Victim driven through attacker's auth code (code injection) | Covered by **TM-I-01** (PKCE binds the code to *this* client+verifier; `state` binds to *this* session) |
 
@@ -104,9 +111,9 @@ a row with neither is a gap, same rule as the base model.
 
 | STRIDE | Threat | Control (requirement) |
 |--------|--------|------------------------|
-| **S**poofing (of the IdP) | BFF talks to an impostor authorize/token endpoint | **TM-I-05 [planned]:** discovery + endpoints over TLS with standard cert validation; `issuer` pinned in config; no plaintext HTTP |
-| **T**ampering | Authorization-code interception / replay | **TM-I-06 [planned]:** Authorization Code **+ PKCE (S256)** mandatory; one-time code exchange server-side |
-| **I**nformation disclosure | `client_secret` / tokens exposed | **TM-I-07 [planned]:** confidential-client secret injected via env (never ConfigMap, per existing secret hygiene); token endpoint called server-to-server only |
+| **S**poofing (of the IdP) | BFF talks to an impostor authorize/token endpoint | **TM-I-05 [built — `bff/app/oidc.py::_discover` pins the issuer; ⚠️ scheme unenforced, §5a]:** discovery + endpoints over TLS with standard cert validation; `issuer` pinned in config; no plaintext HTTP |
+| **T**ampering | Authorization-code interception / replay | **TM-I-06 [built — `bff/app/oidc.py:68-71,179-180`]:** Authorization Code **+ PKCE (S256)** mandatory; one-time code exchange server-side |
+| **I**nformation disclosure | `client_secret` / tokens exposed | **TM-I-07 [built — `bff/app/config.py:222,235`]:** confidential-client secret injected via env (never ConfigMap, per existing secret hygiene); token endpoint called server-to-server only |
 | **R**epudiation | — | IdP-side; out of scope (the IdP is authoritative) |
 
 ### I3 — Gateway → IdP JWKS (and JWT validation)
@@ -115,11 +122,11 @@ This is where most forgery is stopped. Treat it as the core of the addendum.
 
 | STRIDE | Threat | Control (requirement) |
 |--------|--------|------------------------|
-| **S**poofing | Forged JWT accepted | **TM-I-08 [planned]:** validate signature against JWKS; enforce `iss`, `aud`, `exp`/`nbf` (with bounded clock skew); **algorithm allow-list (asymmetric only)** — reject `alg:none` and HS/RS confusion; match `kid` to a known key, never trust an embedded key |
-| **T**ampering (JWKS poisoning) | Attacker swaps/forces a signing key | **TM-I-09 [planned]:** fetch JWKS only from the pinned issuer over TLS; cache with a **bounded TTL + negative-cache**; on `kid` miss, refresh **rate-limited** (no unbounded refetch-on-demand → no DoS amplification); never accept keys from the token itself |
-| **I**nformation disclosure (SSRF) | A crafted issuer/JWKS URL reaches internal services | **TM-I-10 [planned]:** issuer/JWKS URLs are **operator config, not request input**; still run them through the existing egress URL policy (block private/loopback/link-local, scheme allow-list) at startup (reuse F-02) |
-| **R**eplay | Captured token reused before expiry | **TM-I-11 [planned]:** short token lifetime is the primary control; bind to `aud=gateway`; **optionally** track `jti` for the configured skew window. Document residual replay-within-TTL as accepted |
-| **D**enial of service | JWKS endpoint slow/down blocks all auth | **TM-I-12 [planned]:** serve from cache through an IdP outage; **break-glass static keys (ADR-0007 §Decision 2) remain valid** so operators are never locked out; fail **closed** for OIDC, **open to keys** — i.e. no key, IdP down ⇒ 401, not bypass |
+| **S**poofing | Forged JWT accepted | **TM-I-08 [built — `device_mcp_gateway/oidc.py:248-270`, config-time alg refusal at `:90-93`]:** validate signature against JWKS; enforce `iss`, `aud`, `exp`/`nbf` (with bounded clock skew); **algorithm allow-list (asymmetric only)** — reject `alg:none` and HS/RS confusion; match `kid` to a known key, never trust an embedded key |
+| **T**ampering (JWKS poisoning) | Attacker swaps/forces a signing key | **TM-I-09 [built — `device_mcp_gateway/oidc.py:148,162-165`]:** fetch JWKS only from the pinned issuer over TLS; cache with a **bounded TTL + negative-cache**; on `kid` miss, refresh **rate-limited** (no unbounded refetch-on-demand → no DoS amplification); never accept keys from the token itself |
+| **I**nformation disclosure (SSRF) | A crafted issuer/JWKS URL reaches internal services | **TM-I-10 [built — `device_mcp_gateway/oidc.py:102-112,190,209`]:** issuer/JWKS URLs are **operator config, not request input**; still run them through the existing egress URL policy (block private/loopback/link-local, scheme allow-list) at startup (reuse F-02) |
+| **R**eplay | Captured token reused before expiry | **TM-I-11 [accepted — no `jti` tracking (optional here); `aud`+`exp` enforced, residual in §5]:** short token lifetime is the primary control; bind to `aud=gateway`; **optionally** track `jti` for the configured skew window. Document residual replay-within-TTL as accepted |
+| **D**enial of service | JWKS endpoint slow/down blocks all auth | **TM-I-12 [built — `device_mcp_gateway/rbac.py:270-283,408-413`; test `tests/test_oidc.py:361`]:** serve from cache through an IdP outage; **break-glass static keys (ADR-0007 §Decision 2) remain valid** so operators are never locked out; fail **closed** for OIDC, **open to keys** — i.e. no key, IdP down ⇒ 401, not bypass |
 | **E**levation | Tampered `groups`/`roles` claim grants extra scopes | Signature validation (**TM-I-08**) makes claims tamper-evident; `group_roles` mapping is **gateway-side** config (ADR-0007 §Decision 3) so the IdP can only assert *membership*, never scopes directly |
 
 ### I4 — BFF → Gateway (per-user identity assertion) — highest value
@@ -131,18 +138,18 @@ Two modes from ADR-0007 §Decision 4; the threats differ.
 | STRIDE | Threat | Control (requirement) |
 |--------|--------|------------------------|
 | **S**poofing | Forged/foreign token presented | Validated exactly as I3 (**TM-I-08**); gateway must be in `aud` — a token minted for another audience is rejected |
-| **I**nformation disclosure | Token sniffed on the BFF→gateway leg | **TM-I-13 [planned]:** that leg is TLS (reuse `rediss`/mTLS posture, [security-mtls.md](security-mtls.md)); token is `Bearer`, never logged |
+| **I**nformation disclosure | Token sniffed on the BFF→gateway leg | **TM-I-13 [⚠️ PARTIAL — deployment property, not code-enforced; see §5a]:** that leg is TLS (reuse `rediss`/mTLS posture, [security-mtls.md](security-mtls.md)); token is `Bearer`, never logged |
 | **E**levation | BFF widens the user's scopes | Impossible by construction — the gateway derives scopes from the **validated token's** groups, not from anything the BFF says |
 
 **Mode B — signed BFF assertion** (BFF mints a short-lived user-context JWT / signed header when passthrough isn't possible):
 
 | STRIDE | Threat | Control (requirement) |
 |--------|--------|------------------------|
-| **S**poofing (assertion forgery) | Attacker mints a "user X / admin" assertion | **TM-I-14 [planned]:** assertions are signed with a **dedicated BFF key the gateway pins**, short TTL, `aud=gateway`, carry `sub`+groups+a request-bound `jti`; gateway accepts assertions **only** over an authenticated channel (mTLS or shared key) and **only** from the BFF identity — the BFF→gateway trust is explicit and narrow |
+| **S**poofing (assertion forgery) | Attacker mints a "user X / admin" assertion | **TM-I-14 [n/a — Mode A chosen]:** assertions are signed with a **dedicated BFF key the gateway pins**, short TTL, `aud=gateway`, carry `sub`+groups+a request-bound `jti`; gateway accepts assertions **only** over an authenticated channel (mTLS or shared key) and **only** from the BFF identity — the BFF→gateway trust is explicit and narrow |
 | **T**ampering | Assertion altered in flight | Signature + authenticated channel (**TM-I-14**); reject on any validation failure, audited |
-| **R**epudiation | Disowning a minted assertion | **TM-I-15 [planned]:** the BFF logs every assertion it mints (`sub`, `jti`, scopes-requested); gateway logs every one it accepts → both ends reconcilable |
-| **E**levation of privilege | **Confused-deputy / over-trust:** the gateway treats the BFF as fully trusted and lets it assert *any* identity | **TM-I-16 [planned]:** the assertion is **identity-only** — it carries `sub`+groups, and the gateway **re-derives scopes itself** via `group_roles`; the BFF can never assert scopes. Bound the BFF's blast radius: its assertion key is *not* an admin key, and a compromised BFF is contained to "can impersonate logged-in users," not "is gateway admin" |
-| **D**enial of service | Stolen assertion key | Short TTL limits the window; **TM-I-17 [planned]:** key is independently rotatable (separate from device-credential Fernet keys and the break-glass admin key) |
+| **R**epudiation | Disowning a minted assertion | **TM-I-15 [n/a — Mode A chosen]:** the BFF logs every assertion it mints (`sub`, `jti`, scopes-requested); gateway logs every one it accepts → both ends reconcilable |
+| **E**levation of privilege | **Confused-deputy / over-trust:** the gateway treats the BFF as fully trusted and lets it assert *any* identity | **TM-I-16 [satisfied by construction under Mode A — `device_mcp_gateway/oidc.py:277-288`]:** the assertion is **identity-only** — it carries `sub`+groups, and the gateway **re-derives scopes itself** via `group_roles`; the BFF can never assert scopes. Bound the BFF's blast radius: its assertion key is *not* an admin key, and a compromised BFF is contained to "can impersonate logged-in users," not "is gateway admin" |
+| **D**enial of service | Stolen assertion key | Short TTL limits the window; **TM-I-17 [n/a — Mode A chosen]:** key is independently rotatable (separate from device-credential Fernet keys and the break-glass admin key) |
 
 > **Decision needed at implementation:** prefer **Mode A (passthrough)** wherever the IdP can
 > issue a gateway-audience token — it has strictly fewer secrets and no BFF-minting surface.
@@ -159,22 +166,72 @@ Two modes from ADR-0007 §Decision 4; the threats differ.
 | **IdP compromise / a maliciously-administered IdP group** | **Out of scope** — the IdP is the authority for identity; `group_roles` limits damage to mapped roles, but a fully hostile IdP is a trust-root failure |
 | **Interim BFF-centric phase** (if shipped before token relay) leaves audit showing the BFF | **Tracked** — explicitly an interim per ADR-0007 *Alternatives*; not the end state, and must be time-boxed |
 
+## 5a. Gaps found in the 2026-08-20 code walk
+
+Two controls did not hold up. Neither is exploitable without already holding a stronger
+position, and both are cheap to close.
+
+**TM-I-05a — ✅ FIXED 2026-08-21.** The ID token was validated against the issuer the
+*discovery document* declared, not the configured one: `jwt.decode` received
+`issuer=meta["issuer"]`, where `meta` was whatever the discovery endpoint returned. OIDC
+Discovery requires the document's `issuer` to match the URL it was fetched from, and that
+comparison was absent — so the pin this control calls for (*"`issuer` pinned in config"*) was
+anchored to the response instead. `jwks_uri` was trusted on the same basis.
+
+`OIDCClient._discover` now refuses a document whose declared issuer does not match config
+(trailing slashes normalised, everything else exact) and memoises nothing on refusal, so a
+rejected document cannot be picked up from cache later. Regression tests:
+`bff/tests/test_oidc_issuer_pinning.py` — **3 of them fail on the pre-fix code**, verified by
+reverting; the remaining two are boundary guards that must pass either way. The acceptance case
+runs against the **real lab Keycloak** rather than a stub, because a stub matching this code's
+own normalisation would pass whether or not that normalisation is right.
+
+**TM-I-05b — no scheme enforcement on the BFF's issuer.** A `http://` issuer is accepted; there
+is no equivalent of the gateway's `validate_target_url` pass on the BFF side, so the control's
+"no plaintext HTTP" is unenforced. Closing this needs an explicit escape hatch rather than a
+blanket refusal — the lab IdP is deliberately plaintext — which is the same shape as the
+gateway's `security.allow_private_targets`.
+
+**TM-I-13 — partial.** `GATEWAY_URL` defaults to `http://localhost:8000` (`bff/app/config.py:190`)
+and nothing enforces TLS on the BFF→gateway leg; it is a property of how the stack is deployed,
+not something the code guarantees. The other half of the control holds: the bearer is never
+logged — `gateway_client.py` does no logging at all. This is the same "deploy-time dependency,
+not a runtime one" shape ADR-0018 §7a had to name for mounted secrets, and it should be recorded
+the same way rather than claimed as built.
+
+**Adjacent, not a control failure but worth recording:** `COOKIE_SECURE` defaults to `false`
+(`bff/app/config.py:212`), so TM-I-02's `Secure` flag is opt-in per deployment; and the tenant
+`OIDC_CLIENT_SECRET` has no `_FILE` variant while the provider one does
+(`bff/app/config.py:222` vs `:235`).
+
 ## 6. Pre-implementation checklist (the gate)
 
 Auth-core implementation is cleared to start when these are designed and have owners. Treat
-each as a definition-of-done item:
+each as a definition-of-done item. **All six are met as of the 2026-08-20 walk**; the two open
+gaps (§5a) sit outside this gate, which was written to clear implementation rather than to
+close it.
 
-- [ ] **TM-I-08/09** JWT + JWKS validation: alg allow-list, `iss`/`aud`/`exp`, bounded-TTL
-      cache with rate-limited `kid`-miss refresh, no token-embedded keys.
-- [ ] **TM-I-12** fail-closed-for-OIDC / open-to-break-glass behavior on IdP outage, with an
-      explicit test (IdP down ⇒ key works, no key ⇒ 401).
-- [ ] **TM-I-01/06** PKCE + `state` + `nonce` on the BFF login/callback; server-side tokens.
-- [ ] **I4 mode chosen** (A preferred); if **B**, TM-I-14…17 (pinned key, authenticated
-      channel, identity-only assertion, rotation) are in the design.
-- [ ] **TM-I-16** confirmed: BFF asserts identity only; gateway re-derives scopes. No
-      BFF-side authz is load-bearing.
-- [ ] Audit shows the **real user** `subject` end-to-end (extends F-30); login + assertion
-      mint/accept both logged.
+- [x] **TM-I-08/09** JWT + JWKS validation: alg allow-list, `iss`/`aud`/`exp`, bounded-TTL
+      cache with rate-limited `kid`-miss refresh, no token-embedded keys. **Met** —
+      `device_mcp_gateway/oidc.py`; symmetric algorithms are refused at config time, not just
+      at validation time.
+- [x] **TM-I-12** fail-closed-for-OIDC / open-to-break-glass behavior on IdP outage, with an
+      explicit test (IdP down ⇒ key works, no key ⇒ 401). **Met** — `rbac.py`
+      `CompositeAuthenticator`; the explicit test exists at `tests/test_oidc.py:361`.
+- [x] **TM-I-01/06** PKCE + `state` + `nonce` on the BFF login/callback; server-side tokens.
+      **Met** — S256, `secrets.compare_digest` on `state`, and `sessions.establish()` mints a
+      fresh sid so a pre-login id cannot be fixated.
+- [x] **I4 mode chosen** (A preferred); if **B**, TM-I-14…17 (pinned key, authenticated
+      channel, identity-only assertion, rotation) are in the design. **Mode A** —
+      `bff/app/security.py::upstream_bearer` relays the user's own access token; the BFF mints
+      no assertion, so TM-I-14/15/17 do not apply.
+- [x] **TM-I-16** confirmed: BFF asserts identity only; gateway re-derives scopes. No
+      BFF-side authz is load-bearing. **Met by construction under Mode A** — scopes come from
+      the validated token's groups through gateway-side `group_roles`; the BFF asserts nothing.
+- [x] Audit shows the **real user** `subject` end-to-end (extends F-30); login + assertion
+      mint/accept both logged. **Met** — login success *and* denial are recorded, after
+      `establish()` so the actor is the federated subject rather than "unauthenticated"; there
+      is no assertion to log under Mode A.
 
 ## 7. Maintenance
 
