@@ -51,75 +51,37 @@ gateway:
   #     mcp-viewers: viewer
   #     mcp-auditors: auditor
   #
-  # Trusting a SECOND issuer — the provider IdP (ADR-0013 §6). Use the `issuers` list
-  # instead of the single-issuer keys above; setting both is refused at startup so there
-  # is never a question which mapping applies. Everything else is per-entry.
-  #
-  # `plane` is the load-bearing field. It binds issuer identity → eligible scope set
-  # SERVER-SIDE, which the console cannot do for you: the BFF fixes a session's plane at
-  # login, but a minted provider token can be replayed straight at this API with the BFF
-  # nowhere in the path.
-  #
-  #   tenant   — no ceiling. A tenant's own administrator holds everything on their stack.
-  #   provider — capped at devices:read, devices:write, metrics:read. Deliberately NOT
-  #              tools:call (invoking a tool actuates the customer's real hardware, and a
-  #              support engineer debugging config should not carry that ambiently), and
-  #              NOT any backup:* scope (the provider holds MCP_SECRET_KEY, so for them a
-  #              ciphertext archive is as much a credential dump as a portable one).
-  #              Mapping a provider group to a role that exceeds this fails at startup.
+  # Trusting a SECOND issuer. The `issuers` list replaces the single-issuer keys above;
+  # setting both is refused at startup so there is never a question which mapping applies.
+  # Everything else is per-entry.
   #
   # group_roles is PER ISSUER with no shared or fallback mapping: an unmapped
   # (issuer, group) pair grants nothing. Kept flat across two issuers it would be a
   # privilege-escalation primitive — a tenant's own IdP admin creates a group named
-  # whatever the provider mapping keys on, adds themselves, and their own gateway hands
-  # them provider-level scopes.
+  # whatever the other mapping keys on, adds themselves, and their own gateway hands
+  # them the other issuer's scopes.
   #
   # issuers:
   #   - issuer: "https://login.example.com/realms/corp"
   #     audience: "device-mcp-gateway"
-  #     plane: tenant
   #     group_roles:
   #       mcp-admins: admin
   #       mcp-viewers: viewer
-  #   - issuer: "https://provider-idp.example.com"
+  #   - issuer: "https://second-idp.example.com"
   #     audience: "device-mcp-gateway"
-  #     plane: provider
   #     group_roles:
-  #       provider-support: operator
-  #     # ELEVATED GRANTS (ADR-0013 §11). The provider ceiling above is what makes provider
-  #     # access everyday debugging rather than standing authority — so it also blocks the
-  #     # two elevated grants, and a verifiable claim on the token is what lifts it, for
-  #     # one request. Omit both keys and this issuer honours no grants at all.
-  #     #
-  #     # step_up_acr: the authentication contexts that count as a step-up. Checked against
-  #     # the `acr` in the ISSUED token, not against what the BFF requested — `acr_values`
-  #     # is a request parameter and an IdP may decline it and issue anyway.
-  #     step_up_acr: ["urn:mcp:provider:step-up"]
-  #     # grant_claim: which claim carries the grant (default: mcp_grant). Configurable
-  #     # because an IdP's custom-claims hook is often constrained to a namespaced name.
-  #     grant_claim: "https://mcp.example/grant"
-  #     # entitlement_claim: which claim lists the tenants this operator may act on at all
-  #     # (default: mcp_allowed_tenants). REQUIRED in practice — a grant is honoured only
-  #     # where the requested tenant and this list intersect (ADR-0013 §11c). Emit it from
-  #     # a DIRECTORY attribute, never from the authorization request: measured against
-  #     # real IdPs, a requested scope is granted to whoever asks for it, so the grant
-  #     # claim's `tenant` is chosen by the caller and authorizes nothing by itself. A
-  #     # token with no usable entitlement claim has every grant refused.
-  #     entitlement_claim: "https://mcp.example/allowed-tenants"
+  #       support-engineers: operator
   #
-  # The claim the IdP injects on issuance after the step-up:
-  #   {"id": "g-7f2", "tenant": "acme", "scopes": ["tools:call"], "exp": 1755200000}
-  # ...alongside the entitlement claim, which the IdP derives from the directory:
-  #   {"mcp_allowed_tenants": ["acme", "globex"]}
-  # `tenant` must equal gateway.tenant_id below, must appear in the entitlement claim, and
-  # is a string, never a list — single-use is consumed in this gateway's own Redis, so an
-  # estate-wide grant would be spendable once per stack. `exp` is optional and may only
-  # SHORTEN the gateway's own window; the deadline is computed here from `auth_time`, never
-  # read from the claim. `scopes` may only name tools:call or backup:* — anything else is
-  # refused, not trimmed.
+  # ⚠️ REMOVED (2026-08-20, PR #139): the ADR-0013 provider plane — `plane`, its scope
+  # ceiling, `step_up_acr`, `grant_claim`, `entitlement_claim` and the single-use elevated
+  # grants. ADR-0017 supersedes that arrangement. Multi-issuer trust itself was KEPT as a
+  # neutral capability, which is what the example above still shows.
   #
-  # Elevated grants need the distributed mode's shared Redis to record single-use
-  # consumption, so embedded mode refuses every grant (ADR-0013 §11a).
+  # Those keys are now IGNORED, not refused. That matters: a config carried over from an
+  # older deployment will start cleanly and silently enforce none of what it describes —
+  # in particular there is no longer a provider scope ceiling, so a group mapped to a role
+  # gets that role's full scopes. Delete them.
+
   # Fernet key for encrypting device credentials in SQLite.
   # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   # Override with MCP_SECRET_KEY environment variable.
@@ -387,6 +349,15 @@ security:
   # internal device fleet where devices legitimately live on private addresses.
   # Env override: MCP_ALLOW_PRIVATE_TARGETS=true.
   allow_private_targets: false
+
+  # TM-I-05: accept a plaintext http:// OIDC issuer (or jwks_uri). Default false — the
+  # gateway REFUSES TO START on one, because the IdP's signing keys and every access token
+  # would cross the network unencrypted and an on-path attacker could substitute either.
+  # Deliberately separate from allow_private_targets above: where an IdP sits and whether
+  # it speaks TLS are independent, and the SSRF guard permits http by design. There is no
+  # localhost exemption — a silent carve-out cannot be warned about. Set true only for a
+  # lab or air-gapped deployment; it is warned about loudly at startup when set.
+  allow_plaintext_idp: false
 
   # Which ports a device target URL may use. EMPTY (the default) does NOT mean "any port":
   # it means the built-in denylist applies, refusing ports that carry a non-HTTP protocol —

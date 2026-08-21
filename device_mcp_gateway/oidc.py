@@ -23,6 +23,10 @@ addendum (docs/threat-model-identity.md):
     (rate-limited) so an unknown-``kid`` flood cannot become a fetch-amplification DoS.
   * **TM-I-10** — the issuer / JWKS URL is run through the egress URL policy (it is
     operator config, not request input, but is still validated before any fetch).
+  * **TM-I-05** — a plaintext ``http://`` issuer or JWKS URI is refused at startup unless
+    ``security.allow_plaintext_idp`` is set. That policy is separate from TM-I-10's:
+    the egress guard permits ``http`` by design, so it never enforced transport
+    encryption and was never meant to.
   * **TM-I-12** — JWKS is served from cache through an IdP outage; validation fails
     **closed** (the JWT is rejected) while static break-glass keys keep working.
 """
@@ -81,6 +85,8 @@ class OIDCConfig:
     http_timeout: float = 5.0
     allow_private_targets: bool = False
     allowed_target_ports: set[int] | None = None
+    #: Permit a plaintext ``http://`` IdP (TM-I-05). Default false — see ``_check_url``.
+    allow_plaintext_idp: bool = False
 
     def __post_init__(self) -> None:
         if not self.issuer:
@@ -104,6 +110,23 @@ class OIDCConfig:
             self._check_url(self.jwks_uri, "gateway.oidc.jwks_uri")
 
     def _check_url(self, url: str, field_name: str) -> None:
+        # **Two independent properties, two flags (TM-I-05 vs TM-I-10).** The egress policy
+        # below allows both http and https by design — its job is SSRF (scheme sanity,
+        # address and port policy), not transport encryption. So a plaintext IdP passes it
+        # and always did. Refusing that is this check, and it deliberately does NOT reuse
+        # `allow_private_targets`: where an IdP sits and whether it has TLS are unrelated
+        # properties, and one flag covering both would leave an operator opting out of
+        # address checks in order to permit plaintext, or reading a flag whose name no
+        # longer describes what it permits. There is no loopback exemption either — a
+        # silent "localhost is fine" rule cannot be warned about, because nothing gets set
+        # to warn on, which makes it strictly less safe than one always-explicit flag.
+        if url.lower().startswith("http://") and not self.allow_plaintext_idp:
+            raise ValueError(
+                f"{field_name} is plaintext http — tokens and JWKS would cross the network "
+                f"unencrypted, so an on-path attacker could substitute signing keys. Use "
+                f"https, or set security.allow_plaintext_idp: true to accept that risk "
+                f"deliberately (lab and air-gapped deployments)."
+            )
         try:
             validate_target_url(url, allow_private=self.allow_private_targets, allowed_ports=self.allowed_target_ports)
         except UrlPolicyError as exc:
@@ -387,6 +410,7 @@ def _issuer_config(entry: dict, cfg: dict) -> OIDCConfig:
         http_timeout=float(entry.get("http_timeout", 5.0)),
         allow_private_targets=resolve_allow_private(cfg),
         allowed_target_ports=resolve_allowed_ports(cfg),
+        allow_plaintext_idp=bool(cfg.get("security", {}).get("allow_plaintext_idp", False)),
     )
 
 

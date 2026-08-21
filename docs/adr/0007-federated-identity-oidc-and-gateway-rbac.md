@@ -1,6 +1,11 @@
 # ADR-0007: Federated identity (OIDC) with break-glass local keys; the gateway owns RBAC
 
-- **Status:** Proposed
+- **Status:** Accepted — 2026-08-21, on the evidence of a control-by-control walk of
+  [threat-model-identity.md](../threat-model-identity.md)'s `TM-I-nn` gate against the code
+  (all six gate items met; the gateway half clean). Hardened by
+  [ADR-0023](0023-gateway-break-glass-attribution.md), which closes three of the four
+  break-glass properties [ADR-0017](0017-provider-authority-is-delegated.md) §4 requires and
+  this ADR's static-key mechanism predates.
 - **Date:** 2026-06-26
 - **Related findings:** F-15 (inbound RBAC), F-30 (end-to-end identity propagation)
 - **Builds on:** [ADR-0006](0006-fail-closed-distributed-defaults.md) (fail-closed auth gates); intersects [ADR-0004](0004-single-tenant-per-stack.md) (tenancy)
@@ -54,6 +59,12 @@ scope seam.
    This composes with [ADR-0006](0006-fail-closed-distributed-defaults.md): distributed mode
    still refuses to boot with *no* auth at all.
 
+   > **Hardened by [ADR-0023](0023-gateway-break-glass-attribution.md).** A single shared
+   > `MCP_ADMIN_KEY` cannot be individually attributed, which is what blocks three of the four
+   > properties [ADR-0017](0017-provider-authority-is-delegated.md) §4 requires of break-glass.
+   > It is retired as the *documented* mechanism in favour of per-person `break_glass: true`
+   > entries; the composite fallback described here is unchanged.
+
 3. **The gateway owns role → scope, mapped from IdP groups.** The IdP asserts *group
    membership* (a `groups`/`roles` claim); a **`group → scopes` mapping in gateway config**
    is the one place roles are defined. The UI/BFF authorize on the **same scopes** (exposed
@@ -68,6 +79,14 @@ scope seam.
    (mTLS or shared key) that the gateway trusts — consistent with the existing
    gateway → worker `subject` propagation (F-30). Either way, audit `subject` becomes the
    real user.
+
+   > **Mode A is what shipped** (confirmed 2026-08-21): `upstream_bearer` relays the user's
+   > own access token, and no code anywhere mints a BFF assertion. This is load-bearing, not
+   > a footnote — the threat model's TM-I-14…17 are inapplicable *because* Mode B does not
+   > exist. They become requirements only if it is ever built. TM-I-16's principle already
+   > holds under Mode A (`_principal_from_claims` derives scopes from the signature-verified
+   > `groups` claim and gateway-side `group_roles` alone), so Mode B would inherit it rather
+   > than reinvent it.
 
 ## Consequences
 
@@ -87,13 +106,18 @@ scope seam.
 - **Follow-ups (deferred):**
   - **Threat-model addendum** for the IdP → BFF → gateway path (token validation, JWKS
     rotation/poisoning, assertion forgery, the BFF→gateway boundary). *Required before
-    implementation.* → **Drafted:** [threat-model-identity.md](../threat-model-identity.md)
-    (carries the `TM-I-nn` requirements and a pre-implementation gate checklist).
+    implementation.* → **Drafted, then walked and cleared 2026-08-21**:
+    [threat-model-identity.md](../threat-model-identity.md). All six §6 gate items are met
+    against the code — 10 controls built, 1 accepted as designed, 1 satisfied by
+    construction, 3 not applicable under Mode A, 2 gaps (both BFF transport posture, §5a).
+    That walk is the evidence behind this record's Accepted status.
   - **Finer scopes** (split `devices:write` → create/update/delete; add `deadletter:manage`,
     `audit:read`) — additive, no route churn.
-  - **Tenant-scoped roles** (e.g. `operator@tenant-a`) — the natural extension if the paused
-    multi-tenancy work ([ADR-0004](0004-single-tenant-per-stack.md)) resumes; the claim→scope
-    mapping is designed to carry a tenant dimension even while unused.
+  - **Tenant-scoped roles** (e.g. `operator@tenant-a`) — the claim→scope mapping is designed
+    to carry a tenant dimension even while unused. The paused multi-tenancy work
+    ([ADR-0004](0004-single-tenant-per-stack.md)) **has since resumed and been
+    re-architected** — see [ADR-0017](0017-provider-authority-is-delegated.md)–[ADR-0021](0021-separate-console-applications.md),
+    on the principle that the provider holds less and reaches less.
   - **Raw-LDAP adapter** for the long tail.
   - **Token-exchange (RFC 8693 / OBO)** if audience constraints make passthrough impractical.
 

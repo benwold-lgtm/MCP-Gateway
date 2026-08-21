@@ -1,6 +1,6 @@
 # ADR-0017: Provider authority over a tenant is delegated by that tenant, never asserted by the provider
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-17
 - **Supersedes:** [ADR-0013](0013-two-plane-tenancy-and-the-provider-plane.md) §4, §5a, §6,
   §6a, §8, §11a–§11d. ADR-0013's §2, §3, §7, §9 and §10 stand.
