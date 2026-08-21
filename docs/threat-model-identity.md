@@ -114,7 +114,7 @@ a row with neither is a gap, same rule as the base model.
 
 | STRIDE | Threat | Control (requirement) |
 |--------|--------|------------------------|
-| **S**poofing (of the IdP) | BFF talks to an impostor authorize/token endpoint | **TM-I-05 [built — `bff/app/oidc.py::_discover` pins the issuer; ⚠️ scheme unenforced, §5a]:** discovery + endpoints over TLS with standard cert validation; `issuer` pinned in config; no plaintext HTTP |
+| **S**poofing (of the IdP) | BFF talks to an impostor authorize/token endpoint | **TM-I-05 [built — issuer pinned to config in `bff/app/oidc.py::_discover`; plaintext `http://` refused at startup on both halves unless explicitly allowed, §5a]:** discovery + endpoints over TLS with standard cert validation; `issuer` pinned in config; no plaintext HTTP |
 | **T**ampering | Authorization-code interception / replay | **TM-I-06 [built — `bff/app/oidc.py:68-71,179-180`]:** Authorization Code **+ PKCE (S256)** mandatory; one-time code exchange server-side |
 | **I**nformation disclosure | `client_secret` / tokens exposed | **TM-I-07 [built — `bff/app/config.py:222,235`]:** confidential-client secret injected via env (never ConfigMap, per existing secret hygiene); token endpoint called server-to-server only |
 | **R**epudiation | — | IdP-side; out of scope (the IdP is authoritative) |
@@ -189,11 +189,37 @@ reverting; the remaining two are boundary guards that must pass either way. The 
 runs against the **real lab Keycloak** rather than a stub, because a stub matching this code's
 own normalisation would pass whether or not that normalisation is right.
 
-**TM-I-05b — no scheme enforcement on the BFF's issuer.** A `http://` issuer is accepted; there
-is no equivalent of the gateway's `validate_target_url` pass on the BFF side, so the control's
-"no plaintext HTTP" is unenforced. Closing this needs an explicit escape hatch rather than a
-blanket refusal — the lab IdP is deliberately plaintext — which is the same shape as the
-gateway's `security.allow_private_targets`.
+**TM-I-05b — ✅ FIXED 2026-08-21, and it was worse than first written.** The original note said
+the BFF lacked the gateway's scheme check. Checking the guard itself corrected that: the egress
+policy allows **both** `http` and `https` by design (`_ALLOWED_SCHEMES`, `url_policy.py:37`) —
+its job is SSRF, which is **TM-I-10's** control, not transport encryption. So "no plaintext HTTP"
+was unenforced on *both* halves, and always had been. This was a real STRIDE-table gap found
+after acceptance; it is not one of §6's six gate items, so it does not disturb ADR-0007's status.
+
+Closed with a dedicated flag, **default false, refused at startup**:
+
+| | Flag | Checked in |
+|---|---|---|
+| Gateway | `security.allow_plaintext_idp` | `OIDCConfig._check_url` — covers the issuer *and* an explicit `jwks_uri` |
+| BFF | `OIDC_ALLOW_PLAINTEXT_ISSUER` | `OIDCClient.__init__` |
+
+Three design points worth keeping, because each rejects a cheaper option:
+
+* **Startup, not request time.** The issuer is operator config known at boot. A request-time
+  refusal would surface as an unexplained login failure.
+* **Not a reuse of `allow_private_targets`.** Where an IdP sits and whether it has TLS are
+  independent properties. One flag for both would leave an operator opting out of address
+  checks in order to permit plaintext, and would leave a flag whose name no longer describes
+  what it permits — the same shape of error as ADR-0018 §4's collapsed properties.
+* **No loopback exemption.** A silent "localhost is fine" rule cannot be warned about, because
+  nothing gets set to warn on, which makes it strictly *less* safe than one always-explicit
+  flag. The same flag covers a lab Keycloak and the acceptance test that reaches one — no
+  second bypass mechanism to audit.
+
+Both halves warn loudly when the flag is set, matching the `allow_weak_keys` and
+RBAC-disabled conventions. Tests on both sides cover default refusal, the flag, the loopback
+non-exemption, and https needing no flag; the gateway additionally covers a plaintext
+`jwks_uri` behind an https issuer.
 
 **TM-I-13 — partial.** `GATEWAY_URL` defaults to `http://localhost:8000` (`bff/app/config.py:190`)
 and nothing enforces TLS on the BFF→gateway leg; it is a property of how the stack is deployed,

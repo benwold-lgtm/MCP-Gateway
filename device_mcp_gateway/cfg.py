@@ -114,6 +114,10 @@ _CONFIG_SCHEMA: dict[str, Any] = {
     "cors": {"allowed_origins": list},
     "security": {
         "allow_private_targets": bool,
+        # TM-I-05: accept a plaintext http:// OIDC issuer/JWKS URI. Independent of
+        # allow_private_targets — where an IdP sits and whether it has TLS are separate
+        # properties, and one flag for both would stop describing what it permits.
+        "allow_plaintext_idp": bool,
         "trusted_proxy_cidrs": list,
         "allowed_target_ports": list,
         # ADR-0015: "warn" (default) or "enforce". Overridable per device. Warn keeps a
@@ -286,6 +290,13 @@ def warn_unsafe_settings(cfg: dict[str, Any], mode: str, auth_enabled: bool) -> 
             f"binding {host} (all interfaces) with authentication disabled — the API is reachable and "
             "unauthenticated on every network interface. Bind 127.0.0.1 or enable auth."
         )
+    if cfg.get("security", {}).get("allow_plaintext_idp"):
+        warnings.append(
+            "security.allow_plaintext_idp is true — a plaintext http:// OIDC issuer is accepted, so access "
+            "tokens and the IdP's signing keys cross the network unencrypted and an on-path attacker can "
+            "substitute either. Intended for lab and air-gapped deployments; use https anywhere else."
+        )
+
     mtls = cfg.get("security", {}).get("mtls")
     if isinstance(mtls, dict) and mtls.get("verify") is False:
         warnings.append(
