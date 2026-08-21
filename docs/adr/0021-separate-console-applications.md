@@ -200,12 +200,39 @@ a different hat.
 
 ## Open questions
 
-- **Whether the shared package is published or vendored.** Publishing is cleaner and slower;
-  vendoring is faster and rots. Probably a workspace package while both live in one
-  repository, revisited if they separate.
-- **Whether the two consoles should share a registrable domain at all.** §6 says separate is
-  stronger and siblings are acceptable with the `__Host-` prefix; which one an estate uses
-  interacts with branding and certificate management more than with security.
-- **How the break-glass application is started when it is off by default** (§8). An operator
-  who must first deploy something in order to respond to an outage has a slower emergency stop
-  than one who must only reach a restricted network. Where that line sits is undecided.
+**All three were answered in the 2026-08-20 design pass; the record was not updated at the time
+and the resolutions were restored here on 2026-08-21 from the working tracker
+(`~/.claude/plans/adr-open-questions-tracker.md`).**
+
+- ~~**Whether the shared package is published or vendored.**~~ **Resolved: a workspace
+  package** while both consoles live in one repository — firmed up from a lean to a decision.
+  Publishing's real benefit is a version gate catching a breaking change before it lands in
+  both applications, and that benefit is already redundant here: §7 restricts the shared package
+  to pure views with no session, credential or route knowledge, so a breaking change in it is a
+  UI bug, not a security incident. The substitute safeguard is cheaper and catches the same
+  thing — **both consoles' test suites and type-checking run as a required CI gate on any change
+  to the shared package, in the same PR** — without the registry and version-bump overhead.
+  Revisit if the two consoles move to separate repositories or separate deploy pipelines, not
+  preemptively.
+
+- ~~**Whether the two consoles should share a registrable domain at all.**~~ **Resolved: scoped
+  to the deployment's actual shape**, the same lever as Tier 2 network isolation and the
+  provider-access tier, rather than one global answer. In a genuine multi-tenant estate the
+  provider console takes a **separate registrable domain**, decided rather than merely
+  recommended as §6 has it — the compromised-sibling cookie-forcing risk needs real siblings to
+  come from, and multiple tenant subdomains supply them. In a true single-tenant deployment
+  sharing costs nothing, because no sibling exists to pose the risk. It is enforced through the
+  same provisioning-workflow checklist gate as Tier 2, with a different trigger: it fires
+  **once, when a provisioning request would create the estate's second tenant**, not per tenant
+  every time.
+
+- ~~**How the break-glass application is started when it is off by default.**~~ **Resolved:
+  scaled to zero** (or a minimal replica count) by default, reachable only from the restricted
+  management network, and started by **direct cluster access — `kubectl scale`, never a fresh
+  deploy or a CI pipeline run.** "Not deployed at all" is rejected for the circularity
+  [ADR-0023](0023-gateway-break-glass-attribution.md) already names and rejects: a recovery path
+  that depends on a healthy deploy pipeline is not reliably a break-glass path, because the same
+  incident that makes break-glass necessary can be the one that broke the pipeline. This keeps
+  two independent defence layers — network restriction *and* a deliberate scale-up — rather than
+  collapsing to one, and it matches the console-level break-glass recovery flow's own settled
+  standard instead of giving a second, different answer to the same underlying question.

@@ -439,19 +439,53 @@ feature built on the current authority model.
 
 ## Open questions
 
-- **Which tier is the shipped default.** §7 answers *what the tiers are*; Tier 0 is the floor
-  and Tier 1 is the recommendation, but whether a new tenant starts sender-constrained or is
-  upgraded to it deliberately is a product call with a real onboarding cost attached.
-- **How identity propagation is proven on an ongoing basis** — §7 fixes the property and the
-  shape of the test; whether that is one end-to-end audit assertion in CI or a broader
-  no-shared-credential check across relay paths is an implementation question with real
-  coverage consequences.
-- **Whether the pending-request channel needs its own transport.** §7's binding has the tenant
-  console showing a request raised from the provider console, which implies a path between the
-  two planes that carries no authority but must still exist and be available. Polling from the
-  provider side is the dull answer and is probably right.
-- **Which transports can actually be interrupted** — §8 fixes the posture; how much of it is
-  achievable depends per upstream, and a device call already committed cannot be recalled. The
-  honest reporting of a partial stop is a console question as much as a gateway one.
-- **Whether standing consent should have a maximum term** requiring periodic reaffirmation.
-  Leaning yes; not decided here because it is a product policy question.
+**All five were answered in the 2026-08-20 design pass. The record was not updated at the
+time — only the status line moved — and the resolutions were restored here on 2026-08-21 from
+the working tracker (`~/.claude/plans/adr-open-questions-tracker.md`).** The sixth item that
+pass raised, break-glass being a genuinely shared credential today, became
+[ADR-0023](0023-gateway-break-glass-attribution.md) rather than an answer here; §4 names the
+four properties, 0023 designs them.
+
+- ~~**Which tier is the shipped default.**~~ **Resolved: there is no single global default.**
+  The tier is collected per tenant at provisioning, pre-selected to Tier 1 — the recommendation
+  — adjustable at creation and reconfigurable afterwards. One estate-wide value would either
+  impose Tier 1's onboarding cost on every tenant that does not need it, or set a silent floor
+  under one that does. The provisioning form carries it, alongside the Tier 2 network-isolation
+  gate it already collects.
+
+- ~~**How identity propagation is proven on an ongoing basis.**~~ **Resolved structurally, not
+  by a test alone.** Provider-plane relay gets its own dedicated call path with **no fallback
+  credential configured at all**, so a missing operator bearer fails outright instead of
+  silently succeeding as the shared admin token. Scoped narrowly to provider-plane relay —
+  password-admin's legitimate use of the shared token is untouched. PR #127's verification test
+  is kept permanently as a regression test *alongside* the fix, not instead of it: the test
+  proves the property holds today, the absent fallback is what stops it from quietly ceasing to.
+
+- ~~**Whether the pending-request channel needs its own transport.**~~ **Resolved: no — polling,
+  provider-side.** Raising the request is a single authenticated write; the tenant seeing it is
+  an ordinary read of their own data; the only ongoing need is the provider session asking *is
+  request X approved yet*. Interval with backoff, aggressive early and backing off over a long
+  wait. **The polling endpoint scopes to the originating identity, never to any provider
+  operator** — otherwise it discloses the status of other operators' pending requests. It also
+  reinforces §7's undelivered-on-session-death behaviour for free: polling only happens while
+  the raising session is alive.
+
+- ~~**Which transports can actually be interrupted.**~~ **Resolved: the dividing line is
+  dispatch, not transport type.** Anything not yet dispatched — queued, in backoff, DLQ-pending
+  — is cleanly stoppable, and §8 already covers it. Anything dispatched over any network
+  transport can have its connection closed, but the device-side effect past that point is
+  inherently uncertain. That is not a gap to engineer away; it is a thing to report honestly,
+  which needs **a third state distinct from success and failure — "stop requested, device
+  outcome unknown"** — in the console and in the audit record alike, the same shape as the
+  three-state health model and as the separate `ERR_CREDENTIAL_UNRESOLVED` /
+  `ERR_SECRET_STORE_UNAVAILABLE` codes. Forward-looking only: stdio passthrough, if it is ever
+  built, is the one genuine exception — killing a process is a real guarantee in a way closing
+  a socket is not.
+
+- ~~**Whether standing consent should have a maximum term.**~~ **Resolved: yes, and
+  tenant-configurable within bounds** — the same lever as Tier 2 requirements and audit
+  disclosure level, rather than one fixed global number. The mechanism is a prominent,
+  escalating warning ahead of expiry (two weeks, then three days), never a silent cutoff: a
+  consent that lapses invisibly lapses at exactly the moment it is most likely to be needed. It
+  operates on a months-scale timescale, deliberately distinct from the lifetime of any
+  individual grant.

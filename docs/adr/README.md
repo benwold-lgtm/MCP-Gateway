@@ -67,6 +67,16 @@ follow from: [0020](0020-the-device-catalog.md) must exist before
 window where the provider cannot help and has no replacement path. That constraint is unchanged
 from the original ordering.
 
+**What "every open question closed" does and does not mean.** The design answers were made on
+2026-08-20 but only reached the records on 2026-08-21 — the acceptance commit moved the status
+lines and nothing else, so fourteen answered questions sat in the files reading as open for a
+day. They are now written into each record's `Open questions` section, struck through with the
+resolution. **Two remain genuinely open, both deliberately, because both need data that does
+not exist yet:** [0018](0018-device-credentials-by-reference.md)'s credential-cache **TTL value**
+(networked backends only) and its **plan-digest validity window**. Neither blocks acceptance;
+the digest window sits on build item 4 and will want an answer as that work starts. Everything
+else in 0007 and 0017–0023 is decided.
+
 [0022](0022-agent-initiated-device-writes-are-plan-bound.md) and
 [0023](0023-gateway-break-glass-attribution.md) are later, independent additions — not part of
 the five above. 0022 stems from the IBN-controller use case; 0023 was surfaced while reviewing
