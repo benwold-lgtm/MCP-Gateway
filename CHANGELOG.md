@@ -10,6 +10,55 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-21
+
+**A security patch on the 0.3.3 line, and nothing else.** It is cut from the `v0.3.3` tag
+rather than from `main` so that a deployment running 0.3.3 can take this fix without also
+taking the unreleased feature work — credentials by reference, opaque tenant identity and the
+provider-plane removal — which ships separately in 0.3.5.
+
+### Security
+
+- **The gateway now pins the OIDC discovery document to the configured issuer**
+  ([TM-I-05](docs/threat-model-identity.md)). `_resolve_jwks_uri` took `jwks_uri` straight out
+  of the discovery document without checking that the document declared the issuer it was
+  fetched from, then cached it for the life of the process.
+
+  Pinning `iss` and `aud` at decode time did **not** cover this. Those are claims in a token an
+  attacker mints, so they can be set to whatever the gateway expects; what decides forgery is
+  whose keys the signature is verified against, and that came from the document. A spoofed
+  discovery response — an on-path attacker where the fetch is plaintext, or a compromised or
+  misconfigured proxy in front of the real IdP — could name an attacker-controlled `jwks_uri`,
+  have the attacker's signing keys installed, and mint a token for any role. **One spoof
+  poisoned every subsequent validation until restart.**
+
+  **Who is affected:** deployments with `gateway.oidc.enabled: true` that do *not* set an
+  explicit `gateway.oidc.jwks_uri`. Setting that key short-circuits discovery entirely, so
+  those deployments never reached the affected path. Deployments not using OIDC are unaffected.
+  Present in 0.3.3 and every earlier release that had OIDC.
+
+  The document's declared issuer is now compared against the configured one (trailing slashes
+  normalised, everything else exact), a mismatch is refused, and the cache is populated only
+  after every check — so a refused document leaves nothing behind.
+
+- **A plaintext `http://` IdP is refused at startup**, unless `security.allow_plaintext_idp:
+  true` is set deliberately. The egress URL policy permits `http` by design — its job is SSRF,
+  not transport encryption — so nothing had ever enforced TLS to the IdP. The check covers the
+  issuer, an explicit `jwks_uri`, and a `jwks_uri` discovered at runtime, which had never
+  passed the startup checks a configured one gets.
+
+  Deliberately **not** folded into `allow_private_targets`: where an IdP sits and whether it
+  has TLS are independent properties, and one flag for both would leave an operator opting out
+  of address checks in order to permit plaintext. There is no loopback exemption — a silent
+  "localhost is fine" rule cannot be warned about, because nothing gets set to warn on. A lab
+  IdP over `http` needs the flag, which warns loudly at startup.
+
+**Upgrading:** no configuration change is required, and no migration. A deployment pointing at
+an `http://` IdP will now **refuse to start** — set `security.allow_plaintext_idp: true` to
+keep the previous behaviour, or move the IdP to `https`. A deployment whose IdP serves a
+discovery document declaring a different issuer than the one configured will also refuse; that
+is the defect being fixed, and the mismatch should be investigated rather than worked around.
+
 ## [0.3.3] - 2026-08-13
 
 Two security capabilities that constrain what the gateway talks to and what it lets near it:
@@ -1112,6 +1161,7 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.3.4]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.4
 [0.3.3]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.3
 [0.3.2]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.2
 [0.3.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.1

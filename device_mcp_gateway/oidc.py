@@ -78,6 +78,8 @@ class OIDCConfig:
     http_timeout: float = 5.0
     allow_private_targets: bool = False
     allowed_target_ports: set[int] | None = None
+    #: Permit a plaintext ``http://`` IdP (TM-I-05). Default false — see ``_check_url``.
+    allow_plaintext_idp: bool = False
 
     def __post_init__(self) -> None:
         if not self.issuer:
@@ -101,6 +103,20 @@ class OIDCConfig:
             self._check_url(self.jwks_uri, "gateway.oidc.jwks_uri")
 
     def _check_url(self, url: str, field_name: str) -> None:
+        # **Two independent properties, two flags (TM-I-05 vs TM-I-10).** The egress policy
+        # below allows both http and https by design — its job is SSRF (scheme sanity,
+        # address and port policy), not transport encryption. So a plaintext IdP passes it
+        # and always did. Refusing that is this check, and it deliberately does NOT reuse
+        # `allow_private_targets`: where an IdP sits and whether it has TLS are unrelated
+        # properties. There is no loopback exemption either — a silent "localhost is fine"
+        # rule cannot be warned about, because nothing gets set to warn on.
+        if url.lower().startswith("http://") and not self.allow_plaintext_idp:
+            raise ValueError(
+                f"{field_name} is plaintext http — tokens and JWKS would cross the network "
+                f"unencrypted, so an on-path attacker could substitute signing keys. Use "
+                f"https, or set security.allow_plaintext_idp: true to accept that risk "
+                f"deliberately (lab and air-gapped deployments)."
+            )
         try:
             validate_target_url(url, allow_private=self.allow_private_targets, allowed_ports=self.allowed_target_ports)
         except UrlPolicyError as exc:
@@ -203,9 +219,37 @@ class JWKSCache:
         ) as client:
             resp = await client.get(disco)
             resp.raise_for_status()
-            uri = resp.json().get("jwks_uri")
+            doc = resp.json()
+        # **Pin the document to the configured issuer before trusting anything inside it
+        # (TM-I-05).** OIDC Discovery 1.0 §4.3 requires the ``issuer`` a document declares
+        # to be identical to the URL it was fetched from, and until this check nothing
+        # verified that. Pinning ``iss``/``aud`` at ``jwt.decode`` does not cover it: those
+        # are claims in a token the attacker mints, so they can be set to whatever this
+        # code expects. What actually decides forgery is *whose keys* the signature is
+        # checked against — and that comes from ``jwks_uri`` here. A spoofed document
+        # naming an attacker-controlled ``jwks_uri`` would have its own keys installed and
+        # every subsequent validation would verify against them, for the lifetime of the
+        # process, because the result is cached below. So this fails closed and caches
+        # nothing on refusal.
+        declared = str(doc.get("issuer") or "")
+        if declared.rstrip("/") != self._cfg.issuer.rstrip("/"):
+            raise OIDCError(
+                f"OIDC discovery issuer mismatch: configured {self._cfg.issuer!r}, document "
+                f"declares {declared!r}. Refusing — the document must be served by the issuer "
+                f"it names (OIDC Discovery 1.0 §4.3), and its jwks_uri decides which keys "
+                f"sign a valid token."
+            )
+        uri = doc.get("jwks_uri")
         if not uri:
             raise OIDCError("OIDC discovery document has no jwks_uri")
+        # A **discovered** JWKS URI never passed the startup checks a configured one does —
+        # it arrives from the network at first use. Run it through the same check rather
+        # than a second copy of the rule: without this, a document could downgrade the key
+        # fetch to plaintext http on a deployment that refused a plaintext issuer at boot.
+        try:
+            self._cfg._check_url(uri, "OIDC discovery jwks_uri")
+        except ValueError as exc:
+            raise OIDCError(str(exc)) from exc
         self._discovered_jwks_uri = uri
         return uri
 
@@ -314,7 +358,14 @@ def build_oidc_validator(cfg: dict) -> Optional[OIDCValidator]:
         http_timeout=float(oidc_cfg.get("http_timeout", 5.0)),
         allow_private_targets=resolve_allow_private(cfg),
         allowed_target_ports=resolve_allowed_ports(cfg),
+        allow_plaintext_idp=bool((cfg.get("security", {}) or {}).get("allow_plaintext_idp", False)),
     )
+    if config.allow_plaintext_idp:
+        logger.warning(
+            "security.allow_plaintext_idp is set — a plaintext http:// IdP is permitted. "
+            "Tokens and JWKS cross the network unencrypted and an on-path attacker can "
+            "substitute signing keys. Intended for lab and air-gapped deployments only."
+        )
     logger.info(
         f"OIDC inbound auth enabled: issuer={config.issuer} audience={config.audience} "
         f"algs={list(config.algorithms)} groups_claim={config.groups_claim} "

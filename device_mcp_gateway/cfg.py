@@ -100,6 +100,9 @@ _CONFIG_SCHEMA: dict[str, Any] = {
     "cors": {"allowed_origins": list},
     "security": {
         "allow_private_targets": bool,
+        # TM-I-05: permit a plaintext http:// IdP issuer / JWKS URI. Deliberately separate
+        # from allow_private_targets — location and transport encryption are independent.
+        "allow_plaintext_idp": bool,
         "trusted_proxy_cidrs": list,
         "allowed_target_ports": list,
         # ADR-0015: "warn" (default) or "enforce". Overridable per device. Warn keeps a

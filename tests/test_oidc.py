@@ -366,3 +366,65 @@ def test_new_seed_roles_present():
     assert ROLE_SCOPES["operator"] == frozenset({"devices:read", "devices:write", "metrics:read"})
     assert ROLE_SCOPES["auditor"] == frozenset({SCOPE_METRICS_READ})
     assert ROLE_SCOPES["caller"] == frozenset({"devices:read", "tools:call"})
+
+
+# --- Plaintext IdP refusal (TM-I-05) ------------------------------------------
+#
+# The egress guard (TM-I-10) permits http by design — its job is SSRF, not transport
+# encryption — so before this check a plaintext IdP passed every gate the gateway had.
+
+
+def test_plaintext_issuer_is_refused_by_default():
+    with pytest.raises(ValueError) as exc:
+        OIDCConfig(
+            issuer="http://kc.example.com/realms/tenant-a",
+            audience="mcp-gateway",
+            group_roles={"mcp-admins": "admin"},
+        )
+    assert "plaintext http" in str(exc.value)
+    assert "allow_plaintext_idp" in str(exc.value)
+
+
+def test_plaintext_issuer_allowed_when_flag_set():
+    cfg = OIDCConfig(
+        issuer="http://kc.example.com/realms/tenant-a",
+        audience="mcp-gateway",
+        group_roles={"mcp-admins": "admin"},
+        allow_plaintext_idp=True,
+        allow_private_targets=True,
+    )
+    assert cfg.issuer.startswith("http://")
+
+
+def test_plaintext_jwks_uri_is_refused_even_with_https_issuer():
+    """The issuer is not the only endpoint fetched — an explicit JWKS URI is checked too."""
+    with pytest.raises(ValueError) as exc:
+        OIDCConfig(
+            issuer="https://kc.example.com/realms/tenant-a",
+            audience="mcp-gateway",
+            group_roles={"mcp-admins": "admin"},
+            jwks_uri="http://kc.example.com/realms/tenant-a/protocol/openid-connect/certs",
+            allow_private_targets=True,  # get past the egress guard; this test is about scheme
+        )
+    assert "jwks_uri" in str(exc.value)
+
+
+def test_loopback_gets_no_exemption():
+    """No silent localhost carve-out: a rule nothing sets is a rule nothing can warn about."""
+    with pytest.raises(ValueError):
+        OIDCConfig(
+            issuer="http://localhost:8080/realms/tenant-a",
+            audience="mcp-gateway",
+            group_roles={"mcp-admins": "admin"},
+            allow_private_targets=True,
+        )
+
+
+def test_https_issuer_needs_no_flag():
+    cfg = OIDCConfig(
+        issuer="https://kc.example.com/realms/tenant-a",
+        audience="mcp-gateway",
+        group_roles={"mcp-admins": "admin"},
+        allow_private_targets=True,  # skips DNS resolution; unrelated to the scheme check
+    )
+    assert cfg.allow_plaintext_idp is False

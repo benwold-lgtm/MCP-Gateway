@@ -312,6 +312,19 @@ security:
   # Env override: MCP_ALLOW_PRIVATE_TARGETS=true.
   allow_private_targets: false
 
+  # Permit a plaintext http:// IdP issuer or JWKS URI (TM-I-05). Default false — the
+  # gateway REFUSES TO START against an http:// IdP unless this is set. Tokens and the
+  # signing keys would otherwise cross the network unencrypted, and an on-path attacker
+  # could substitute the keys the gateway trusts.
+  #
+  # This is deliberately NOT the same switch as allow_private_targets above. Where an IdP
+  # sits and whether it has TLS are independent properties: an on-prem IdP on a private
+  # network can still speak https, and a public IdP can still be misconfigured to http.
+  # There is no localhost exemption either — a silent "loopback is fine" rule cannot warn
+  # anybody, because nothing gets set to warn on. A lab IdP over http needs this flag,
+  # which logs a loud warning at startup every time.
+  # allow_plaintext_idp: false
+
   # Which ports a device target URL may use. EMPTY (the default) does NOT mean "any port":
   # it means the built-in denylist applies, refusing ports that carry a non-HTTP protocol —
   # 22 SSH, 23, 25/465/587 SMTP, 53, 110/143/993/995 mail, 135/139/445 SMB, 389/636 LDAP,
