@@ -413,7 +413,16 @@ All endpoints except `/health` and `/readyz` require `Authorization: Bearer <api
 | `admin` | `devices:read`, `devices:write`, `tools:call`, `metrics:read` | everything |
 | `viewer` | `devices:read`, `metrics:read` | read device state + `/v1/metrics/summary`; **no** mutations or tool calls (403) |
 
-Configure keys via `gateway.api_key` (legacy single key = `admin`), `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY`, or a `gateway.rbac` list of `{name, key, role}` (see [config.yaml](config.yaml)). If no key is set anywhere, auth is disabled (all requests permitted). The authenticated principal is recorded as `subject` in audit logs. The seam (`authenticate()` → `Principal{subject, scopes}`) is built to swap to JWT/OIDC later without touching routes.
+Configure keys via `gateway.api_key` (legacy single key = `admin`), `MCP_ADMIN_KEY` / `MCP_VIEWER_KEY`, or a `gateway.rbac` list of `{name, key, role}` (see [config.yaml](config.yaml)). If no key is set anywhere, auth is disabled (all requests permitted). The authenticated principal is recorded as `subject` in audit logs.
+
+**OIDC is built, not planned** ([ADR-0007](docs/adr/0007-federated-identity-oidc-and-gateway-rbac.md)). Enable `gateway.oidc` and the gateway validates a JWT against the issuer's JWKS and maps its `groups` claim to a role through `group_roles`. **The gateway owns `group → role → scope`; the IdP only asserts membership** — an authenticated user with no mapped group gets zero scopes rather than a blanket 401, so the audit still shows who was denied. The principal is recorded as `oidc:{issuer}#{sub}`, issuer-qualified because `sub` is unique *within* an issuer and not globally.
+
+With OIDC enabled the static keys become a **break-glass fallback** (OIDC JWT → static key → 401), which is what keeps the gateway reachable when the IdP is not. Two guardrails are worth knowing before you configure it:
+
+- **A plaintext `http://` issuer is refused at startup** unless `security.allow_plaintext_idp: true` is set deliberately, which warns loudly. The egress URL policy permits `http` by design — its job is SSRF, not transport encryption — so nothing else enforces TLS to your IdP.
+- **The discovery document must declare the issuer you configured**, or it is refused and nothing is cached. Pinning `iss` at decode time does not cover this: an attacker who supplies the *keys* also chooses the claims. Fixed in [0.3.4](CHANGELOG.md).
+
+The seam (`authenticate()` → `Principal{subject, scopes}`) means routes are unchanged either way.
 
 Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /v1/devices` — 60 req/min; `POST /messages` — 600 req/min. Returns 429 on excess.
 
@@ -591,6 +600,36 @@ The key can live in a header (default), a query param, or a cookie, with an opti
 | `name` | per-location (`X-API-Key` / `api_key` / `api_key`) | header/param/cookie name; legacy `header_name` still accepted |
 | `value_prefix` | `""` | prepended to the value, e.g. `"Bearer "` |
 
+#### By reference — `credential_ref` (0.3.5+)
+
+Instead of sending the secret, send a **reference** to where it lives
+([ADR-0018](docs/adr/0018-device-credentials-by-reference.md)):
+
+```json
+{"auth_type": "api_key", "auth": {"credential_ref": "secret://t-3f9a1c2b7d4e8065/devices/edge-01#api_key"}}
+```
+
+The registry stores the reference. The material is resolved at dispatch, held for that one
+dispatch, and **never written back, cached to disk, or included in an archive** — so an export
+of an entirely by-reference fleet is configuration rather than a credential dump, and can be
+committed to Git and reviewed in a pull request.
+
+The scheme is deliberately backend-neutral. Naming the store (`vault://`) would bake a
+deployment choice into every device record, so an archive could only be restored into a stack
+running the same product.
+
+| | |
+|---|---|
+| **Exclusive with `api_key`** | sending both is a `400` at registration, naming the exclusivity — refused rather than resolved by precedence, because any precedence rule makes the losing value invisible |
+| **Malformed reference** | also a `400` at registration, not a device that looks fine until its first dispatch |
+| **Backends** | today: a mounted Kubernetes Secret / CSI volume, and a local file tree for Lite and embedded mode. Networked stores (Vault, cloud managers) share the same interface and are not yet implemented |
+| **Not for gateway-minted credentials** | an OAuth2 `refresh_token` is minted mid-exchange and stays encrypted under `MCP_SECRET_KEY` ([§1a](docs/adr/0018-device-credentials-by-reference.md)) |
+
+Two dispatch errors are deliberately distinct, because collapsing them makes a sealed store
+look like twenty broken devices: **`ERR_CREDENTIAL_UNRESOLVED`** (this device's reference is
+bad — permanent, one device) and **`ERR_SECRET_STORE_UNAVAILABLE`** (the store is unreachable —
+transient, fleet-wide).
+
 #### OAuth2 (token endpoint)
 ```json
 {
@@ -640,9 +679,27 @@ Pass it as an environment variable — never store it in `config.yaml` or the Ku
 export MCP_SECRET_KEY=<your-fernet-key>
 ```
 
+**A device using `credential_ref` has nothing here to encrypt** — the gateway holds a pointer,
+not a secret. `MCP_SECRET_KEY` is still required for gateway-*minted* credentials (an OAuth2
+`refresh_token`), which by-reference does not cover.
+
 ### Multitenancy
 
 The gateway is **single-tenant per stack**: it has no in-application tenant isolation. The device namespace is flat (keyed by `hostname`), RBAC scopes are global within a deployment, and co-located DevicePods share decrypted credentials in one worker process. Isolate tenants by running a **separate stack per tenant** — each with its own Redis, `MCP_SECRET_KEY`, and API keys. **Do not co-host tenants in one deployment.** See [docs/multitenancy.md](docs/multitenancy.md) for the deployment model and rules.
+
+Where you run a stack per tenant, mint the tenant's identifier with `tools/tenant_id.py` rather
+than deriving it from anything the customer chose — a namespace name is not encrypted, so a
+customer name written there survives crypto-shredding and leaks into every `kubectl` output and
+metric label in the estate ([ADR-0019](docs/adr/0019-opaque-tenant-identity.md)):
+
+```bash
+python3 tools/tenant_id.py new                       # -> t-3f9a1c2b7d4e8065
+python3 tools/tenant_id.py namespace t-3f9a1c2b7d4e8065 --label
+```
+
+An identifier is **never reissued**, even after a tenant departs: stale DNS, a cached token and
+a bookmarked console must never resolve onto a new tenant. `deploy/overlays/tenant-example/`
+is the per-tenant overlay to copy.
 
 ### Rate limiting
 
@@ -989,7 +1046,7 @@ Phase-0 / governance artifacts for reviewers and operators:
 | [docs/threat-model-identity.md](docs/threat-model-identity.md) | Threat-model addendum for federated identity (IdP → BFF → gateway) — new boundaries, `TM-I-nn` requirements, pre-implementation gate (see [ADR-0007](docs/adr/0007-federated-identity-oidc-and-gateway-rbac.md)) |
 | [docs/failure-modes.md](docs/failure-modes.md) | FMEA matrix — per-component failure, detection (metric/alert), mitigation, operator action |
 | [docs/findings-register.md](docs/findings-register.md) | Every `F-nn` cited in these docs, defined once — severity, what it was, how it was resolved. A closed record of the completed review programme |
-| [docs/adr/](docs/adr/) | Architecture Decision Records — the load-bearing decisions (dual-mode, Redis control plane, single-owner, single-tenant, at-least-once+idempotency, fail-closed defaults, federated identity/RBAC) |
+| [docs/adr/](docs/adr/) | Architecture Decision Records — the load-bearing decisions. Start with [the index](docs/adr/README.md); it carries the register, the supersession map and the implementation order |
 | [docs/load-testing.md](docs/load-testing.md) | Load-baseline methodology + the runnable harness in [tools/loadtest/](tools/loadtest/) |
 | [docs/testing-gaps.md](docs/testing-gaps.md) | **What we have not empirically validated** and why — chaos/fault injection, scale baseline, HA Redis failover, arm64 verification, and disaster recovery (restore into a fresh stack, at fleet scale, across a key rotation). Read this before treating a resilience claim as proven |
 | [docs/multitenancy.md](docs/multitenancy.md) | Single-tenant-per-stack deployment model (D-1) |
@@ -997,6 +1054,7 @@ Phase-0 / governance artifacts for reviewers and operators:
 | [docs/upgrade.md](docs/upgrade.md) | Upgrade guide — versioning/compat policy, rolling procedure, breaking gates, rollback |
 | [docs/releasing.md](docs/releasing.md) | Maintainer release checklist — what happens before the tag, and the digest re-pinning that can only happen after it |
 | [docs/dependency-advisories.md](docs/dependency-advisories.md) | How to triage a `pip-audit` finding here — what this project actually uses from each dependency, plus the standing triage |
+| [docs/operator-guides-plan.md](docs/operator-guides-plan.md) | Plan for the Provider and Tenant guides — what is writable today against shipped code, what is blocked on unbuilt architecture, and the tunables reference that gets built one entry at a time |
 | [docs/compliance.md](docs/compliance.md) | Compliance mapping — SOC 2 TSC / HIPAA / FedRAMP-FIPS + shared-responsibility lines |
 
 ## Running Tests

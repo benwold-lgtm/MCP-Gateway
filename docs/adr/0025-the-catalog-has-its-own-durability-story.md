@@ -1,6 +1,6 @@
 # ADR-0025: The catalog has its own backup, availability and restore story
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-21
 - **Related:** [ADR-0020](0020-the-device-catalog.md) — names this gap explicitly in its own §7,
   as "the honest cost of this decision"; this record is the resolution.
