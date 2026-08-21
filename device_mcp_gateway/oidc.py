@@ -26,7 +26,10 @@ addendum (docs/threat-model-identity.md):
   * **TM-I-05** — a plaintext ``http://`` issuer or JWKS URI is refused at startup unless
     ``security.allow_plaintext_idp`` is set. That policy is separate from TM-I-10's:
     the egress guard permits ``http`` by design, so it never enforced transport
-    encryption and was never meant to.
+    encryption and was never meant to. A **discovered** JWKS URI gets the same check at
+    the moment it is resolved, and the discovery document must declare the configured
+    issuer or it is refused and not cached (``_resolve_jwks_uri``) — pinning ``iss`` at
+    decode time does not help when the attacker also supplies the signing keys.
   * **TM-I-12** — JWKS is served from cache through an IdP outage; validation fails
     **closed** (the JWT is rejected) while static break-glass keys keep working.
 """
@@ -239,9 +242,38 @@ class JWKSCache:
         ) as client:
             resp = await client.get(disco)
             resp.raise_for_status()
-            uri = resp.json().get("jwks_uri")
+            doc = resp.json()
+        # **Pin the document to the configured issuer before trusting anything inside it
+        # (TM-I-05).** OIDC Discovery 1.0 §4.3 requires the ``issuer`` a document declares
+        # to be identical to the URL it was fetched from, and until this check nothing
+        # verified that. Pinning ``iss``/``aud`` at ``jwt.decode`` does not cover it: those
+        # are claims in a token the attacker mints, so they can be set to whatever this
+        # code expects. What actually decides forgery is *whose keys* the signature is
+        # checked against — and that comes from ``jwks_uri`` here. A spoofed document
+        # (an on-path attacker on a plaintext fetch, or a compromised proxy in front of the
+        # real IdP) naming an attacker-controlled ``jwks_uri`` would have its own keys
+        # installed and every subsequent validation would verify against them, for the
+        # lifetime of the process, because the result is cached below. So this fails
+        # closed and caches nothing on refusal.
+        declared = str(doc.get("issuer") or "")
+        if declared.rstrip("/") != self._cfg.issuer.rstrip("/"):
+            raise OIDCError(
+                f"OIDC discovery issuer mismatch: configured {self._cfg.issuer!r}, document "
+                f"declares {declared!r}. Refusing — the document must be served by the issuer "
+                f"it names (OIDC Discovery 1.0 §4.3), and its jwks_uri decides which keys "
+                f"sign a valid token."
+            )
+        uri = doc.get("jwks_uri")
         if not uri:
             raise OIDCError("OIDC discovery document has no jwks_uri")
+        # A **discovered** JWKS URI never passed the startup checks a configured one does —
+        # it arrives from the network at first use. Run it through the same check rather
+        # than a second copy of the rule: without this, a document could downgrade the key
+        # fetch to plaintext http on a deployment that refused a plaintext issuer at boot.
+        try:
+            self._cfg._check_url(uri, "OIDC discovery jwks_uri")
+        except ValueError as exc:
+            raise OIDCError(str(exc)) from exc
         self._discovered_jwks_uri = uri
         return uri
 

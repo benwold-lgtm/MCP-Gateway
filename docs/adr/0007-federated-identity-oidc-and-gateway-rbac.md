@@ -110,7 +110,19 @@ scope seam.
     [threat-model-identity.md](../threat-model-identity.md). All six §6 gate items are met
     against the code — 10 controls built, 1 accepted as designed, 1 satisfied by
     construction, 3 not applicable under Mode A, 2 gaps (both BFF transport posture, §5a).
-    That walk is the evidence behind this record's Accepted status.
+    That walk is the evidence behind this record's Accepted status. **Of those two gaps, one
+    is now closed** — TM-I-05, across all three of its halves: BFF issuer pinning (05a),
+    plaintext refusal on both sides via `security.allow_plaintext_idp` /
+    `OIDC_ALLOW_PLAINTEXT_ISSUER` (05b, `278053e`), and the gateway's own discovery pinning
+    in `_resolve_jwks_uri` (05c). **05c is the one the walk missed**, and it was the most
+    consequential: an unpinned discovery document supplied the `jwks_uri`, so a spoofed
+    response installed the attacker's signing keys for the life of the process — pinning
+    `iss`/`aud` at decode does not help when the attacker also supplies the keys. That the
+    gate walk cleared this record while a hole of that shape sat on the gateway's own side is
+    worth remembering about walks that read code rather than exercise it: every existing JWKS
+    test stubbed `_refresh`, so nothing ever drove the path the defect lived on. What remains
+    is **TM-I-13** alone: the BFF→gateway leg is a deployment property, not a code-enforced
+    one, and `GATEWAY_URL` still defaults to `http://localhost:8000`.
   - **Finer scopes** (split `devices:write` → create/update/delete; add `deadletter:manage`,
     `audit:read`) — additive, no route churn.
   - **Tenant-scoped roles** (e.g. `operator@tenant-a`) — the claim→scope mapping is designed
