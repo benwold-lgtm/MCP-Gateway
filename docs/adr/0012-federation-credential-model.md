@@ -1,6 +1,6 @@
 # ADR-0012: Credential model for BFF provider federation
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-08-21), **narrowed** · **Decision items 2, 3 and 4 superseded** by [ADR-0017](0017-provider-authority-is-delegated.md) §6/§7 — see *Scope after the 2026-08-21 review*. **Item 1 stands**: the BFF audit chain is a prerequisite for provider federation
 - **Date:** 2026-08-11
 - **Related findings:** F-30 (end-to-end identity propagation), F-57 (hash-chained audit)
 - **Builds on:** [ADR-0004](0004-single-tenant-per-stack.md) (one stack per tenant),
@@ -47,7 +47,7 @@ across N independently-configured IdPs**: provider A trusts Entra, provider B tr
 on-prem Keycloak, and one user's token from A's issuer is correctly rejected by B. Nothing
 in the gateway fixes that; it is resolved (or not) in the operator's IdP topology.
 
-## Decision (proposed)
+## Decision (as originally proposed; items 2, 3 and 4 are superseded — see the scope note below)
 
 **1. BFF-side audit logging is a prerequisite for federation, not a parallel workstream.**
 Hash-chained on the F-57 model the gateway already uses, bound to the authenticated
@@ -100,8 +100,23 @@ deliberately scopes itself to one gateway's Redis.
 
 ## Scope after the 2026-08-21 review
 
+> **Closed 2026-08-21.** This section left one question open — *whether this ADR is largely
+> superseded by ADR-0017, retaining item 1 and the ordinary-relay case* — and named the thread
+> that would decide it: **the pending-request channel.** That thread was tied by ADR-0017's
+> 17.3, which settled the channel as **provider-side polling, scoped to the originating
+> identity, carrying no authority and needing no new transport.** A channel that carries no
+> authority needs no credential model, so the last thing that might have kept items 2–4 alive
+> does not.
+>
+> **The record is therefore Accepted and narrowed rather than left Proposed**: items 2, 3 and 4
+> are superseded by ADR-0017, and item 1 stands on its own evidence. The *follow-ups* below
+> still wait on [ADR-0021](0021-separate-console-applications.md) — they always did, and that
+> was never the status question.
+
+
 Checked against the code and against [ADR-0017](0017-provider-authority-is-delegated.md).
-This ADR stays **Proposed**, but for a sharper reason than "unbuilt": **three of its four
+This ADR was kept **Proposed** at the time for a sharper reason than "unbuilt" — it is now
+Accepted and narrowed, see the note above — because **three of its four
 Decision items have been overtaken by ADR-0017, and no record noticed** — 0017 and 0020 both
 cite this one approvingly, and nothing supersedes it, which is how the drift went unseen.
 
