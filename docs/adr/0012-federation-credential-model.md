@@ -100,34 +100,68 @@ deliberately scopes itself to one gateway's Redis.
 
 ## Scope after the 2026-08-21 review
 
-Checked against the code and against [ADR-0017](0017-provider-authority-is-delegated.md) §7.
-The result narrows this ADR rather than superseding it, and it stays **Proposed** for a
-documented reason rather than a vague one.
+Checked against the code and against [ADR-0017](0017-provider-authority-is-delegated.md).
+This ADR stays **Proposed**, but for a sharper reason than "unbuilt": **three of its four
+Decision items have been overtaken by ADR-0017, and no record noticed** — 0017 and 0020 both
+cite this one approvingly, and nothing supersedes it, which is how the drift went unseen.
 
-**Decision item 2 (per-user relay preserved, with the same-issuer → token-exchange →
-BFF-assertion fallback hierarchy) is validated and hardened, not superseded.** ADR-0017 §7,
-the fix behind its open question 17.2 — the provider-plane relay gets its own call path with
-*no fallback credential configured at all*, so a missing operator bearer fails outright
-instead of silently succeeding as the shared admin token — and PR #127 kept as a permanent
-regression test together make this ADR's "per-user relay is shipped" claim **structurally
-true rather than true-by-observation**. Not re-opened below.
+**Item 1 (BFF audit is a prerequisite for federation) stands, unchanged.** Chaining,
+pseudonymization-at-write, per-tenant-key encryption and attribution are all verified strong
+in `bff/app/audit.py`. Coverage is the known gap: `_audited()` audits mutations only, and
+deliberately — with per-user relay the gateway's own chain already records the human behind
+every read.
 
-**Everything still open is one sequence, not five independent items.**
+**Item 3 (per-provider service token as a documented last resort) has no remaining
+occasion.** It was reserved for exactly one case: *distinct issuers, no token exchange
+available.* [ADR-0017](0017-provider-authority-is-delegated.md) §7's Tier 0 was constructed as
+a floor precisely to need nothing shared between the two identity systems — no common issuer,
+no exchange, and no tenant-side IdP at all (the Lite/local-auth deployment still clears it).
+There is no gap left between what item 3 was for and what Tier 0 already covers. **The
+visibility principle underneath it survives and should be carried forward**: an operator must
+see when attribution has degraded, rather than discovering it during an investigation.
 
-| # | Item | State |
-|---|---|---|
-| 12.4 | Threat-model addendum for **BFF → N providers** | **First.** [threat-model-identity.md](../threat-model-identity.md) covers IdP → BFF → *one* gateway; its I4 boundary is singular. That document states its own convention — *gating, required before implementation* — which is the discipline that gated ADR-0007's auth core, so this is written **before** the registry, not after |
-| 12.2 / 12.3 | Per-provider degradation visibility; provider credentials under the BFF's own key | **One blocker, not two.** Both wait on the **provider registry**, which does not exist: `bff/app/config.py` still declares `gateway_url: str`, singular — the exact single-target shape this ADR's own Context describes. There is nothing for a per-provider flag or a per-provider credential to attach to. The BFF's only encryption today is `audit_content_key`, which encrypts audit *record content* per tenant (ADR-0013 §10) — a different concern |
-| 12.1 | BFF audit coverage | **After 12.2**, because its fix depends on 12.2's flag. Chaining, pseudonymization-at-write, per-tenant-key encryption and attribution are all verified strong; **coverage is the gap**. `_audited()` audits mutations only, deliberately — with per-user relay the gateway's own chain already records the human behind every read |
-| 12.5 | `multitenancy.md` aggregate-console revision | **Last — after the registry ships, describing what was built.** Writing it now would put the docs *ahead* of reality, the inverse of the stale-status defects found repeatedly in this repository and worse for an operator-facing document, because a reader cannot distinguish speculative documentation from accurate documentation by looking at it |
+**Item 4 (provider credentials encrypted at rest under the BFF's own key) follows item 3.**
+It is the storage requirement for item 3's fallback token; with nothing left to justify the
+token, there is nothing left to store. It also contradicts §7 directly — a Tier 0 credential
+is gateway-minted, short-lived, scoped to one grant, and *"returned only to the session that
+raised it"*. There is no standing per-provider credential for a store to hold.
 
-**One correction to `_audited()`'s own docstring, to make when 12.1 is built.** It says read
-auditing changes "when provider federation lands", which is imprecise in the direction that
-costs work: under federation with per-user relay *working*, the gateway still sees the person
-and re-auditing reads would duplicate exactly what the current design avoids. The real trigger
-is narrower — **any provider in item 3's service-token-degraded state**, where attribution is
-lost at both ends at once. So the fix is a conditional keyed on that provider's `degraded`
-flag, not a blanket policy change.
+**Item 2's scope needs re-examination — it is not simply untouched.** Its three-tier
+hierarchy (same-issuer relay → token exchange → signed BFF assertion) exists to carry a
+provider operator's identity through a BFF and into N different tenant gateways.
+[ADR-0017](0017-provider-authority-is-delegated.md) §6 says that transit does not happen:
+*"the provider console holds no credential for a tenant's data plane at all"* — an operator
+needing a tenant's data plane enters **that tenant's own console** with the delegated
+credential. Tracing what still crosses the boundary leaves:
+
+| Provider-side function | Credential into a tenant stack? |
+|---|---|
+| Estate-wide observability (§5) | **No, by construction** — and §5 forbids building such a view by querying N tenant APIs with a credential |
+| The catalog ([ADR-0020](0020-the-device-catalog.md)) | **No** — the provider's own store; tenants claim *from* it |
+| Estate / tenant list | **No** — navigation, never authorization |
+| Raising a pending support request (§7) | **The one remaining provider → tenant write**, and it carries no authority — it asks for permission. 17.3 already fixed its shape: provider-side polling, scoped to the originating identity |
+
+So what survives of item 2 is (a) the ordinary single-gateway tenant relay — which was never
+a federation mechanism and is separately verified against
+[threat-model-identity.md](../threat-model-identity.md)'s gate — and (b) whatever
+authenticates that one request channel. Both are much narrower than the hierarchy was built
+for. Whether this ADR is then *largely superseded by ADR-0017*, retaining item 1 and the
+ordinary-relay case, is the open status question; the pending-request channel is the loose
+thread that decides it.
+
+**Sequencing follows from that, and it is a dependency, not a date.** The remaining
+follow-ups — the BFF → N-providers threat-model addendum, per-provider degradation
+visibility, the aggregate-console revision of [multitenancy.md](../multitenancy.md) — all
+wait on [ADR-0021](0021-separate-console-applications.md)'s provider console, build-order item
+8. Writing the threat-model addendum first would model a boundary whose shape is not settled;
+that addendum declares itself *gating, required before implementation*, and the discipline
+only pays if the thing being modelled is the thing that gets built.
+
+**One correction to make when item 1's coverage gap is closed.** `_audited()`'s docstring says
+read auditing changes "when provider federation lands", which is imprecise in the direction
+that costs work: under federation with per-user relay *working*, the gateway still sees the
+person, so re-auditing reads duplicates what the design deliberately avoids. The trigger is
+narrower — a provider whose attribution has actually degraded.
 
 ## Alternatives considered
 
