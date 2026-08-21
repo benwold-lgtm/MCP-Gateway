@@ -10,14 +10,18 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.4] - 2026-08-21
+
 > **The provider-plane work built here was superseded before it shipped, and is not in this
 > list.** [ADR-0013](docs/adr/0013-two-plane-tenancy-and-the-provider-plane.md)'s multi-issuer
 > trust and elevated grants were implemented, verified against real identity providers, and
 > then replaced in design by
 > [ADR-0017](docs/adr/0017-provider-authority-is-delegated.md)–[0021](docs/adr/0021-separate-console-applications.md),
-> which move authority over a tenant to that tenant. The code is still in `main` and is being
-> removed rather than released, so no version ever offered it — the entries are omitted instead
-> of being announced and then deprecated. See
+> which move authority over a tenant to that tenant. The code was removed rather than released,
+> so no version ever offered it — the entries are omitted instead of being announced and then
+> deprecated. See
 > [ADR-0016](docs/adr/0016-reaching-many-tenant-gateways.md) (Rejected) for why the direction
 > changed.
 >
@@ -122,6 +126,13 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   or Lite deployments, which never used the pseudonym. An identifier is never reissued, even
   after a tenant departs (ADR-0019 §4).
 
+- **The OIDC audit subject is now `oidc:{issuer}#{sub}`** (was `oidc:{sub}`). `sub` is
+  unique *within* an issuer, not globally — `admin` at one IdP and `admin` at another are two
+  different humans, and collapsing them puts both on one line of the hash-chained audit with
+  no symptom, because both requests succeed. **This affects existing deployments**: audit
+  records written before the upgrade carry the short form, and anything parsing the subject
+  needs to accept both.
+
 ### Removed
 
 - **The ADR-0013 provider plane, in full** — `device_mcp_gateway/grants.py` (the elevated-grant
@@ -185,14 +196,45 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   its structure is validated by `OIDCConfig`, which fails hard at startup, and a second
   warn-only schema would be a weaker duplicate that drifts.
 
-### Changed
+### Security
 
-- **The OIDC audit subject is now `oidc:{issuer}#{sub}`** (was `oidc:{sub}`). `sub` is
-  unique *within* an issuer, not globally — `admin` at one IdP and `admin` at another are two
-  different humans, and collapsing them puts both on one line of the hash-chained audit with
-  no symptom, because both requests succeed. **This affects existing deployments**: audit
-  records written before the upgrade carry the short form, and anything parsing the subject
-  needs to accept both.
+- **The gateway now pins the OIDC discovery document to the configured issuer**
+  ([TM-I-05c](docs/threat-model-identity.md)). `_resolve_jwks_uri` took `jwks_uri` straight out
+  of the discovery document without checking that the document declared the issuer it was
+  fetched from, then cached it for the life of the process.
+
+  Pinning `iss` and `aud` at decode time did **not** cover this. Those are claims in a token an
+  attacker mints, so they can be set to whatever the gateway expects; what decides forgery is
+  whose keys the signature is verified against, and that came from the document. A spoofed
+  discovery response — an on-path attacker where the fetch is plaintext, or a compromised or
+  misconfigured proxy in front of the real IdP — could name an attacker-controlled `jwks_uri`,
+  have the attacker's signing keys installed, and mint tokens for any role. **One spoof
+  poisoned every subsequent validation until restart.**
+
+  **Who was exposed:** deployments with `gateway.oidc` enabled that did *not* set an explicit
+  `gateway.oidc.jwks_uri`. Setting that key short-circuits discovery entirely, so those
+  deployments never reached the affected path. Present in 0.3.3 and earlier.
+
+  The document's declared issuer is now compared against the configured one (trailing slashes
+  normalised, everything else exact), a mismatch is refused, and the cache is populated only
+  after every check — so a refused document leaves nothing behind. Regression tests drive the
+  real HTTP path rather than stubbing the refresh, which is why the defect survived until now:
+  every existing JWKS test stubbed `_refresh`, so nothing exercised the code between the
+  response and the cache.
+
+- **A plaintext `http://` IdP is refused at startup** ([TM-I-05a/b](docs/threat-model-identity.md)),
+  unless `security.allow_plaintext_idp: true` is set deliberately. The egress URL policy permits
+  `http` by design — its job is SSRF, not transport encryption — so nothing had ever enforced
+  TLS to the IdP, on either the gateway or the console BFF. The check covers the issuer *and* an
+  explicit `jwks_uri`, and now also a `jwks_uri` discovered at runtime, which had never passed
+  the startup checks a configured one gets.
+
+  Deliberately **not** folded into `allow_private_targets`: where an IdP sits and whether it has
+  TLS are independent properties, and one flag for both would leave an operator opting out of
+  address checks in order to permit plaintext. There is no loopback exemption either — a silent
+  "localhost is fine" rule cannot be warned about, because nothing gets set to warn on. A lab
+  IdP over `http` needs the flag, which warns loudly at startup.
+
 
 ## [0.3.3] - 2026-08-13
 
@@ -1296,6 +1338,7 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.3.4]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.4
 [0.3.3]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.3
 [0.3.2]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.2
 [0.3.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.1
