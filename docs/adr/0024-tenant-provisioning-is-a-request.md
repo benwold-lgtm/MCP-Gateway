@@ -1,6 +1,6 @@
 # ADR-0024: Tenant provisioning is a request the console files and GitOps fulfils
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-21
 - **Builds on:** [ADR-0004](0004-single-tenant-per-stack.md) (one stack per tenant),
   [ADR-0013 §10](0013-two-plane-tenancy-and-the-provider-plane.md) (offboarding),
