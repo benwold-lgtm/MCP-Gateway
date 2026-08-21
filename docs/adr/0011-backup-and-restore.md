@@ -1,10 +1,38 @@
 # ADR-0011: Backup and restore — ciphertext by default, portable behind its own scope
 
-- **Status:** Accepted
+- **Status:** Accepted · **§1, §2 and the 2026-08-17 Amendment superseded** by [ADR-0018](0018-device-credentials-by-reference.md) §3/§5 (2026-08-19), along with §3's by-kind preflight and the `backup:export-portable` scope. §3's fail-closed whole-archive gate, §4, §5's contents list and §6's decision stand — [ADR-0018 §5](0018-device-credentials-by-reference.md) carries the decision-by-decision table
 - **Date:** 2026-08-11
 - **Related findings:** F-34 (credential encryption + key rotation), F-57 (hash-chained audit)
 - **Builds on:** [ADR-0002](0002-redis-control-plane.md) (Redis holds the control plane),
   [ADR-0004](0004-single-tenant-per-stack.md) (one stack = one tenant = one backup domain)
+
+> ## Partly superseded — read this first
+>
+> **[ADR-0018](0018-device-credentials-by-reference.md) removed the reason this ADR's
+> encryption machinery existed.** A device credential is now held *by reference* and resolved
+> at dispatch, and rotating tokens are excluded from every archive unconditionally (§1a/§3).
+> An archive of an operator-provisioned fleet is therefore **configuration, not a credential
+> dump** — and with no credential dump there is nothing for a portable archive to protect.
+>
+> **History, not current design:** §1's two archive kinds, §2's Argon2id envelope and
+> passphrase, the `backup:export-portable` scope, the `provider:credentials` grant, and the
+> 2026-08-17 Amendment's generated passphrase. §3's preflight survives as a fail-closed
+> whole-archive gate, but its *by-kind* branching goes with §1.
+>
+> **What stands is everything that was about restore _correctness_ rather than about secrets:**
+> `dry_run=true` by default with the destructive direction never reachable by omission,
+> `on_conflict` modes and restore through `register_device` (§4); per-device outcomes and
+> reasons, and fingerprint warnings surfaced at the top of the report; the archive contents
+> list (§5), now also excluding rotating tokens per ADR-0018 §3; and audit coverage (§6).
+>
+> ⚠️ **§6's decision stands but its stated reason does not.** It argues export must be audited
+> because *"a ciphertext export is a complete dump of every credential in the stack"*. Under
+> ADR-0018 that is no longer true. Export is still audited — an archive is still a complete
+> map of the estate, and a dry run is still the natural reconnaissance step before a real
+> restore — but not for the reason written there.
+>
+> Where this record and [ADR-0018](0018-device-credentials-by-reference.md) disagree, ADR-0018
+> is authoritative.
 
 ## Context
 
@@ -43,6 +71,9 @@ gated by **three scopes**, with a **fail-closed preflight** on every restore.
 
 ### 1. Two archive kinds
 
+> **Superseded by [ADR-0018](0018-device-credentials-by-reference.md) §3.** There is one
+> archive kind now, because there is no credential dump to protect. History below.
+
 | Kind | Credentials | Scope required | Job it does |
 |---|---|---|---|
 | **Ciphertext** (default) | Left encrypted exactly as stored | `backup:read` | Routine/scheduled backup, restore into the same stack or any stack sharing `MCP_SECRET_KEY` |
@@ -54,6 +85,10 @@ is a complete set of live device credentials protected by one passphrase, so it 
 own scope, is never the default, and is audited as the significant event it is.
 
 ### 2. Portable encryption is specified now, not left to implementation
+
+> **Superseded by [ADR-0018](0018-device-credentials-by-reference.md) §3**, together with
+> §1. The KDF, envelope, canary and passphrase-strength floor all protected the portable
+> archive; nothing now produces one. History below.
 
 - **Argon2id** for passphrase → key (available in `cryptography` 48.0.1; no new dependency).
 - **`m=64 MiB, t=3, p=4`**, and these parameters are **written into the envelope**, not
@@ -250,6 +285,11 @@ and the price of that decision rather than a defect in it.
 ---
 
 ## Amendment (2026-08-17) — the passphrase is generated, not typed
+
+> **Superseded by [ADR-0018](0018-device-credentials-by-reference.md) §3.** The generated
+> passphrase and the `X-Backup-Passphrase` header went with the portable archive itself.
+> Kept because the reasoning — a human-chosen passphrase is the weak point, so do not ask
+> for one — is the same reasoning ADR-0018 §1a applies to `MCP_SECRET_KEY`.
 
 **Change:** omitting the passphrase on a portable export no longer fails. The gateway mints
 one (256 bits, `secrets.token_urlsafe(32)`) and returns it **once**, in the
