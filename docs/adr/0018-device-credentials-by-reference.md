@@ -961,10 +961,24 @@ required otherwise would not describe the actual estate.
   `secret://`, in the direction this leaned. Naming the backend would bake a deployment choice
   into every device record, so an archive could only be restored into a stack running the same
   product — which is precisely the portability §3 is built on.
-- **The TTL value itself — for networked backends only** (§7c; on mounted files the TTL is 0 and
-  the question does not arise). §7 settles that the cache ships instrumented; the number comes
-  from the resulting data, and the three-way trade (rotation, hot path, outage tolerance) means
-  there may be no single right answer across deployment sizes.
+- ~~**The TTL value itself — for networked backends only**~~ (§7c; on mounted files the TTL is 0
+  and the question does not arise). **Resolved 2026-08-21: ships as 300 seconds, instrumented,
+  and tuned from operating history** — a starting default, not a fixed value. The three-way
+  trade (rotation, hot path, outage tolerance) really does have no single right answer across
+  deployment sizes, which is an argument for making it configurable and instrumented, not for
+  leaving it unset: build item 1 has to code against *some* number, and an unstated default is
+  chosen by whoever writes the line rather than by this record.
+
+  **What caps it is not availability but §7c's own security note:** the cache holds a resolved
+  plaintext credential in process memory for the length of the TTL, which §7c calls "the same
+  *shape* as the durable copy §1 exists to prevent". So the pressure runs downward — 300s is
+  half the gateway's `jwks_cache_ttl` of 600s deliberately, because a device credential may be
+  rotated *for cause* in a way a signing key usually is not, and because five minutes is a
+  defensible upper bound on how long a revoked credential stays usable.
+
+  This is the treatment [ADR-0023 §3](0023-gateway-break-glass-attribution.md) already describes
+  as "the same treatment already given to cache TTL and plan-digest validity elsewhere in this
+  ADR set" — a claim that was not yet true when it was written, and is now.
 - ~~**Whether a store outage should fail open on cached material past its TTL — networked
   backends only**~~ (§7c; a mounted-files store has no dispatch-time outage for this to arise
   from). **Resolved: refuse**, in the direction this leaned. Serving a stale credential to keep
@@ -976,10 +990,24 @@ required otherwise would not describe the actual estate.
   dispatch path. **Outstanding:** that HA guidance is not yet in `README.md` or
   [kubernetes-architecture.md](../kubernetes-architecture.md); neither mentions the secret store.
   Refusing without telling an operator how to avoid needing to is half a decision.
-- **How long a plan digest stays valid.** §6 gives it no expiry of its own beyond the grant
-  window that gates the apply. A digest previewed weeks ago and applied inside a fresh grant
-  would still match if nothing in the request changed, which is arguably correct — the
-  instruction is unaltered — and arguably too long for "reviewed".
+- ~~**How long a plan digest stays valid.**~~ **Resolved 2026-08-21: 7 days, instrumented and
+  tuned** — again a starting default rather than a fixed value. §6 gave the digest no expiry of
+  its own beyond the grant window that gates the apply, so a digest previewed weeks ago and
+  applied inside a fresh grant would still match if nothing in the request changed.
+
+  **Both readings of that were right, which is why it needed a decision rather than an
+  argument.** The instruction genuinely is unaltered — that is what the digest commits to. But
+  "reviewed" is a claim about a *human's understanding at a moment*, and the world the human was
+  reasoning about drifts even when the bytes do not: the target's owner changes, the network
+  around it changes, the reason for the request expires. Seven days is short enough that the
+  reviewer's context is plausibly intact and long enough not to defeat an ordinary
+  review-then-schedule workflow.
+
+  **This is the digest's own age, and it is not the same clock as the grant.** The grant is
+  session-bound and short (ADR-0017 §7); this bounds how old the *reviewed artifact* may be when
+  a grant is minted against it. [ADR-0022](0022-agent-initiated-device-writes-are-plan-bound.md)'s
+  repeatable reconciliation approvals keep their own, separately-decided term — that follow-up is
+  unaffected.
 - ~~**Whether the console should write to the secret store.**~~ **Resolved: no** — refused on
   principle, see §2a. Registration and rotation stay two-system operations, and `MCP_SECRET_KEY`
   remains a permanent named exception for rotating tokens (§1a) rather than something to
