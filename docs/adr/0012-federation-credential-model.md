@@ -98,6 +98,37 @@ deliberately scopes itself to one gateway's Redis.
   - [multitenancy.md](../multitenancy.md) needs revision once this lands: it currently
     presents single-tenant-per-stack with no aggregate-console story.
 
+## Scope after the 2026-08-21 review
+
+Checked against the code and against [ADR-0017](0017-provider-authority-is-delegated.md) §7.
+The result narrows this ADR rather than superseding it, and it stays **Proposed** for a
+documented reason rather than a vague one.
+
+**Decision item 2 (per-user relay preserved, with the same-issuer → token-exchange →
+BFF-assertion fallback hierarchy) is validated and hardened, not superseded.** ADR-0017 §7,
+the fix behind its open question 17.2 — the provider-plane relay gets its own call path with
+*no fallback credential configured at all*, so a missing operator bearer fails outright
+instead of silently succeeding as the shared admin token — and PR #127 kept as a permanent
+regression test together make this ADR's "per-user relay is shipped" claim **structurally
+true rather than true-by-observation**. Not re-opened below.
+
+**Everything still open is one sequence, not five independent items.**
+
+| # | Item | State |
+|---|---|---|
+| 12.4 | Threat-model addendum for **BFF → N providers** | **First.** [threat-model-identity.md](../threat-model-identity.md) covers IdP → BFF → *one* gateway; its I4 boundary is singular. That document states its own convention — *gating, required before implementation* — which is the discipline that gated ADR-0007's auth core, so this is written **before** the registry, not after |
+| 12.2 / 12.3 | Per-provider degradation visibility; provider credentials under the BFF's own key | **One blocker, not two.** Both wait on the **provider registry**, which does not exist: `bff/app/config.py` still declares `gateway_url: str`, singular — the exact single-target shape this ADR's own Context describes. There is nothing for a per-provider flag or a per-provider credential to attach to. The BFF's only encryption today is `audit_content_key`, which encrypts audit *record content* per tenant (ADR-0013 §10) — a different concern |
+| 12.1 | BFF audit coverage | **After 12.2**, because its fix depends on 12.2's flag. Chaining, pseudonymization-at-write, per-tenant-key encryption and attribution are all verified strong; **coverage is the gap**. `_audited()` audits mutations only, deliberately — with per-user relay the gateway's own chain already records the human behind every read |
+| 12.5 | `multitenancy.md` aggregate-console revision | **Last — after the registry ships, describing what was built.** Writing it now would put the docs *ahead* of reality, the inverse of the stale-status defects found repeatedly in this repository and worse for an operator-facing document, because a reader cannot distinguish speculative documentation from accurate documentation by looking at it |
+
+**One correction to `_audited()`'s own docstring, to make when 12.1 is built.** It says read
+auditing changes "when provider federation lands", which is imprecise in the direction that
+costs work: under federation with per-user relay *working*, the gateway still sees the person
+and re-auditing reads would duplicate exactly what the current design avoids. The real trigger
+is narrower — **any provider in item 3's service-token-degraded state**, where attribution is
+lost at both ends at once. So the fix is a conditional keyed on that provider's `degraded`
+flag, not a blanket policy change.
+
 ## Alternatives considered
 
 - **One service token per provider, held by the BFF** (the original sketch): rejected as the
