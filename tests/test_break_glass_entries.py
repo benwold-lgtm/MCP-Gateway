@@ -277,3 +277,40 @@ def test_an_expired_only_key_refuses_requests_rather_than_opening_the_gateway(st
         auth.authenticate(None)
     assert exc.value.status_code == 401
     assert any("Auth stays ENABLED" in line for line in captured_logs)
+
+
+# ── The expiry countdown reaches the metrics plane, not just the startup log ─────────────
+
+
+def _expiry_gauge(subject: str):
+    from device_mcp_gateway import metrics
+
+    return metrics.break_glass_expiry_timestamp_seconds.labels(subject=subject)._value.get()
+
+
+def test_expiry_is_published_as_an_absolute_timestamp(store):
+    """A days-remaining gauge set at startup silently rots.
+
+    The startup log warns at 14 days and again at 3, but a gateway that has not restarted in
+    a month never re-emits it — and "discovered dead during the incident it exists for" is
+    the exact failure §3 names, arriving through the monitoring instead of the credential.
+    An absolute expiry timestamp stays correct without a restart because Prometheus does the
+    arithmetic; a days-remaining number would be wrong by however long the process has been
+    up.
+    """
+    _build(store, issued=_issued(30))
+
+    expected = dt.datetime.combine(
+        dt.date.today() - dt.timedelta(days=30) + dt.timedelta(days=90),
+        dt.time.min,
+        tzinfo=dt.timezone.utc,
+    ).timestamp()
+    assert _expiry_gauge("key:alice") == pytest.approx(expected)
+
+
+def test_an_expired_entry_keeps_reporting_its_expiry(store):
+    """The gauge has to survive the key being dropped, or the alert goes quiet at the loudest
+    moment — when the credential has actually lapsed and nobody can use it."""
+    _build(store, issued=_issued(200))
+
+    assert _expiry_gauge("key:alice") < dt.datetime.now(dt.timezone.utc).timestamp()

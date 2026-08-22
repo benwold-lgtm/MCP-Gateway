@@ -207,3 +207,59 @@ spec:
           annotations:
             summary: "Device circuit breakers opening"
             description: "Tool calls are being rejected by open circuit breakers at {{ $value }}/s — an upstream device is failing."
+
+    # -----------------------------------------------------------------------
+    # Break-glass (ADR-0023 §2/§3). ADR-0017 §4 requires that use produce "a
+    # notification the tenant receives, not a log line they may one day read" —
+    # these rules ARE that notification path. The gateway emits the audit event
+    # and the counter; Alertmanager is what delivers it to a human.
+    #
+    # No `for:` on the activation alert, deliberately. Every other alert here
+    # waits 5m to filter transients; a break-glass activation is not a transient
+    # and a five-minute delay on "somebody just used the emergency credential"
+    # defeats the point of announcing it.
+    # -----------------------------------------------------------------------
+    - name: mcp-gateway.break-glass
+      rules:
+        - alert: MCPBreakGlassActivated
+          expr: sum by (subject) (increase(mcp_break_glass_activations_total[10m])) > 0
+          labels:
+            severity: page
+          annotations:
+            summary: "Break-glass credential activated by {{ $labels.subject }}"
+            description: "{{ $labels.subject }} authenticated with a break-glass credential — the emergency path that exists for a broken IdP or a wedged stack. If this was not an authorized emergency, treat the credential as compromised and reissue it. The matching auth.break_glass.activated audit record carries the request and the activation history."
+        - alert: MCPBreakGlassBecomingRoutine
+          # The signal §3 actually asks for: not call volume within one incident,
+          # but the same credential activating again and again across weeks.
+          # Matches the gateway's own review flag (break_glass_review_threshold,
+          # default 3 per 30 days) — deliberately the same threshold in both
+          # places so the alert and the audit record never disagree.
+          expr: sum by (subject) (increase(mcp_break_glass_activations_total[30d])) > 3
+          labels:
+            severity: ticket
+          annotations:
+            summary: "Break-glass has become routine access for {{ $labels.subject }}"
+            description: "{{ $labels.subject }} has activated break-glass {{ $value }} times in 30 days. Nothing has been blocked — this is a review flag, not a limit, because a budget that cut off a real incident response mid-session is the one failure this mechanism cannot afford. Find out what normal work is reaching for the emergency path and give it its own credential."
+        - alert: MCPBreakGlassCredentialExpiringSoon
+          # Slice 2's escalating notice, on the metrics plane. The startup log
+          # warns at 14 and 3 days, but a gateway that has not restarted in a
+          # month never re-emits it — and "discovered dead during the incident
+          # it exists for" is the exact failure mode §3 names. An absolute
+          # expiry timestamp (the cert-expiry idiom) stays correct without a
+          # restart: Prometheus does the arithmetic, so the value cannot go
+          # stale the way a days-remaining gauge would.
+          expr: (mcp_break_glass_expiry_timestamp_seconds - time()) / 86400 < 14
+          for: 1h
+          labels:
+            severity: ticket
+          annotations:
+            summary: "Break-glass credential for {{ $labels.subject }} expires in under 14 days"
+            description: "{{ $labels.subject }}'s break-glass credential expires in {{ $value | printf \"%.1f\" }} days. Reissue it: generate a new key, write it to its secret:// location, set `issued` to today. Once it lapses it stops authenticating, and that is found out during the next incident rather than before it."
+        - alert: MCPBreakGlassCredentialExpired
+          expr: (mcp_break_glass_expiry_timestamp_seconds - time()) < 0
+          for: 5m
+          labels:
+            severity: page
+          annotations:
+            summary: "Break-glass credential for {{ $labels.subject }} has EXPIRED"
+            description: "{{ $labels.subject }}'s break-glass credential has lapsed and was dropped at startup — it no longer authenticates. If it is the only break-glass entry and the IdP is unavailable, nobody can reach this gateway. Reissue it now."

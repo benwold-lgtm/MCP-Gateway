@@ -20,6 +20,52 @@ data:
       # APPENDS to X-Forwarded-For and the left-most entry is whatever the client sent):
       # trust_proxy_headers: true
 
+      # --- The console's own gateway identity (ADR-0023 slice 4) -----------------------
+      #
+      # Uncomment when deploying the UI/BFF. Left commented because the gateway ships and
+      # runs standalone, and an entry whose secret:// key cannot be resolved REFUSES TO
+      # START — deliberately, so the holder never sees unexplained 401s instead.
+      #
+      # WHY THE BFF NEEDS ITS OWN ENTRY. When the BFF relays a *password* session it has no
+      # per-user token to pass through, so it presents its own configured token. Today that
+      # is the stack's admin key, which means every console login authenticates to this
+      # gateway as `key:legacy` — and once gateway.api_key becomes break-glass (slice 4),
+      # ordinary console traffic would fire a high-severity event and inherit a 90-day
+      # expiry on the login path. A named entry of its own is what makes that separable.
+      #
+      # `role: console` is operator + caller — device management, metrics, tool invocation —
+      # and carries NO backup:* scope. The BFF already refuses password sessions on the
+      # backup routes because the admin token it proxies with holds every backup scope; this
+      # moves that guarantee into the gateway, where a console-side bug cannot undo it.
+      #
+      # ⚠️ A reference resolves to <root>/<namespace>/<path...>/<key> — ALWAYS at least
+      # three path components, so a `--from-literal` Secret mounted flat can NEVER satisfy
+      # one. The volume has to project the key to a nested path explicitly:
+      #
+      #   kubectl create secret generic gateway-credentials -n mcp-gateway \
+      #     --from-literal=bff-token="$(openssl rand -hex 32)"
+      #
+      # then add the projection to the `credentials` volume in deployment.yaml AND
+      # worker-deployment.yaml:
+      #
+      #   - name: credentials
+      #     secret:
+      #       secretName: gateway-credentials
+      #       optional: true
+      #       defaultMode: 0440
+      #       items:
+      #         - key: bff-token
+      #           path: console/bff/token     # ← matches secret://console/bff#token
+      #
+      # Put THE SAME VALUE in the UI's GATEWAY_API_TOKEN (ui-bff-secrets), which is what the
+      # BFF presents. Both ends are configured from the one generated value; neither learns
+      # it from the other.
+      #
+      # rbac:
+      #   - name: bff-password-sessions
+      #     key: "secret://console/bff#token"
+      #     role: console
+
     server:
       host: "0.0.0.0"
       port: 8000

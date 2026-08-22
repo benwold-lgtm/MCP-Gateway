@@ -219,6 +219,7 @@ def audit_event(
     outcome: str,
     rid: str = "-",
     target: str | None = None,
+    level: str = "INFO",
     **extra: Any,
 ) -> None:
     """Emit one structured audit record (``event="audit"``) with the canonical schema.
@@ -226,9 +227,16 @@ def audit_event(
     Each record carries hash-chain fields (``audit_seq``/``audit_prev``/``audit_hash``)
     so the audit stream is tamper-evident (F-57): ``verify_audit_chain`` replays the
     chain and flags any altered, deleted, or reordered record.
+
+    ``level`` raises the record above the routine INFO stream. It is log level only and is
+    deliberately **not** part of the hashed payload — a record's severity is a routing
+    decision for the pipeline, while the chain covers what actually happened. Records that
+    need severity to survive into a SIEM carry an explicit ``severity=`` field in ``extra``,
+    which *is* hashed (ADR-0023 §2 break-glass events do exactly this).
     """
     audit_log(
         f"audit:{action} {outcome}",
+        level=level,
         action=action,
         subject=subject,
         rid=rid,
