@@ -17,8 +17,8 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   now carry `break_glass: true`, which moves it from "a shared admin key" to one
   individually-generated, individually-held credential per authorized person. The flag is
   **selective by design** — CI keys, test fixtures and machine credentials stay exactly as
-  they are, because making routine automation loud, rate-limited and expiring would be noise
-  for no security benefit.
+  they are, because making routine automation loud, flagged and expiring would be noise for no
+  security benefit.
 
   A flagged entry is held to three rules, all fatal at startup with **no `allow_...`
   override**: `name` is mandatory (without it the audit subject falls back to the *role*, so
