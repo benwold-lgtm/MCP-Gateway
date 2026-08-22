@@ -28,6 +28,23 @@ gateway:
   #     key: "change-me-admin-token"
   #     role: admin
   #
+  # ANY entry may hold its key by REFERENCE instead of as a literal, and in Kubernetes it
+  # should: this file is mounted from a ConfigMap, so a literal here is a live bearer
+  # credential that `kubectl get configmap` prints. A secret:// key is resolved through the
+  # credential store (needs gateway.credentials.root / MCP_CREDENTIAL_ROOT), and a reference
+  # that cannot be resolved REFUSES TO START rather than being dropped — a silently absent
+  # entry shows up as unexplained 401s for whoever holds it.
+  #
+  #   - name: bff-password-sessions
+  #     key: "secret://t-3f9a1c2b7d4e8065/console/bff#token"
+  #     role: console
+  #
+  # `console` is the role for the UI's BFF relaying a PASSWORD session (one with no per-user
+  # token to pass through). It is operator + caller — device management, metrics, and tool
+  # invocation — and deliberately carries NO backup:* scope: an admin key here would make
+  # one relayed request a complete credential dump. Unflagged on purpose; this is continuous
+  # machine traffic, not break-glass.
+  #
   # BREAK-GLASS entries (ADR-0023). Add `break_glass: true` to an entry and it stops being
   # an ordinary static key: it is one individually-generated, individually-held credential
   # per authorized person, so a break-glass action is attributable to a human rather than to
