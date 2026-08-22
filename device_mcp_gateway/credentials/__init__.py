@@ -17,6 +17,7 @@ from .resolver import (
     MountedFilesResolver,
     ReferenceInvalid,
     ResolverError,
+    ResolverKind,
     StoreUnavailable,
     build_resolver,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "MountedFilesResolver",
     "ReferenceInvalid",
     "ResolverError",
+    "ResolverKind",
     "StoreUnavailable",
     "build_resolver",
 ]

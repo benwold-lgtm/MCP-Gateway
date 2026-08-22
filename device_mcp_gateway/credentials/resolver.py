@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+from enum import Enum
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 from urllib.parse import urlsplit
@@ -144,18 +145,81 @@ class CredentialRef:
         return hash(self.raw)
 
 
+class ResolverKind(str, Enum):
+    """Which **class** of store a resolver reads — declared, never inferred (ADR-0018 §7c).
+
+    Three behaviours branch on this: the resolution cache, the circuit breaker, and the
+    metrics. Before this existed the only discriminator was ``backend``, a display string like
+    ``"files:/run/secrets/mcp"``, and each of the three would have had to infer the class from
+    it — ``backend.startswith("files:")``. That is a policy decision behind a string prefix: it
+    reads as harmless, it is correct today, and it breaks silently the first time a backend is
+    added whose name does not fit the pattern someone assumed.
+
+    So the property is declared here once and read by all three, rather than derived at three
+    call sites that can drift apart. ADR-0018 §7c: *"The name is an implementation choice; that
+    it is declared rather than inferred is not."*
+    """
+
+    #: A Kubernetes Secret or CSI volume mounted into the pod, or a local file tree (Lite and
+    #: embedded). §7a: the store is a dependency of *starting a pod*, not of serving a request.
+    MOUNTED_FILES = "mounted_files"
+
+    #: Vault, a cloud secret manager — anything reached over the network at dispatch time.
+    #: Not yet implemented; this value exists so the branches below are written once, against
+    #: the declared property, rather than retrofitted when the first one lands.
+    NETWORKED = "networked"
+
+    @property
+    def fails_transiently_at_dispatch(self) -> bool:
+        """Whether resolution can fail *transiently*, fleet-wide, while serving a request.
+
+        This is the property the circuit breaker actually needs. On a mounted-files backend
+        the answer is no — §7a measured it: the volume is mounted before the pod is ready or
+        the pod never becomes ready at all, so there is no blip for a breaker to trip on, and
+        the one residual fleet-wide fault (a mount whose ownership the resolver refuses) is
+        present from the first resolution and never recovers on its own. A circuit that opens
+        and later probes for recovery is the wrong instrument for a permanent condition.
+        """
+        return self is ResolverKind.NETWORKED
+
+    @property
+    def default_cache_ttl_seconds(self) -> int:
+        """Seconds a resolved credential may be reused. **0 means read-through, no cache.**
+
+        Mounted files are read-through by decision, not by omission (§7c). A local file read
+        has no round-trip to amortise and no transient outage to ride out, so the cache would
+        buy nothing — while still costing what a cache costs here: a resolved *plaintext*
+        credential held in process memory for the length of the TTL, which is the same shape
+        as the durable copy §1 exists to prevent.
+
+        For networked backends 300s is the starting default settled by ADR-0018's open
+        question, instrumented and tuned from operating history. It is deliberately half the
+        gateway's ``jwks_cache_ttl``: a device credential may be rotated *for cause* in a way
+        a signing key usually is not, so the window in which a revoked credential still works
+        is worth keeping short.
+        """
+        return 300 if self is ResolverKind.NETWORKED else 0
+
+
 @runtime_checkable
 class CredentialResolver(Protocol):
     """Reference in, material out. One method, because that is the whole contract.
 
     Implementations MUST distinguish :class:`ReferenceInvalid` from :class:`StoreUnavailable`
     (ADR-0018 §7); returning a generic error is the collapse that section exists to prevent.
+
+    They MUST also declare a :class:`ResolverKind`. ``backend`` is a display string for logs
+    and error messages; ``kind`` is the load-bearing discriminator, and nothing may recover it
+    by parsing the former.
     """
 
     async def resolve(self, ref: CredentialRef) -> str: ...  # pragma: no cover - protocol
 
     @property
     def backend(self) -> str: ...  # pragma: no cover - protocol
+
+    @property
+    def kind(self) -> ResolverKind: ...  # pragma: no cover - protocol
 
 
 class MountedFilesResolver:
@@ -190,6 +254,10 @@ class MountedFilesResolver:
     @property
     def backend(self) -> str:
         return f"files:{self._root}"
+
+    @property
+    def kind(self) -> ResolverKind:
+        return ResolverKind.MOUNTED_FILES
 
     def _path_for(self, ref: CredentialRef) -> Path:
         candidate = self._root.joinpath(ref.namespace, *ref.path, ref.key)
