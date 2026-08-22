@@ -62,6 +62,13 @@ _PARITY = [
     # New in ADR-0013 §11a — no previous literal to be byte-compatible with, but pinned
     # here for the same reason as the rest: renaming it would let a spent single-use grant
     # be spent again, and nothing else would notice.
+    # New in ADR-0023 §3. Same reason again, with a different consequence: renaming the
+    # session marker makes every request look like a fresh activation, so a worked incident
+    # pages once per call; renaming the window key silently zeroes the reactivation history
+    # that the review flag is computed from. Both fail loud-in-the-wrong-way rather than
+    # quietly, which is why they belong in this table.
+    (K.break_glass_session("key:alice"), "breakglass:key:alice:session"),
+    (K.break_glass_window("key:alice"), "breakglass:key:alice:window"),
 ]
 
 
@@ -100,6 +107,8 @@ def test_parity_table_covers_every_key_building_member():
         "exec_marker",
         "result_marker",
         "ratelimit",
+        "break_glass_session",
+        "break_glass_window",
     }
     assert members == covered, f"parity table out of sync with KeyBuilder: {members ^ covered}"
 

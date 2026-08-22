@@ -49,6 +49,13 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "allow_weak_keys": bool,
         # ADR-0023 §3 — lifetime of a `break_glass: true` entry, in days. Default 90.
         "break_glass_expiry_days": int,
+        # ADR-0023 §3 reactivation-frequency flagging. A use after a quiet gap of
+        # `session_gap_minutes` is a new *activation*; more than `review_threshold`
+        # activations within `review_window_days` raises a review flag. FLAGGING ONLY —
+        # none of these three can refuse a request. Starting defaults 60 / 30 / 3.
+        "break_glass_session_gap_minutes": int,
+        "break_glass_review_window_days": int,
+        "break_glass_review_threshold": int,
         "max_body_bytes": int,
         "read_cache_ttl": _NUM,
         "trust_proxy_headers": bool,

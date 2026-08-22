@@ -20,7 +20,8 @@ import concurrent.futures
 import os
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 from typing import TYPE_CHECKING, Optional, Union
 
 from fastapi import HTTPException, Request, Security
@@ -349,8 +350,13 @@ DEFAULT_BREAK_GLASS_EXPIRY_DAYS = 90
 _BREAK_GLASS_WARN_DAYS = (14, 3)
 
 
-def _break_glass_days_remaining(entry: dict, name: str, expiry_days: int, *, today: date) -> int:
-    """Days left on a flagged entry. Raises :class:`BreakGlassConfigError` if undatable.
+def _break_glass_days_remaining(entry: dict, name: str, expiry_days: int, *, today: date) -> tuple[int, date]:
+    """``(days_left, expires_on)`` for a flagged entry. Raises on an undatable one.
+
+    The expiry *date* comes back alongside the countdown so the metric can publish an
+    absolute timestamp. A days-remaining gauge set at startup silently becomes wrong on a
+    gateway that has not restarted in a month, which is the same "discovered dead during the
+    incident" failure the warnings exist to prevent, arriving through the monitoring instead.
 
     ``issued`` is mandatory on a flagged entry for the same reason ``name`` is: an omitted
     field must not silently produce the behaviour the ADR forbids. Without an issue date the
@@ -377,7 +383,7 @@ def _break_glass_days_remaining(entry: dict, name: str, expiry_days: int, *, tod
             f"gateway.rbac[{name!r}] has an 'issued' date in the future ({issued}). Refusing to "
             "start — a future issue date silently extends the credential's lifetime."
         )
-    return expiry_days - (today - issued).days
+    return expiry_days - (today - issued).days, issued + timedelta(days=expiry_days)
 
 
 def _break_glass_entries(cfg: dict) -> list[str]:
@@ -462,7 +468,12 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
                 "however the value was generated."
             )
         # 3. A real lifetime (§3). `issued` is mandatory for the same reason `name` is.
-        remaining = _break_glass_days_remaining(entry, name, expiry_days, today=date.today())
+        remaining, expires_on = _break_glass_days_remaining(entry, name, expiry_days, today=date.today())
+        # Published for every flagged entry, expired ones included: the alert has to keep
+        # firing after the key is dropped, or the loudest moment goes quiet.
+        metrics.break_glass_expiry_timestamp_seconds.labels(subject=f"key:{name}").set(
+            datetime.combine(expires_on, dt_time.min, tzinfo=timezone.utc).timestamp()
+        )
 
         # **An expired credential stops working; it does NOT stop the gateway.** The ADR asks
         # for a real cutoff rather than indefinite validity, and says nothing about startup —
@@ -644,7 +655,18 @@ async def authenticate_request(
     """
     authenticator = request.app.state.authenticator
     try:
-        request.state.principal = await authenticator.authenticate_async(credentials)
+        principal = await authenticator.authenticate_async(credentials)
+        request.state.principal = principal
+        if principal.break_glass:
+            # ADR-0023 §2/§3. Hung off the resolved Principal rather than off the
+            # authenticator, so it covers the static path and the OIDC composite's
+            # fall-through to a break-glass key identically — the fall-through is the case
+            # that matters most, and it is the one easiest to miss.
+            from device_mcp_gateway.breakglass import note_break_glass_use
+
+            await note_break_glass_use(
+                request.app.state, principal, rid=_audit_rid(request), target=_audit_target(request)
+            )
     except HTTPException as exc:
         if exc.status_code == 401:
             audit_event(

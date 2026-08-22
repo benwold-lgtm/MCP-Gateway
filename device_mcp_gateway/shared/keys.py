@@ -157,6 +157,29 @@ class KeyBuilder:
         """ "Already completed" marker, so a redelivery is not re-executed (F-08)."""
         return self._k(f"result:{request_id}")
 
+    # --- break-glass activity (ADR-0023 §3) ----------------------------------
+
+    def break_glass_session(self, subject: str) -> str:
+        """Marker that ``subject`` is inside an *active* break-glass session.
+
+        **This key's expiry is the signal, not a cleanup detail.** Its absence is what
+        makes the next use a new *activation*: the key is (re)written with a TTL of the
+        session gap on every use, so continuous use during one incident stays one
+        activation however many calls it takes, and a use after a quiet gap is a new one.
+        """
+        return self._k(f"breakglass:{subject}:session")
+
+    def break_glass_window(self, subject: str) -> str:
+        """Hash of {activations, last_use} over the trailing review window.
+
+        TTL is refreshed on each *activation*, so the window slides from the last
+        activation rather than resetting on a fixed boundary. That is deliberate: a
+        credential reactivating every week is exactly the signal §3 asks to watch, and a
+        fixed window would zero the count underneath it. A credential quiet for a full
+        window starts clean, which is the reason this expires at all.
+        """
+        return self._k(f"breakglass:{subject}:window")
+
     # --- rate limiting -------------------------------------------------------
 
     def ratelimit(self, key: str) -> str:

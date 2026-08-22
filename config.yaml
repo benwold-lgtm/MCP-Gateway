@@ -76,6 +76,26 @@ gateway:
   # Deliver each key out of band TO THAT ONE PERSON. A shared team vault holding both makes
   # the audit record "alice" when it was Bob using Alice's key — attributable in form, wrong
   # in fact. ADR-0023 property 1 requires that custody be verified, not documented.
+  #
+  # EVERY USE IS LOUD. A request authenticated with a flagged credential emits a dedicated
+  # `auth.break_glass` audit record (severity=high, logged at WARNING), distinct from ordinary
+  # static-key authentication so it cannot read as unremarkable in the request log.
+  #
+  # On top of that, an ACTIVATION — a use that follows a quiet gap — emits
+  # `auth.break_glass.activated` (severity=critical, ERROR) and increments
+  # mcp_break_glass_activations_total. That is the notification trigger; alert on the metric
+  # (deploy/kubernetes/prometheus-rules.yaml ships the rules). Working an incident for hours
+  # is ONE activation however many calls it takes — notifying per request would bury the
+  # signal during exactly the incident it exists to announce.
+  #
+  # NOTHING HERE EVER BLOCKS. Reactivation frequency raises a review flag and nothing else: a
+  # call budget that cut off a legitimate incident response mid-session is the one failure a
+  # break-glass mechanism cannot afford. The tell worth watching is not call volume, it is a
+  # credential reactivating week after week — that means normal work is reaching for the
+  # emergency path and needs its own credential.
+  # break_glass_session_gap_minutes: 60   # quiet gap after which the next use is a new activation
+  # break_glass_review_window_days: 30    # trailing window the activations are counted over
+  # break_glass_review_threshold: 3       # more activations than this in the window → review flag
   # Federated identity (OIDC) — ADR-0007. When enabled, a request bearing a JWT is
   # validated against the IdP's JWKS and mapped to scopes via group_roles below; an
   # opaque token still falls back to the static keys above. KEEP at least one admin key

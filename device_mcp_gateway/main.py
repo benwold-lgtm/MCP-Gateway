@@ -44,6 +44,7 @@ from device_mcp_gateway.api import streamable_fleet as api_streamable_fleet
 # split and their dotted paths are part of the de-facto internal API.
 from device_mcp_gateway.api.dispatch import _GATEWAY_ID, _watch_tool_call_timeout  # noqa: F401
 from device_mcp_gateway.bootstrap import apply_gateway_bootstrap
+from device_mcp_gateway.breakglass import InMemoryBreakGlassActivity, RedisBreakGlassActivity
 from device_mcp_gateway.cfg import load_config, resolve_bind_host, resolve_mode, warn_unsafe_settings
 from device_mcp_gateway.lifecycle import (  # noqa: F401  (re-exported, see above)
     _LOOP_HEARTBEAT_INTERVAL,
@@ -298,6 +299,12 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # (shared across replicas) once Redis connects in the lifespan.
     _app.state.rate_limiter = InMemoryRateLimiter()
 
+    # --- Break-glass activation tracking (ADR-0023 §3) ---
+    # Same in-memory-then-Redis shape as the limiter above, and for the same reason: an
+    # activation must be counted once for the deployment, not once per replica. Unlike the
+    # limiter this one never refuses anything — it raises a review flag and nothing else.
+    _app.state.break_glass_activity = InMemoryBreakGlassActivity()
+
     # --- CORS (opt-in; configure cors.allowed_origins in config.yaml) ---
     _allowed_origins = cfg.get("cors", {}).get("allowed_origins", [])
     if _allowed_origins:
@@ -370,6 +377,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             # Shared, async rate limiter across gateway replicas.
             app.state.rate_limiter = RedisRateLimiter(redis_client)
             logger.info("Rate limiter using shared Redis storage")
+            app.state.break_glass_activity = RedisBreakGlassActivity(redis_client)
         else:
             await app.state.store.initialize()
             registry = app.state.registry
