@@ -325,6 +325,69 @@ who want it in-cluster.
 
 ---
 
+## Secret store availability
+
+> **Status: this section is forward-looking.** `ResolverKind.NETWORKED` is declared but **not
+> yet implemented** — `MountedFilesResolver` is the only backend that exists today, so there is
+> currently no way to configure a networked store and nothing here can be exercised. The
+> resolver-level circuit breaker and `ERR_SECRET_STORE_UNAVAILABLE` arrive with it (ADR-0018
+> §7). The section is written now because the *decisions* are settled and shape the resolver's
+> existing structure; treat it as the contract the first networked backend must meet, not as a
+> description of running behaviour.
+
+Only relevant if you configure a **networked** credential-resolver backend — Vault, a cloud
+secret manager. The default **mounted-files** backend (Kubernetes Secret/CSI volume, and
+Lite's local file tree) has no equivalent concern: per
+[ADR-0018 §7a](adr/0018-device-credentials-by-reference.md), it fails at **deploy time**
+(`FailedMount`, old pods keep serving), never at dispatch time, so there is no outage window
+for HA to shorten — and per §7c, the resolution cache is structurally absent for this
+backend (**TTL 0, read-through**) rather than merely configured off, since it buys nothing
+there and would otherwise hold a durable-shaped plaintext copy in memory for no benefit.
+Nothing below applies to it.
+
+**Failure behaviour.** Per [ADR-0018 §7](adr/0018-device-credentials-by-reference.md), the
+store is a fleet-wide dependency, distinct from any one device: an unreachable store opens a
+**resolver-level** circuit breaker (devices' own breakers stay closed and untouched), and
+every device resolving through it reports `ERR_SECRET_STORE_UNAVAILABLE`. Readiness
+deliberately does **not** fail — the gateway stays up, degraded, so the console and
+diagnostics remain reachable — but dispatch for any device on that backend stops until the
+store recovers.
+
+**It fails closed, not open.** A credential past its cache TTL (300s default, networked
+backends only) when the store is unreachable is refused, not served stale. This is a
+considered decision, not the cautious default: fail-open would risk dispatching an
+already-rotated-away credential, which produces a *worse* diagnosis than an honest
+`ERR_SECRET_STORE_UNAVAILABLE` — indistinguishable, at the device, from twenty unrelated
+auth failures. The corollary is direct: **outage duration and frequency are entirely what
+an under-provisioned store costs you.** There is no gateway-side setting that trades
+correctness back for availability here — HA on the store itself is the only lever.
+
+### HA options, best fit first
+
+**1 — Managed (cloud) — least ops, drop-in.** A cloud secret manager (AWS Secrets Manager,
+GCP Secret Manager, Azure Key Vault) presents one endpoint with HA already part of the
+service — nothing to configure beyond pointing the resolver at it. Preferred when a cloud is
+available, for the same reason it's preferred for Redis.
+
+**2 — Self-hosted Vault, HA mode — on-prem default.** Multiple Vault server nodes sharing
+integrated Raft storage (or a Consul backend), with automatic leader election and failover.
+Use a maintained deployment (the official Vault Helm chart in `ha` mode) rather than
+hand-rolling — the same reasoning as preferring a maintained Redis chart over a bespoke one.
+
+**3 — Single-node Vault or a single-instance secret service.** Works, but every restart or
+crash is a real, visible dispatch outage for every device on that backend, for as long as
+the outage lasts — the fail-closed decision above means this cost is not hidden or
+softened. Acceptable only where that downtime is genuinely tolerable.
+
+### What to avoid
+
+- **Treating fail-open as a substitute for HA.** It isn't offered as a configuration option
+  for exactly this reason: it would let an under-provisioned store's downtime be paid for in
+  credential-freshness risk instead of in visible, correctly-attributed unavailability. Fix
+  the store's deployment topology, not the gateway's failure mode.
+
+---
+
 ## Observability
 
 Each gateway and worker pod exposes Prometheus metrics on a dedicated port (`:9100`, separate from the `:8000` API). The UI/BFF and operators should treat **Prometheus and the read APIs as the observability surface — not pod log files** (see "UI/BFF sourcing" below).
