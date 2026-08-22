@@ -20,6 +20,7 @@ import concurrent.futures
 import os
 import time
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING, Optional, Union
 
 from fastapi import HTTPException, Request, Security
@@ -339,6 +340,46 @@ def _resolve_break_glass_key(ref_raw: str, resolver: Optional[object], name: str
         ) from exc
 
 
+#: Starting default from ADR-0023 §3 — a widely-used compliance rotation cadence, instrumented
+#: and tuned from operating history rather than fixed here.
+DEFAULT_BREAK_GLASS_EXPIRY_DAYS = 90
+
+#: §3's escalating notice: two weeks out, then three days out. Not a silent cutoff — a
+#: break-glass credential that expires quietly is discovered dead at the worst possible moment.
+_BREAK_GLASS_WARN_DAYS = (14, 3)
+
+
+def _break_glass_days_remaining(entry: dict, name: str, expiry_days: int, *, today: date) -> int:
+    """Days left on a flagged entry. Raises :class:`BreakGlassConfigError` if undatable.
+
+    ``issued`` is mandatory on a flagged entry for the same reason ``name`` is: an omitted
+    field must not silently produce the behaviour the ADR forbids. Without an issue date the
+    credential has indefinite validity, which is exactly what §3 says it must not have.
+    """
+    raw = entry.get("issued")
+    if not raw:
+        raise BreakGlassConfigError(
+            f"gateway.rbac[{name!r}] is break_glass and has no 'issued' date. Refusing to start — "
+            "a flagged credential carries a real lifetime (ADR-0023 §3), and an entry with no "
+            "issue date has indefinite validity, which is the thing that rule exists to prevent."
+        )
+    try:
+        issued = date.fromisoformat(str(raw))
+    except ValueError as exc:
+        raise BreakGlassConfigError(
+            f"gateway.rbac[{name!r}] has an unparseable 'issued' date {raw!r}; expected YYYY-MM-DD."
+        ) from exc
+    if issued > today:
+        # A future date extends validity, and the likeliest cause is a typo in the year. Left
+        # unchecked it is a silent grant of extra lifetime, which is the same class of error as
+        # an absent date.
+        raise BreakGlassConfigError(
+            f"gateway.rbac[{name!r}] has an 'issued' date in the future ({issued}). Refusing to "
+            "start — a future issue date silently extends the credential's lifetime."
+        )
+    return expiry_days - (today - issued).days
+
+
 def _break_glass_entries(cfg: dict) -> list[str]:
     """Names of the configured break-glass entries, for logging. Validates nothing."""
     out = []
@@ -375,6 +416,8 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
     _add(os.getenv("MCP_ADMIN_KEY"), "admin", "admin")
     _add(os.getenv("MCP_VIEWER_KEY"), "viewer", "viewer")
 
+    expiry_days = int(gateway.get("break_glass_expiry_days", DEFAULT_BREAK_GLASS_EXPIRY_DAYS))
+    dropped = 0
     resolver = None
     if any(isinstance(e, dict) and e.get("break_glass") for e in gateway.get("rbac", []) or []):
         from device_mcp_gateway.credentials import build_resolver
@@ -418,11 +461,52 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
                 "(ADR-0023 §1) — a literal in the config document fails 'never in configuration' "
                 "however the value was generated."
             )
+        # 3. A real lifetime (§3). `issued` is mandatory for the same reason `name` is.
+        remaining = _break_glass_days_remaining(entry, name, expiry_days, today=date.today())
+
+        # **An expired credential stops working; it does NOT stop the gateway.** The ADR asks
+        # for a real cutoff rather than indefinite validity, and says nothing about startup —
+        # so the choice is ours, and only one direction is defensible. Refusing to boot on an
+        # expired break-glass entry converts a credential-hygiene lapse into an outage of the
+        # mechanism that exists for outages: the operator reaching for break-glass during an
+        # IdP failure would find the gateway itself refusing to start. So the key is dropped,
+        # loudly, and everything else keeps serving.
+        if remaining <= 0:
+            logger.error(
+                f"Break-glass credential '{name}' EXPIRED {-remaining} day(s) ago and has been "
+                f"DROPPED — it will not authenticate. Reissue it: generate a new key, write it "
+                f"to its secret:// location, and set issued to today. If this is the only "
+                f"break-glass entry and OIDC is unavailable, nobody can reach this gateway."
+            )
+            dropped += 1
+            continue
+        if remaining <= _BREAK_GLASS_WARN_DAYS[1]:
+            logger.warning(
+                f"Break-glass credential '{name}' expires in {remaining} day(s). Reissue it now "
+                "— once it lapses it stops authenticating, and that is discovered during the "
+                "next incident rather than before it."
+            )
+        elif remaining <= _BREAK_GLASS_WARN_DAYS[0]:
+            logger.warning(f"Break-glass credential '{name}' expires in {remaining} day(s); schedule a reissue.")
+
         _add(_resolve_break_glass_key(str(raw), resolver, name), role, name, break_glass=True)
 
-    enabled = len(keys) > 0
+    # **`enabled` tracks whether keys were CONFIGURED, not whether they survived.** An expired
+    # break-glass entry is dropped from `keys` above, and if it was the only key configured
+    # then `len(keys) == 0` — which previously meant "no auth configured anywhere" and served
+    # every request as ANONYMOUS with full access. A credential lapsing must produce a 401,
+    # never an open gateway: configured-but-expired and never-configured are opposite states
+    # that happened to produce the same count.
+    enabled = len(keys) > 0 or dropped > 0
     if enabled:
         flagged = _break_glass_entries(cfg)
+        if not keys:
+            logger.error(
+                f"Every configured API key has expired ({dropped} break-glass entry/entries "
+                "dropped). Auth stays ENABLED — every request will now be refused with 401 "
+                "rather than served anonymously — but nothing can authenticate until a key is "
+                "reissued."
+            )
         logger.info(
             f"Gateway static-key auth: {len(keys)} API key(s) configured"
             + (f"; {len(flagged)} break-glass ({', '.join(flagged)})" if flagged else "")

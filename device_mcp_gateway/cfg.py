@@ -47,6 +47,8 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "secret_keys": list,
         "allow_plaintext_credentials": bool,
         "allow_weak_keys": bool,
+        # ADR-0023 §3 — lifetime of a `break_glass: true` entry, in days. Default 90.
+        "break_glass_expiry_days": int,
         "max_body_bytes": int,
         "read_cache_ttl": _NUM,
         "trust_proxy_headers": bool,
