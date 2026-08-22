@@ -27,6 +27,38 @@ gateway:
   #   - name: admin-cli
   #     key: "change-me-admin-token"
   #     role: admin
+  #
+  # BREAK-GLASS entries (ADR-0023). Add `break_glass: true` to an entry and it stops being
+  # an ordinary static key: it is one individually-generated, individually-held credential
+  # per authorized person, so a break-glass action is attributable to a human rather than to
+  # "the admin key". Ordinary entries above are untouched — CI keys and machine credentials
+  # should NOT be flagged, or routine automation becomes noisy for no security benefit.
+  #
+  # A flagged entry is held to two rules, and the gateway REFUSES TO START if either is
+  # broken. There is no allow_... override, deliberately: a misconfigured break-glass entry
+  # is not a weaker working one, it is one the audit cannot name.
+  #
+  #   1. `name` is MANDATORY. Without it the audit subject falls back to the role, so two
+  #      people holding two different credentials would both appear as "key:admin" — the
+  #      shared-anonymous-credential problem this flag exists to close, arriving through an
+  #      omitted field instead of a shared key.
+  #   2. `key` is a secret:// REFERENCE, never a literal. A literal fails "never in
+  #      configuration" however carefully the value was generated: the document still
+  #      carries the credential. Requires gateway.credentials.root (or MCP_CREDENTIAL_ROOT).
+  #
+  # rbac:
+  #   - name: alice
+  #     break_glass: true
+  #     key: "secret://t-3f9a1c2b7d4e8065/break-glass/alice#key"
+  #     role: admin
+  #   - name: bob
+  #     break_glass: true
+  #     key: "secret://t-3f9a1c2b7d4e8065/break-glass/bob#key"
+  #     role: admin
+  #
+  # Deliver each key out of band TO THAT ONE PERSON. A shared team vault holding both makes
+  # the audit record "alice" when it was Bob using Alice's key — attributable in form, wrong
+  # in fact. ADR-0023 property 1 requires that custody be verified, not documented.
   # Federated identity (OIDC) — ADR-0007. When enabled, a request bearing a JWT is
   # validated against the IdP's JWKS and mapped to scopes via group_roles below; an
   # opaque token still falls back to the static keys above. KEEP at least one admin key

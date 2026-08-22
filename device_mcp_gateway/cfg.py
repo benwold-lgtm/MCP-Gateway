@@ -38,6 +38,10 @@ _CONFIG_SCHEMA: dict[str, Any] = {
     "gateway": {
         "api_key": str,
         "allow_anonymous": bool,
+        # A list of {name, key, role} entries. An entry may also carry `break_glass: true`
+        # (ADR-0023), which makes `name` mandatory and requires `key` to be a secret://
+        # reference rather than a literal — both enforced in rbac.py, fatally, with no
+        # allow_... override.
         "rbac": list,
         "secret_key": str,
         "secret_keys": list,
