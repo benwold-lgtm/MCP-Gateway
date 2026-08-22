@@ -15,6 +15,8 @@ the audit-log ``subject`` stay put.
 from __future__ import annotations
 
 import hmac
+import asyncio
+import concurrent.futures
 import os
 import time
 from dataclasses import dataclass
@@ -85,6 +87,10 @@ class Principal:
     subject: str
     scopes: frozenset[str]
     auth_method: str
+    #: True when this principal authenticated with a ``break_glass: true`` credential
+    #: (ADR-0023). Carried on the Principal rather than recomputed at each call site so the
+    #: audit event, the metrics and the reactivation-frequency signal all read one fact.
+    break_glass: bool = False
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -284,6 +290,64 @@ class CompositeAuthenticator:
         return principal
 
 
+class BreakGlassConfigError(ValueError):
+    """A ``break_glass: true`` entry is malformed. Always fatal, in every mode.
+
+    Unlike the weak-key gate, this has no ``allow_...`` override. A misconfigured break-glass
+    entry is not a weaker version of a working one — it is an entry that would authenticate
+    somebody the audit cannot name, which is the whole problem ADR-0023 exists to close.
+    """
+
+
+def _resolve_break_glass_key(ref_raw: str, resolver: Optional[object], name: str) -> str:
+    """Read a flagged entry's key through the ADR-0018 resolver.
+
+    Startup is synchronous and ``CredentialResolver.resolve`` is not, so the coroutine is run
+    here. Reusing the resolver rather than reading the file directly is deliberate: it carries
+    the ownership checks that decide whether a credential file is actually private to this
+    workload, and a second reader would be a second place for that policy to drift.
+    """
+    from device_mcp_gateway.credentials import CredentialRef, ResolverError
+
+    if resolver is None:
+        raise BreakGlassConfigError(
+            f"gateway.rbac[{name!r}] is break_glass but no credential resolver is configured. "
+            "A flagged entry takes a secret:// reference (ADR-0023), which needs "
+            "gateway.credentials.root (or MCP_CREDENTIAL_ROOT) set."
+        )
+    try:
+        ref = CredentialRef.parse(ref_raw)
+    except ResolverError as exc:
+        raise BreakGlassConfigError(f"gateway.rbac[{name!r}] has an unusable secret reference: {exc}") from exc
+
+    async def _go() -> str:
+        return await resolver.resolve(ref)  # type: ignore[attr-defined]
+
+    try:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(_go())
+        # Already inside a loop (a test, or an embedded host). Run it on its own.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _go()).result()
+    except ResolverError as exc:
+        raise BreakGlassConfigError(
+            f"gateway.rbac[{name!r}] is break_glass and its key could not be resolved: {exc}. "
+            "Refusing to start — a break-glass path that is broken is discovered during the "
+            "incident it exists for."
+        ) from exc
+
+
+def _break_glass_entries(cfg: dict) -> list[str]:
+    """Names of the configured break-glass entries, for logging. Validates nothing."""
+    out = []
+    for entry in (cfg.get("gateway", {}) or {}).get("rbac", []) or []:
+        if isinstance(entry, dict) and entry.get("break_glass"):
+            out.append(str(entry.get("name") or "<unnamed>"))
+    return out
+
+
 def build_static_authenticator(cfg: dict) -> Authenticator:
     """Build the static-API-key Authenticator from config + env.
 
@@ -297,20 +361,72 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
     gateway = cfg.get("gateway", {})
     keys: dict[str, Principal] = {}
 
-    def _add(token: Optional[str], role: str, name: str) -> None:
+    def _add(token: Optional[str], role: str, name: str, *, break_glass: bool = False) -> None:
         if not token:
             return
-        keys[token] = Principal(subject=f"key:{name}", scopes=scopes_for_role(role), auth_method="api_key")
+        keys[token] = Principal(
+            subject=f"key:{name}",
+            scopes=scopes_for_role(role),
+            auth_method="break_glass" if break_glass else "api_key",
+            break_glass=break_glass,
+        )
 
     _add(os.getenv("MCP_GATEWAY_API_KEY") or gateway.get("api_key"), "admin", "legacy")
     _add(os.getenv("MCP_ADMIN_KEY"), "admin", "admin")
     _add(os.getenv("MCP_VIEWER_KEY"), "viewer", "viewer")
+
+    resolver = None
+    if any(isinstance(e, dict) and e.get("break_glass") for e in gateway.get("rbac", []) or []):
+        from device_mcp_gateway.credentials import build_resolver
+
+        resolver = build_resolver(cfg)
+
     for entry in gateway.get("rbac", []) or []:
-        _add(entry.get("key"), entry.get("role", "viewer"), entry.get("name") or entry.get("role", "viewer"))
+        role = entry.get("role", "viewer")
+        if not entry.get("break_glass"):
+            _add(entry.get("key"), role, entry.get("name") or role)
+            continue
+
+        # ── ADR-0023: a flagged entry is held to two rules, both fatal ──────────────────
+        #
+        # 1. `name` is mandatory. Without it the loop above falls back to the ROLE, so two
+        #    people holding two different break-glass credentials would both audit as
+        #    `key:admin` — the shared-anonymous-credential problem this ADR exists to close,
+        #    reappearing through an omitted field rather than a shared key. It is precisely
+        #    the kind of gap that looks like nothing in review.
+        name = entry.get("name")
+        if not name or not str(name).strip():
+            raise BreakGlassConfigError(
+                "a gateway.rbac entry has break_glass: true and no name. Refusing to start — "
+                "an unnamed flagged entry would audit as 'key:<role>', which is indistinguishable "
+                "from every other holder and defeats the attribution this flag exists for "
+                "(ADR-0023 §2)."
+            )
+        name = str(name).strip()
+
+        # 2. The key is a `secret://` REFERENCE, never a literal. `gateway.rbac[].key` as
+        #    originally specified reads the value straight out of the config document, which
+        #    fails ADR-0017 §4's "never in configuration" regardless of how the value was
+        #    generated or delivered — the document still carries the credential.
+        raw = entry.get("key")
+        if not raw:
+            raise BreakGlassConfigError(f"gateway.rbac[{name!r}] is break_glass and has no key.")
+        if not str(raw).startswith("secret://"):
+            raise BreakGlassConfigError(
+                f"gateway.rbac[{name!r}] is break_glass but its key is a literal value. A flagged "
+                "entry takes a secret:// reference resolved through the credential store "
+                "(ADR-0023 §1) — a literal in the config document fails 'never in configuration' "
+                "however the value was generated."
+            )
+        _add(_resolve_break_glass_key(str(raw), resolver, name), role, name, break_glass=True)
 
     enabled = len(keys) > 0
     if enabled:
-        logger.info(f"Gateway static-key auth: {len(keys)} API key(s) configured")
+        flagged = _break_glass_entries(cfg)
+        logger.info(
+            f"Gateway static-key auth: {len(keys)} API key(s) configured"
+            + (f"; {len(flagged)} break-glass ({', '.join(flagged)})" if flagged else "")
+        )
         for name, why in weak_static_keys(cfg):
             logger.warning(
                 f"Gateway API key '{name}' is weak ({why}). It is a full bearer credential — "
