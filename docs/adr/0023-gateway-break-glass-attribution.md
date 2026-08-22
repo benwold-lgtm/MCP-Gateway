@@ -85,9 +85,17 @@ entries that are actually break-glass, leaving every other static-key use case a
    resolver ADR-0018 built for device credentials, rather than reading a literal — the mechanism
    already exists, this is not new machinery.
 2. **Audit and notification.** Using a `break_glass: true` credential emits a dedicated
-   high-severity audit event, distinct from ordinary static-key authentication, and triggers the
-   same tenant notification the console-level break-glass path already uses — not folded into
-   routine request logging where it would read as unremarkable.
+   high-severity audit event, distinct from ordinary static-key authentication, and fires a
+   dedicated Prometheus alert (`MCPBreakGlassActivated`, `severity: page`, deliberately with
+   no `for:` delay — every SLO and operational alert in that file waits 2–15 minutes to filter
+   transients, and an activation is not a transient; the requirement is loud, not
+   eventually-consistent) — not folded into routine request logging where it would read as
+   unremarkable. This is the metrics plane, not the console-level break-glass path in the UI
+   spec — that path is unbuilt, and citing it here would be a false claim of coverage. The
+   metrics plane is the correct delivery mechanism regardless: per ADR-0017 §5, it's *"the
+   only thing a provider sees without a tenant's involvement, so it must be good enough to run
+   an estate from"* — break-glass activation is exactly the kind of signal that requirement was
+   written for.
 
    **The audit subject must be the configured name, and a flagged entry without one must refuse
    to load — never fall back to the role name.** A `break_glass: true` entry with no `name` set
@@ -153,9 +161,12 @@ dividing line:
 deployment the BFF's *password* sessions already relay this key on every request — `upstream_bearer`
 returns `None` for a password session precisely so the client falls back to its configured admin
 token. That is continuous, ordinary traffic on the credential the rule above would flag: it would
-fire a high-severity event and a tenant notification per request, and the 90-day expiry would take
-the password path down with it. The flag is selective by design — CI, test fixtures and persistent
-machine credentials are meant to stay unflagged — so the answer is to give the BFF's password path
+emit a high-severity audit record on **every request**, page on the first request after each quiet
+gap — so roughly daily, whenever traffic pauses longer than the session gap — and permanently trip
+the reactivation-frequency review flag, since ordinary daily use crosses any threshold meant to
+catch emergencies. The 90-day expiry would then take the password path down entirely. The flag is
+selective by design — CI, test fixtures and persistent machine credentials are meant to stay
+unflagged — so the answer is to give the BFF's password path
 its own **named, unflagged** `gateway.rbac` entry, not to widen the condition. `gateway.api_key`
 then becomes genuinely emergency-only in an OIDC deployment, which is what this rule assumes rather
 than what is true today, and the password path gains an attributable subject instead of `key:legacy`
