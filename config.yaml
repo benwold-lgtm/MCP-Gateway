@@ -55,6 +55,23 @@ gateway:
   #     break_glass: true
   #     key: "secret://t-3f9a1c2b7d4e8065/break-glass/bob#key"
   #     role: admin
+  #     issued: "2026-08-22"
+  #
+  #   3. `issued` is MANDATORY (YYYY-MM-DD) and is the date the key was generated. A flagged
+  #      credential carries a real lifetime; an entry with no issue date has indefinite
+  #      validity, which is what the lifetime rule exists to prevent. A date in the FUTURE is
+  #      also refused — the likeliest cause is a typo in the year, and it silently grants
+  #      extra lifetime.
+  #
+  # Lifetime defaults to 90 days and is tunable. Warnings escalate at 14 days and again at 3
+  # days before expiry, so it is never discovered dead during the incident it exists for.
+  # break_glass_expiry_days: 90
+  #
+  # AN EXPIRED CREDENTIAL STOPS WORKING; IT DOES NOT STOP THE GATEWAY. The key is dropped and
+  # logged loudly, and everything else keeps serving — refusing to boot would turn a
+  # credential-hygiene lapse into an outage of the very mechanism that exists for outages.
+  # Note that dropping the last key does NOT re-enable the no-auth single-operator path:
+  # requests are refused with 401, never served anonymously.
   #
   # Deliver each key out of band TO THAT ONE PERSON. A shared team vault holding both makes
   # the audit record "alice" when it was Bob using Alice's key — attributable in form, wrong
