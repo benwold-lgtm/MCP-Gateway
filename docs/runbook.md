@@ -465,6 +465,29 @@ generations. The message names which:
   or use a portable archive.
 - *"needs the passphrase it was exported with"* — portable archive, add `passphrase`.
 
+**Check `credential_warnings` and `credential_store_error` too.** A restore resolves every
+archived `credential_ref` before writing anything, so the dry run already knows:
+
+```bash
+… "$GW/v1/admin/restore" | jq '.credential_store_error, .credential_warnings,
+     [.devices[] | select(.credential_warning) | {hostname, credential_warning}]'
+```
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `credential_store_error` set | **The secret store itself** is unusable on this stack — unmounted, wrong path, or wrong ownership. Every by-reference device is affected, so per-device results are deliberately **not** produced | Fix the store and re-run. Do not go checking individual references — one mount is wrong, not N references (ADR-0018 §7) |
+| `credential_warnings: N` | N devices reference a secret that does not exist **in this stack's store**. The store is healthy and answering "no" | Provision those secrets, then the next dispatch picks them up. No re-registration needed |
+| both quiet | Every reference in the archive resolves here | — |
+
+A device with an unresolved reference **still restores**, deliberately: the archive carries
+configuration and the configuration is valid. Refusing would mean a DR rebuild fails wholesale
+whenever the registry comes back before the secret store. Provisioning the secret is a separate
+operation ([ADR-0018](adr/0018-device-credentials-by-reference.md) §2a) and always was.
+
+Unlike `credential_state: needs_reconnect`, this is **not** recorded on the device afterwards —
+nothing tells the gateway when you add the secret, so a stored flag would go stale. The device's
+own status reports it at dispatch until it resolves.
+
 **Check `fingerprint_warnings` on every restore.** It counts devices whose endpoint pin
 ([ADR-0015](adr/0015-endpoint-fingerprinting.md)) could not be carried across intact, and
 each one also carries a `fingerprint_warning` naming why. It is reported at the top level
