@@ -41,6 +41,12 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   must not be able to reinstate a device that a fresh registration would refuse. The **dry run
   predicts it**, so the preview and the apply agree.
 
+  All three guarantees, and both refusals, were then **verified on a live multi-replica
+  cluster** rather than only in the suite — including the one a unit test can only approximate:
+  a device registered with an inline credential before the gate went on kept dispatching
+  end-to-end *across a restart of every gateway and worker pod*, which is precisely the moment
+  a constructor check would have taken it out.
+
 - **A startup inventory of devices still holding a credential inline.** The number nobody could
   answer before: §1's migration is "move every device to a reference, then turn the gate on",
   and a fleet had no way to know how far through that it was — the gate could only be flipped

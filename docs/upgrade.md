@@ -225,6 +225,12 @@ Migrate before you flip it, not after:
 2. **Move each secret into the store**, then update the device to reference it:
    `{"auth": {"credential_ref": "secret://<tenant>/devices/<name>#api-key"}}`, or for OAuth2
    `client_secret_ref` / `password_ref`.
+   ⚠️ **Check the value, not just the path.** A reference that resolves is not a reference
+   that authenticates: the gateway can only tell you the secret exists, never that it is the
+   one that device accepts. Point a device at a populated-but-wrong path and everything looks
+   healthy until the next call the upstream actually authenticates — and against an upstream
+   that ignores the header, never. Confirm each device still reaches its upstream after the
+   switch, and treat a device you cannot reach as one you have not migrated.
 3. **Flip the gate** once the inventory reaches zero.
 
 What changes when it is on, and what does not:
@@ -237,9 +243,13 @@ What changes when it is on, and what does not:
 | Restoring an archive containing inline credentials | **Refused per device**, and the dry run says so first |
 | A `grant_type=refresh_token` device | **Unaffected.** Its token is gateway-minted and cannot be by reference (§1a); only its `client_secret` must be |
 
-⚠️ **The archive is the one to plan for.** With the gate on, an archive taken from a legacy
-stack cannot be restored into it — every inline device fails. Re-export after migrating, or the
-backup you are keeping for a disaster is one that stack will refuse.
+⚠️ **The archive is the one to plan for, and not only the old ones.** Flipping the gate does
+not rewrite the devices already stored, so a backup taken *from the gated stack itself* still
+carries their inline credentials and still fails per device on restore — measured on a live
+cluster, where a fresh export of a gated stack came back `would_restore: 5, failed: 2`. The
+archive only becomes restorable once the **inventory reaches zero**; that, not the gate, is
+what makes a backup usable again. Until then the backup you are keeping for a disaster is one
+that stack will refuse.
 
 ## Embedded mode
 
