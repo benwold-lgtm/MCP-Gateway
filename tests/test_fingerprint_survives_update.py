@@ -28,6 +28,7 @@ actually touches.
 
 from __future__ import annotations
 
+import copy
 import itertools
 
 import pytest
@@ -39,7 +40,7 @@ from device_mcp_gateway.backup.restore import _FINGERPRINT_FIELDS
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.security import fingerprint as fp
 from device_mcp_gateway.shared.crypto import CredentialCodec
-from device_mcp_gateway.shared.registry_backend import MemoryRegistryBackend
+from device_mcp_gateway.shared.registry_backend import DeviceConfig, MemoryRegistryBackend
 
 SPKI_A = "a" * 64
 SPKI_B = "b" * 64
@@ -63,10 +64,34 @@ def _pinned_fields(spki: str | None = SPKI_A, *, state: str = fp.STATE_PINNED, *
     return fields
 
 
+class _StoringBackend(MemoryRegistryBackend):
+    """``MemoryRegistryBackend`` that STORES rather than aliases.
+
+    The stock double keeps the caller's ``DeviceConfig`` by reference on ``set_device`` and
+    hands the same object back from ``get_device``. Every assertion about "was it
+    persisted?" is then answered by the object the code under test is still holding, so
+    writing to the backend and mutating the returned record become indistinguishable — two
+    mutants of this fix survived a full pass because of it.
+
+    The real backend serialises to a Redis hash and parses a fresh object back, so copying
+    at both boundaries is the faithful imitation. (``RedisRegistryBackend`` over fakeredis
+    would be more faithful still, but the installed fakeredis ignores
+    ``decode_responses=True`` and returns bytes keys, so ``get_device`` silently yields
+    ``None`` — a double that lies in a different direction.)
+    """
+
+    async def set_device(self, hostname, config):
+        await super().set_device(hostname, copy.copy(config))
+
+    async def get_device(self, hostname):
+        cfg = await super().get_device(hostname)
+        return copy.copy(cfg) if cfg is not None else None
+
+
 async def _distributed(hostname: str = "dev1", *, auth=None, **pin):
     """A distributed registry holding one pinned device."""
     codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
-    backend = MemoryRegistryBackend()
+    backend = _StoringBackend()
     reg = Registry(config={"mode": "distributed"}, backend=backend, codec=codec)
     await reg.register_device(hostname, "http://dev1", auth=auth)
     await backend.update_device_fields(hostname, **_pinned_fields(**pin))
@@ -160,9 +185,7 @@ async def test_a_per_device_policy_survives_an_edit():
     "is there a pin?". A device can carry a policy before it has ever been observed, and
     that is exactly the window where dropping the policy matters most.
     """
-    reg, backend = await _distributed(
-        spki=None, state=fp.STATE_UNPINNED, fingerprint_policy=fp.POLICY_ENFORCE
-    )
+    reg, backend = await _distributed(spki=None, state=fp.STATE_UNPINNED, fingerprint_policy=fp.POLICY_ENFORCE)
 
     await reg.replace_device("dev1", base_url="http://dev1", rate_limit_rps=7, keep_auth=True)
 
@@ -214,6 +237,49 @@ async def test_a_device_that_was_never_pinned_is_left_alone():
     assert not any("tls_spki_sha256" in fields for _, fields in writes)
     after = await backend.get_device("dev1")
     assert after.fingerprint_state == fp.STATE_UNPINNED
+
+
+@pytest.mark.asyncio
+async def test_the_pin_is_actually_persisted_not_just_set_on_the_object():
+    """Storage and the returned object are two claims, and only one of them is the fix.
+
+    Separated because the stock in-memory double conflates them (see ``_StoringBackend``):
+    a fix that only mutated the record it hands back would leave the *stored* device
+    unpinned, and the next read — the next health check — would re-TOFU it exactly as
+    before, while the response to the operator's edit looked correct.
+    """
+    reg, backend = await _distributed()
+
+    await reg.replace_device("dev1", base_url="http://dev1", rate_limit_rps=7, keep_auth=True)
+
+    stored = await backend.get_device("dev1")
+    assert stored.fingerprint_state == fp.STATE_PINNED
+    assert stored.tls_spki_sha256 == SPKI_A
+    assert stored.fingerprint_pinned_at == 1700000000.0
+
+
+def test_a_trust_record_survives_the_redis_hash_encoding():
+    """The other half of persistence: the wire format has to carry it.
+
+    A trust record contains ``None``s — an empty pending slot, an absent policy — and the
+    Redis hash has no null. ``update_device_fields`` writes ``""`` for them, so the parse
+    has to map ``""`` back to ``None``; a round trip that produced the *string* ``"None"``
+    would leave a device whose ``pending_tls_spki_sha256`` is the four characters N-o-n-e,
+    which compares unequal to every real SPKI and equal to nothing — an endless mismatch.
+
+    Tested against the real serializer rather than a Redis double, because it is the
+    serializer that has to be right.
+    """
+    cfg = DeviceConfig(hostname="dev1", base_url="http://dev1", **_pinned_fields())
+    hashed = cfg.to_redis_hash()
+
+    assert all(isinstance(v, str) for v in hashed.values()), "a Redis hash holds strings"
+    back = DeviceConfig.from_redis_hash(hashed)
+
+    for field in fp.TRUST_FIELDS:
+        assert getattr(back, field) == getattr(cfg, field), field
+    assert back.pending_tls_spki_sha256 is None
+    assert back.fingerprint_policy is None
 
 
 # --- embedded: the same guarantee at the layer an operator touches ------------------

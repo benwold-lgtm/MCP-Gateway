@@ -288,9 +288,7 @@ class Registry:
                 )
                 cfg = await self._carry_credential_state(cfg, prev)
                 return await self._carry_fingerprint(cfg, prev)
-            cfg = await self._register_distributed(
-                hostname, base_url, spec_url, auth, transport, rate_limit_rps, up
-            )
+            cfg = await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps, up)
             return await self._carry_fingerprint(cfg, prev)
         async with self._lock_for(hostname):
             existing = self._profiles.get(hostname)
