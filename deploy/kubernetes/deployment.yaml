@@ -61,7 +61,7 @@ spec:
           #
           # Using a MOVING tag instead (:latest, :lite) requires imagePullPolicy: Always —
           # with IfNotPresent a node keeps running whatever it cached, indefinitely.
-          image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.3.3@sha256:93298ddc46f8d8c9aea168dca081fa3f59021fb3f0ddae99ada31716ba9c1fa8
+          image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.3.5@sha256:0682362c1e374fb4322d5e2fd43a2340b0fc1dd7e0cd56fd3511363cb6ce169a
           # Correct for a digest/immutable tag: the bits can't change under a fixed digest,
           # so re-pulling would be pure overhead.
           imagePullPolicy: IfNotPresent
@@ -193,19 +193,62 @@ spec:
             failureThreshold: 3
       volumes:
         - name: credentials
-          secret:
-            # ADR-0018 credential store, and from ADR-0023 slice 4 also the home of any
-            # `gateway.rbac` entry whose key is held by reference. `optional: true` so a
-            # stack that uses neither still starts — the resolver is only built when
-            # something actually holds a secret:// reference.
-            secretName: gateway-credentials
-            optional: true
-            # ⚠️ 0440, and `fsGroup` below, are both load-bearing and were measured on a
-            # live cluster, not chosen. A Kubernetes Secret volume is ROOT-OWNED and cannot
-            # be chowned to the workload, so a non-root pod reaches it only as group or as
+          # ADR-0018 credential store, and from ADR-0023 slice 4 the home of any
+          # `gateway.rbac` entry whose key is held by reference.
+          #
+          # **A `projected` volume with one source per Secret, not one Secret holding
+          # everything.** ADR-0023 property 1 requires a break-glass credential to be
+          # delivered as an *individual* Kubernetes Secret whose RoleBindings grant exactly
+          # one subject read access, checked as a pipeline step rather than trusted to a
+          # runbook line. One Secret has one ACL, so packing every credential into a single
+          # `gateway-credentials` Secret makes that custody property unachievable. Projected
+          # sources keep per-Secret RBAC while still presenting a single mount.
+          #
+          # The resolver reads `<root>/<namespace>/<path...>/<key>`, so each source's
+          # `items[].path` IS what the `secret://` reference resolves to — always at least
+          # three components, which is why a flat mount cannot serve one.
+          projected:
+            # ⚠️ 0440, and `fsGroup` below, are load-bearing and were measured on a live
+            # cluster, not chosen. A Kubernetes Secret volume is ROOT-OWNED and cannot be
+            # chowned to the workload, so a non-root pod reaches it only as group or as
             # world. The resolver refuses world-readable credentials outright, so 0444 fails
             # closed and 0400 is simply unreadable by uid 1000. Group is the only door.
             defaultMode: 0440
+            sources:
+              # Every source is `optional: true`, so a stack using none of them still starts —
+              # the resolver is built only when something actually holds a reference.
+              #
+              # The console's own gateway token (ADR-0023 slice 4). Uncomment together with
+              # the `bff-password-sessions` entry in configmap.yaml.
+              # - secret:
+              #     name: gateway-credentials
+              #     optional: true
+              #     items:
+              #       - key: bff-token
+              #         path: console/bff/token
+              #
+              # One Secret per authorized person — the shape property 1 requires.
+              # - secret:
+              #     name: break-glass-alice
+              #     optional: true
+              #     items:
+              #       - key: key
+              #         path: <tenant>/break-glass/alice/key
+              #
+              # One Secret per device credential (ADR-0018).
+              # - secret:
+              #     name: device-cred-example
+              #     optional: true
+              #     items:
+              #       - key: api-key
+              #         path: <tenant>/devices/example/api-key
+              #
+              # A projected volume needs at least one source, so this keeps the manifest
+              # valid until a real credential is added. With the Secret absent it projects
+              # nothing and the mount is empty.
+              - secret:
+                  name: gateway-credentials
+                  optional: true
         - name: config
           configMap:
             name: gateway-config
