@@ -106,6 +106,26 @@ class DeviceConfig:
     # tuned to the least critical device on it.
     fingerprint_policy: str | None = None
 
+    # --- Credential condition (ADR-0018 §3) --------------------------------------------
+    # "ok" | "needs_reconnect".
+    #
+    # ORTHOGONAL TO REACHABILITY, on purpose. A `needs_reconnect` device may be perfectly
+    # reachable, its pod running, its spec fetching — what it cannot do is authenticate,
+    # because its OAuth2 refresh token was excluded from the archive it was restored from
+    # and nothing but a human can re-mint one. Folding this into `reachable` would make a
+    # health reading answer an authorization question, and the operator response to the two
+    # is entirely different: wait/investigate versus go and consent.
+    #
+    # `fingerprint_state` is the precedent and it is close enough to be decisive — likewise
+    # a device that works but needs a human decision, likewise carried as its own field
+    # rather than as a value of reachability.
+    #
+    # It is also the precedent for a defect NOT to repeat: `fingerprint_state` is missing
+    # from `DeviceSummary`, so a device awaiting approval is invisible in the fleet list and
+    # findable only by opening it. A device needing reconnection is precisely what an
+    # operator scans a list for after a restore, so this one ships on the list projection.
+    credential_state: str = "ok"
+
     # --- serialisation helpers ---
 
     def to_redis_hash(self) -> dict[str, str]:
@@ -165,6 +185,11 @@ class DeviceConfig:
             fingerprint_pinned_at=float(h.get("fingerprint_pinned_at", "0") or "0"),
             pending_tls_spki_sha256=_opt_str(h.get("pending_tls_spki_sha256", "")),
             fingerprint_policy=_opt_str(h.get("fingerprint_policy", "")),
+            # `or "ok"`, matching every field above it: a hash written before ADR-0018 §3 has
+            # no key at all, and to_redis_hash writes "" for an unset value. An empty
+            # credential_state would match neither branch of the comparison and the device
+            # would read as neither healthy nor needing a human.
+            credential_state=h.get("credential_state", "") or "ok",
         )
 
 

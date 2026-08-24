@@ -23,6 +23,8 @@ requires that it fails *while its neighbours succeed* — per-device, not per-ba
 
 from __future__ import annotations
 
+import itertools
+
 import json
 
 import pytest
@@ -43,12 +45,34 @@ from device_mcp_gateway.backup.restore import (
 )
 from device_mcp_gateway.shared.crypto import CredentialCodec
 
+#: One working directory per app built in this module — see `_client`.
+_STACK_SEQ = itertools.count()
+
 ADMIN_KEY = "a" * 40
 DEVICE_SECRET = "SUPER-SECRET-DEVICE-KEY-9f3a2b"
 CHEAP_KDF = {"argon2_memory_cost_kib": 8, "argon2_iterations": 1, "argon2_lanes": 1, "passphrase_min_length": 16}
 
 
-def _client(monkeypatch, *, secret_key: str, allow_private: bool = True):
+def _client(monkeypatch, tmp_path, *, secret_key: str, allow_private: bool = True):
+    # Embedded mode persists to ``storage.db_path``, which defaults to the RELATIVE
+    # "./data/devices.db" — so without this every test here writes its devices into the
+    # repository's own working directory and leaves them there. They then load on the next
+    # run of ANY embedded test, whose lifespan probes each one; a fleet of unreachable
+    # `127.0.0.1:9` devices turns a 0.7s startup into 18s and makes `test_main.py`'s
+    # shared-app livez test fail with "Semaphore is bound to a different event loop".
+    #
+    # Verified rather than assumed: `origin/main` fails that test identically once the
+    # leaked database is put in place, and passes without it. Chdir-ing into `tmp_path`
+    # keeps the relative default pointing somewhere pytest cleans up.
+    #
+    # A fresh directory PER CLIENT, not per test: several tests here build two stacks to
+    # export from one and restore into the other, and a shared store would couple them.
+    # (They get away with it today only because a `TestClient` used without `with` never
+    # runs the lifespan, so nothing ever reads the file back — these tests leak writes and
+    # perform no loads. That is not a property worth depending on.)
+    stack_dir = tmp_path / f"stack-{next(_STACK_SEQ)}"
+    stack_dir.mkdir()
+    monkeypatch.chdir(stack_dir)
     monkeypatch.setenv("MCP_ADMIN_KEY", ADMIN_KEY)
     monkeypatch.setenv("MCP_SECRET_KEY", secret_key)
     monkeypatch.setenv("MCP_ALLOW_PRIVATE_TARGETS", "true" if allow_private else "false")
@@ -83,7 +107,7 @@ def _hostnames(client):
 # --- The round trip ---------------------------------------------------------
 
 
-def test_export_wipe_restore_returns_the_fleet_and_its_credentials(monkeypatch):
+def test_export_wipe_restore_returns_the_fleet_and_its_credentials(monkeypatch, tmp_path):
     """The whole point of the feature, end to end, including the credential.
 
     A restore that reinstates hostnames but loses credentials is the failure that looks
@@ -91,7 +115,7 @@ def test_export_wipe_restore_returns_the_fleet_and_its_credentials(monkeypatch):
     compares plaintext, rather than checking the device exists.
     """
     key = Fernet.generate_key().decode()
-    client = _client(monkeypatch, secret_key=key)
+    client = _client(monkeypatch, tmp_path, secret_key=key)
     _register(client, "alpha", secret=DEVICE_SECRET)
     _register(client, "beta")
 
@@ -118,8 +142,8 @@ def test_export_wipe_restore_returns_the_fleet_and_its_credentials(monkeypatch):
     assert recovered["api_key"] == DEVICE_SECRET, "the credential did not survive the round trip"
 
 
-def test_a_dry_run_predicts_the_real_run_and_writes_nothing(monkeypatch):
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+def test_a_dry_run_predicts_the_real_run_and_writes_nothing(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register(client, "alpha")
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
     client.delete("/v1/devices/alpha", headers=_auth())
@@ -134,9 +158,9 @@ def test_a_dry_run_predicts_the_real_run_and_writes_nothing(monkeypatch):
     assert [d["hostname"] for d in dry["devices"]] == [d["hostname"] for d in wet["devices"]]
 
 
-def test_dry_run_is_the_default_when_the_body_omits_it(monkeypatch):
+def test_dry_run_is_the_default_when_the_body_omits_it(monkeypatch, tmp_path):
     """The destructive direction is never the one you get by omission."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register(client, "alpha")
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
     client.delete("/v1/devices/alpha", headers=_auth())
@@ -149,21 +173,21 @@ def test_dry_run_is_the_default_when_the_body_omits_it(monkeypatch):
 # --- Fail-closed ------------------------------------------------------------
 
 
-def test_a_wrong_key_restore_writes_absolutely_nothing(monkeypatch):
+def test_a_wrong_key_restore_writes_absolutely_nothing(monkeypatch, tmp_path):
     """Not "it raised" — *nothing was applied*.
 
     A preflight that ran per device would abort partway and leave the registry split
     between two key generations, which is the outcome the whole fail-closed design exists
     to prevent.
     """
-    exporter = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    exporter = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register(exporter, "alpha", secret=DEVICE_SECRET)
     _register(exporter, "beta", secret=DEVICE_SECRET)
     _register(exporter, "gamma", secret=DEVICE_SECRET)
     archive = exporter.get("/v1/admin/backup", headers=_auth()).json()
 
     # A different stack, different key.
-    target = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    target = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     assert _hostnames(target) == set()
 
     resp = _restore(target, archive, dry_run=False)
@@ -172,15 +196,15 @@ def test_a_wrong_key_restore_writes_absolutely_nothing(monkeypatch):
     assert _hostnames(target) == set(), "a failed preflight must leave the registry untouched"
 
 
-def test_the_canary_catches_a_wrong_key_when_no_device_has_a_credential(monkeypatch):
+def test_the_canary_catches_a_wrong_key_when_no_device_has_a_credential(monkeypatch, tmp_path):
     """The archive with nothing to decrypt — the case a credential-only preflight misses."""
-    exporter = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    exporter = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register(exporter, "alpha")  # auth_type none: no ciphertext anywhere
     _register(exporter, "beta")
     archive = exporter.get("/v1/admin/backup", headers=_auth()).json()
     assert all(d["auth_config"] is None for d in archive["devices"]), "premise: nothing else can be tested"
 
-    target = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    target = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     resp = _restore(target, archive, dry_run=False)
     assert resp.status_code == 409
     assert _hostnames(target) == set()
@@ -227,7 +251,7 @@ async def test_preflight_opens_every_credential_not_just_the_first():
 # --- The F-67 property: restore is not a policy bypass ----------------------
 
 
-def test_a_device_the_egress_policy_now_forbids_fails_while_its_neighbours_restore(monkeypatch):
+def test_a_device_the_egress_policy_now_forbids_fails_while_its_neighbours_restore(monkeypatch, tmp_path):
     """ADR-0011 §4, made real by F-67.
 
     The archive is taken on a stack that allows private targets and restored into one that
@@ -237,12 +261,12 @@ def test_a_device_the_egress_policy_now_forbids_fails_while_its_neighbours_resto
     says, not a failed batch and not a silent success.
     """
     key = Fernet.generate_key().decode()
-    permissive = _client(monkeypatch, secret_key=key, allow_private=True)
+    permissive = _client(monkeypatch, tmp_path, secret_key=key, allow_private=True)
     _register(permissive, "private-one", base_url="http://127.0.0.1:9")
     _register(permissive, "public-one", base_url="http://example.com")
     archive = permissive.get("/v1/admin/backup", headers=_auth()).json()
 
-    strict = _client(monkeypatch, secret_key=key, allow_private=False)
+    strict = _client(monkeypatch, tmp_path, secret_key=key, allow_private=False)
     report = _restore(strict, archive, dry_run=False).json()
 
     outcomes = {d["hostname"]: d["outcome"] for d in report["devices"]}
@@ -253,14 +277,14 @@ def test_a_device_the_egress_policy_now_forbids_fails_while_its_neighbours_resto
     assert _hostnames(strict) == {"public-one"}
 
 
-def test_the_dry_run_reports_the_policy_refusal_too(monkeypatch):
+def test_the_dry_run_reports_the_policy_refusal_too(monkeypatch, tmp_path):
     """So an operator learns before the real run, which is the point of previewing."""
     key = Fernet.generate_key().decode()
-    permissive = _client(monkeypatch, secret_key=key, allow_private=True)
+    permissive = _client(monkeypatch, tmp_path, secret_key=key, allow_private=True)
     _register(permissive, "private-one", base_url="http://127.0.0.1:9")
     archive = permissive.get("/v1/admin/backup", headers=_auth()).json()
 
-    strict = _client(monkeypatch, secret_key=key, allow_private=False)
+    strict = _client(monkeypatch, tmp_path, secret_key=key, allow_private=False)
     report = _restore(strict, archive).json()
     assert report["devices"][0]["outcome"] == OUTCOME_FAILED
 
@@ -268,9 +292,9 @@ def test_the_dry_run_reports_the_policy_refusal_too(monkeypatch):
 # --- Conflicts --------------------------------------------------------------
 
 
-def test_on_conflict_modes(monkeypatch):
+def test_on_conflict_modes(monkeypatch, tmp_path):
     key = Fernet.generate_key().decode()
-    client = _client(monkeypatch, secret_key=key)
+    client = _client(monkeypatch, tmp_path, secret_key=key)
     _register(client, "alpha", base_url="http://original.example.com")
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
 
@@ -295,8 +319,8 @@ def test_on_conflict_modes(monkeypatch):
     assert live["base_url"] == "http://original.example.com"
 
 
-def test_an_unknown_on_conflict_is_refused_rather_than_defaulted(monkeypatch):
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+def test_an_unknown_on_conflict_is_refused_rather_than_defaulted(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
     resp = _restore(client, archive, dry_run=False, on_conflict="clobber")
     assert resp.status_code == 409
@@ -306,11 +330,11 @@ def test_an_unknown_on_conflict_is_refused_rather_than_defaulted(monkeypatch):
 # --- Governance continuity --------------------------------------------------
 
 
-def test_the_tools_revision_survives_so_clients_do_not_read_a_rollback(monkeypatch):
+def test_the_tools_revision_survives_so_clients_do_not_read_a_rollback(monkeypatch, tmp_path):
     """``register_device`` starts a device at revision 0. For a *restored* device that is
     wrong: a client polling ``tools_revision`` (F-41) would read the reset as the tool set
     having rolled back."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register(client, "alpha")
     client.app.state.registry.get_profile("alpha").config.tools_revision = 5
 
@@ -325,16 +349,16 @@ def test_the_tools_revision_survives_so_clients_do_not_read_a_rollback(monkeypat
 # --- Portable archives ------------------------------------------------------
 
 
-def test_a_portable_archive_restores_into_a_stack_with_a_different_key(monkeypatch):
+def test_a_portable_archive_restores_into_a_stack_with_a_different_key(monkeypatch, tmp_path):
     """The migration path: the target's MCP_SECRET_KEY is unrelated to the exporter's."""
     passphrase = "correct horse battery staple"
-    exporter = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    exporter = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register(exporter, "alpha", secret=DEVICE_SECRET)
     archive = exporter.post(
         "/v1/admin/backup", headers=_auth(), json={"kind": "portable", "passphrase": passphrase}
     ).json()
 
-    target = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    target = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     report = _restore(target, archive, dry_run=False, passphrase=passphrase).json()
     assert report["counts"] == {OUTCOME_RESTORED: 1}
 
@@ -347,14 +371,14 @@ def test_a_portable_archive_restores_into_a_stack_with_a_different_key(monkeypat
     assert recovered["api_key"] == DEVICE_SECRET
 
 
-def test_a_portable_archive_without_the_passphrase_is_refused(monkeypatch):
-    exporter = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+def test_a_portable_archive_without_the_passphrase_is_refused(monkeypatch, tmp_path):
+    exporter = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register(exporter, "alpha")
     archive = exporter.post(
         "/v1/admin/backup", headers=_auth(), json={"kind": "portable", "passphrase": "z" * 20}
     ).json()
 
-    target = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    target = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     no_pass = _restore(target, archive, dry_run=False)
     assert no_pass.status_code == 409
     assert "passphrase" in no_pass.json()["detail"]
@@ -368,8 +392,8 @@ def test_a_portable_archive_without_the_passphrase_is_refused(monkeypatch):
 # --- Authorization ----------------------------------------------------------
 
 
-def test_restore_requires_backup_write_and_read_alone_is_not_enough(monkeypatch):
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+def test_restore_requires_backup_write_and_read_alone_is_not_enough(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
 
     from device_mcp_gateway.rbac import Principal, SCOPE_BACKUP_READ
@@ -380,8 +404,8 @@ def test_restore_requires_backup_write_and_read_alone_is_not_enough(monkeypatch)
     assert resp.status_code == 403
 
 
-def test_a_body_without_an_archive_is_a_400_not_a_500(monkeypatch):
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+def test_a_body_without_an_archive_is_a_400_not_a_500(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     assert client.post("/v1/admin/restore", headers=_auth(), json={}).status_code == 400
     assert client.post("/v1/admin/restore", headers=_auth(), json={"archive": "nonsense"}).status_code == 409
 
@@ -459,14 +483,14 @@ def _detail(client, hostname):
     return resp.json()
 
 
-def test_a_restored_device_is_still_pinned_and_does_not_re_tofu(monkeypatch):
+def test_a_restored_device_is_still_pinned_and_does_not_re_tofu(monkeypatch, tmp_path):
     """The headline property of this change.
 
     Before the archive carried pins, this restore produced a device with
     ``fingerprint_state="unpinned"`` — indistinguishable from a healthy one in every
     response, and guaranteed to trust the next thing that answered.
     """
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_pinned(client, "alpha", SPKI_A, policy="enforce")
 
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
@@ -482,14 +506,14 @@ def test_a_restored_device_is_still_pinned_and_does_not_re_tofu(monkeypatch):
     assert report["fingerprint_warnings"] == 0
 
 
-def test_overwrite_keeps_the_live_pin_and_warns_rather_than_re_pinning(monkeypatch):
+def test_overwrite_keeps_the_live_pin_and_warns_rather_than_re_pinning(monkeypatch, tmp_path):
     """ADR-0015: restoring a pin that no longer matches must warn, not re-pin.
 
     The live pin was established against the endpoint as it is now, quite possibly by an
     audited approval. Writing the archived value over it would undo that decision silently
     and then, under ``enforce``, quarantine a device nothing was wrong with.
     """
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_pinned(client, "alpha", SPKI_A)
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
 
@@ -505,11 +529,11 @@ def test_overwrite_keeps_the_live_pin_and_warns_rather_than_re_pinning(monkeypat
     assert SPKI_A[:16] in warning and SPKI_B[:16] in warning, "the operator must see both sides"
 
 
-def test_overwrite_does_not_lose_a_pin_that_both_sides_agree_on(monkeypatch):
+def test_overwrite_does_not_lose_a_pin_that_both_sides_agree_on(monkeypatch, tmp_path):
     """``replace_device`` rebuilds the record from registration inputs alone, so writing
     the fingerprint back is doing real work even when nothing disagrees. Without it an
     ordinary overwrite restore would quietly unpin the whole fleet."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_pinned(client, "alpha", SPKI_A)
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
 
@@ -521,13 +545,13 @@ def test_overwrite_does_not_lose_a_pin_that_both_sides_agree_on(monkeypatch):
     assert report["fingerprint_warnings"] == 0, "agreement is not a warning"
 
 
-def test_a_quarantined_device_comes_back_quarantined(monkeypatch):
+def test_a_quarantined_device_comes_back_quarantined(monkeypatch, tmp_path):
     """A restore must not launder an unapproved endpoint change into an approved baseline.
 
     Restoring a ``pending_approval`` device as ``pinned`` would clear a quarantine that a
     human never signed off — turning backup/restore into a way around ADR-0015 §6.
     """
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_pinned(client, "alpha", SPKI_A)
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
 
@@ -545,10 +569,10 @@ def test_a_quarantined_device_comes_back_quarantined(monkeypatch):
     assert detail["tls_spki_sha256"] == SPKI_A, "the approved pin must still be the one on record"
 
 
-def test_an_archive_from_before_fingerprinting_says_so_instead_of_failing_quietly(monkeypatch):
+def test_an_archive_from_before_fingerprinting_says_so_instead_of_failing_quietly(monkeypatch, tmp_path):
     """A v0.3.2 archive has no pins and cannot be given any. The restore still works — but
     it must not present a fleet of re-TOFU-ing devices as an unqualified success."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_pinned(client, "alpha", SPKI_A)
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
     archive["devices"][0].pop("fingerprint")  # as an older gateway would have written it
@@ -562,11 +586,11 @@ def test_an_archive_from_before_fingerprinting_says_so_instead_of_failing_quietl
     assert _detail(client, "alpha")["fingerprint_state"] == "unpinned"
 
 
-def test_a_plain_http_device_does_not_warn_about_a_pin_it_could_never_have(monkeypatch):
+def test_a_plain_http_device_does_not_warn_about_a_pin_it_could_never_have(monkeypatch, tmp_path):
     """ADR-0015 §7: an http:// upstream has no authenticated dimension at all, so "no pin"
     is its permanent correct state. Warning on it every restore is the noise ADR-0015 §2
     argues destroys a control."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register(client, "alpha", base_url="http://127.0.0.1:9")
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
     archive["devices"][0].pop("fingerprint")
@@ -577,10 +601,10 @@ def test_a_plain_http_device_does_not_warn_about_a_pin_it_could_never_have(monke
     assert "fingerprint_warning" not in report["devices"][0]
 
 
-def test_a_dry_run_reports_the_fingerprint_warning_before_anything_is_written(monkeypatch):
+def test_a_dry_run_reports_the_fingerprint_warning_before_anything_is_written(monkeypatch, tmp_path):
     """A dry run is a real prediction. A restore about to discard an archived pin must say
     so while it can still be stopped."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_pinned(client, "alpha", SPKI_A)
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
     client.delete("/v1/devices/alpha", headers=_auth())
@@ -594,10 +618,10 @@ def test_a_dry_run_reports_the_fingerprint_warning_before_anything_is_written(mo
     assert _detail(client, "alpha")["tls_spki_sha256"] == SPKI_B, "a dry run must not write"
 
 
-def test_a_skipped_device_carries_no_fingerprint_warning(monkeypatch):
+def test_a_skipped_device_carries_no_fingerprint_warning(monkeypatch, tmp_path):
     """on_conflict=skip writes nothing, so nothing can be lost and there is nothing to
     warn about. A warning here would train operators to ignore the real ones."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_pinned(client, "alpha", SPKI_A)
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
     client.delete("/v1/devices/alpha", headers=_auth())

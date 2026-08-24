@@ -23,6 +23,8 @@ in it at all, so it is tested on a fleet of ``auth_type: none`` devices — the 
 
 from __future__ import annotations
 
+import itertools
+
 import base64
 import json
 
@@ -41,6 +43,9 @@ from device_mcp_gateway.backup.envelope import (
 from device_mcp_gateway.backup.export import CiphertextExportUnavailable, build_archive
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import DeviceConfig
+
+#: One working directory per app built in this module — see `_client`.
+_STACK_SEQ = itertools.count()
 
 ADMIN_KEY = "a" * 40
 DEVICE_SECRET = "SUPER-SECRET-DEVICE-KEY-9f3a2b"
@@ -425,7 +430,26 @@ async def test_parse_archive_rejects_a_file_with_no_canary():
 # --- Through the real embedded registration path ----------------------------
 
 
-def _client(monkeypatch, *, secret_key: str | None):
+def _client(monkeypatch, tmp_path, *, secret_key: str | None):
+    # Embedded mode persists to ``storage.db_path``, which defaults to the RELATIVE
+    # "./data/devices.db" — so without this every test here writes its devices into the
+    # repository's own working directory and leaves them there. They then load on the next
+    # run of ANY embedded test, whose lifespan probes each one; a fleet of unreachable
+    # `127.0.0.1:9` devices turns a 0.7s startup into 18s and makes `test_main.py`'s
+    # shared-app livez test fail with "Semaphore is bound to a different event loop".
+    #
+    # Verified rather than assumed: `origin/main` fails that test identically once the
+    # leaked database is put in place, and passes without it. Chdir-ing into `tmp_path`
+    # keeps the relative default pointing somewhere pytest cleans up.
+    #
+    # A fresh directory PER CLIENT, not per test: several tests here build two stacks to
+    # export from one and restore into the other, and a shared store would couple them.
+    # (They get away with it today only because a `TestClient` used without `with` never
+    # runs the lifespan, so nothing ever reads the file back — these tests leak writes and
+    # perform no loads. That is not a property worth depending on.)
+    stack_dir = tmp_path / f"stack-{next(_STACK_SEQ)}"
+    stack_dir.mkdir()
+    monkeypatch.chdir(stack_dir)
     monkeypatch.setenv("MCP_ADMIN_KEY", ADMIN_KEY)
     monkeypatch.setenv("MCP_ALLOW_PRIVATE_TARGETS", "true")
     if secret_key:
@@ -441,7 +465,7 @@ def _auth():
     return {"Authorization": f"Bearer {ADMIN_KEY}"}
 
 
-def test_an_embedded_export_never_contains_the_plaintext_credential(monkeypatch):
+def test_an_embedded_export_never_contains_the_plaintext_credential(monkeypatch, tmp_path):
     """The mode-dependence bug, caught the only way it can be.
 
     Embedded mode stores ``auth_config`` as plaintext JSON in the DeviceConfig — so this
@@ -449,7 +473,7 @@ def test_an_embedded_export_never_contains_the_plaintext_credential(monkeypatch)
     A hand-built config would not have exercised the code that puts it there.
     """
     key = Fernet.generate_key().decode()
-    client = _client(monkeypatch, secret_key=key)
+    client = _client(monkeypatch, tmp_path, secret_key=key)
 
     resp = client.post(
         "/v1/devices",
@@ -476,9 +500,9 @@ def test_an_embedded_export_never_contains_the_plaintext_credential(monkeypatch)
     verify_canary(archive, codec)
 
 
-def test_export_requires_its_scope_and_portable_requires_its_own(monkeypatch):
+def test_export_requires_its_scope_and_portable_requires_its_own(monkeypatch, tmp_path):
     monkeypatch.setenv("MCP_VIEWER_KEY", "v" * 40)
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
 
     viewer = {"Authorization": f"Bearer {'v' * 40}"}
     assert client.get("/v1/admin/backup", headers=viewer).status_code == 403
@@ -500,8 +524,8 @@ def test_export_requires_its_scope_and_portable_requires_its_own(monkeypatch):
     assert "backup:export-portable" in portable.json()["detail"]
 
 
-def test_a_ciphertext_export_with_no_key_configured_is_a_409(monkeypatch):
-    client = _client(monkeypatch, secret_key=None)
+def test_a_ciphertext_export_with_no_key_configured_is_a_409(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=None)
     resp = client.get("/v1/admin/backup", headers=_auth())
     assert resp.status_code == 409
     assert "MCP_SECRET_KEY" in resp.json()["detail"]
@@ -583,14 +607,14 @@ def _register_plain(client, hostname, base_url="http://127.0.0.1:9"):
     return resp
 
 
-def test_the_archive_carries_the_endpoint_fingerprint(monkeypatch):
+def test_the_archive_carries_the_endpoint_fingerprint(monkeypatch, tmp_path):
     """Without this the control is void from the first restore onward.
 
     An archive that omits the pin does not lose a fact the new stack can re-derive — it
     silently re-runs trust-on-first-use against whatever now answers at ``base_url``,
     which is the exact substitution ADR-0015 exists to catch.
     """
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     spki = "a1" * 32
     resp = client.post(
         "/v1/devices",
@@ -614,10 +638,10 @@ def test_the_archive_carries_the_endpoint_fingerprint(monkeypatch):
     assert block["fingerprint_policy"] == "enforce"
 
 
-def test_the_fingerprint_block_is_present_even_when_nothing_is_pinned(monkeypatch):
+def test_the_fingerprint_block_is_present_even_when_nothing_is_pinned(monkeypatch, tmp_path):
     """Its presence is how a reader tells a fingerprint-aware archive from an older one,
     and those two call for different advice."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_plain(client, "alpha")
 
     block = client.get("/v1/admin/backup", headers=_auth()).json()["devices"][0]["fingerprint"]
@@ -625,10 +649,10 @@ def test_the_fingerprint_block_is_present_even_when_nothing_is_pinned(monkeypatc
     assert block["fingerprint_state"] == "unpinned"
 
 
-def test_the_archive_does_not_carry_runtime_measurements(monkeypatch):
+def test_the_archive_does_not_carry_runtime_measurements(monkeypatch, tmp_path):
     """The fingerprint travels because it is a trusted baseline, not because observed
     values travel. `reachable`/`last_check` are measurements of one stack (F-66)."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_plain(client, "alpha")
 
     record = client.get("/v1/admin/backup", headers=_auth()).json()["devices"][0]
@@ -639,23 +663,23 @@ def test_the_archive_does_not_carry_runtime_measurements(monkeypatch):
 # --- ADR-0011 over HTTP: where the minted passphrase is delivered -------------
 
 
-def test_a_portable_export_over_http_mints_and_reveals_a_passphrase(monkeypatch):
+def test_a_portable_export_over_http_mints_and_reveals_a_passphrase(monkeypatch, tmp_path):
     """End to end through the route, because the delivery channel is the design decision."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     resp = client.post("/v1/admin/backup", headers=_auth(), json={"kind": "portable"})
     assert resp.status_code == 200
     minted = resp.headers.get("X-Backup-Passphrase")
     assert minted and len(minted) >= 32
 
 
-def test_the_response_body_is_the_archive_and_nothing_else(monkeypatch):
+def test_the_response_body_is_the_archive_and_nothing_else(monkeypatch, tmp_path):
     """The trap this shape avoids. Wrapping the response as `{archive, passphrase}` reads
     more naturally and would mean any caller saving the body to a file writes the passphrase
     *inside the archive it protects* — silently, and producing something restore rejects.
 
     So: the body stays a bare archive, byte for byte usable, and the secret is not in it.
     """
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     resp = client.post("/v1/admin/backup", headers=_auth(), json={"kind": "portable"})
     body = resp.json()
     assert "archive" not in body  # not wrapped
@@ -663,25 +687,25 @@ def test_the_response_body_is_the_archive_and_nothing_else(monkeypatch):
     assert resp.headers["X-Backup-Passphrase"] not in resp.text
 
 
-def test_supplying_a_passphrase_returns_no_header(monkeypatch):
+def test_supplying_a_passphrase_returns_no_header(monkeypatch, tmp_path):
     """Nothing was minted, so there is nothing to reveal. Echoing the caller's own secret
     back would only add a place for it to be captured."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     resp = client.post("/v1/admin/backup", headers=_auth(), json={"kind": "portable", "passphrase": "q" * 20})
     assert resp.status_code == 200
     assert "X-Backup-Passphrase" not in resp.headers
 
 
-def test_a_ciphertext_export_never_mints_a_passphrase(monkeypatch):
+def test_a_ciphertext_export_never_mints_a_passphrase(monkeypatch, tmp_path):
     """It is sealed under MCP_SECRET_KEY and has no passphrase at all. A header here would
     imply an opener that does not exist."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     resp = client.get("/v1/admin/backup", headers=_auth())
     assert resp.status_code == 200
     assert "X-Backup-Passphrase" not in resp.headers
 
 
-def test_the_audit_records_that_one_was_minted_but_never_the_value(monkeypatch):
+def test_the_audit_records_that_one_was_minted_but_never_the_value(monkeypatch, tmp_path):
     """A responder reconstructing who could open which archive needs the first fact and must
     not be handed the second."""
     from loguru import logger
@@ -695,7 +719,7 @@ def test_the_audit_records_that_one_was_minted_but_never_the_value(monkeypatch):
 
     # The client first: `create_app` reconfigures logging and would drop a sink added before
     # it, leaving this test asserting against an empty list — passing for the wrong reason.
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     sink_id = logger.add(_sink, level="INFO")
     try:
         resp = client.post("/v1/admin/backup", headers=_auth(), json={"kind": "portable"})

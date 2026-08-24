@@ -37,7 +37,10 @@ CREATE TABLE IF NOT EXISTS devices (
     fingerprint_state  TEXT NOT NULL DEFAULT 'unpinned',
     fingerprint_pinned_at REAL NOT NULL DEFAULT 0,
     pending_tls_spki_sha256 TEXT,
-    fingerprint_policy TEXT
+    fingerprint_policy TEXT,
+    -- Credential condition (ADR-0018 §3): 'ok' | 'needs_reconnect'. Orthogonal to
+    -- reachability — see registry_backend.py.
+    credential_state   TEXT NOT NULL DEFAULT 'ok'
 )
 """
 
@@ -62,6 +65,8 @@ _MIGRATIONS = (
     "ALTER TABLE devices ADD COLUMN fingerprint_pinned_at REAL NOT NULL DEFAULT 0",
     "ALTER TABLE devices ADD COLUMN pending_tls_spki_sha256 TEXT",
     "ALTER TABLE devices ADD COLUMN fingerprint_policy TEXT",
+    # ADR-0018 §3 credential condition.
+    "ALTER TABLE devices ADD COLUMN credential_state TEXT NOT NULL DEFAULT 'ok'",
 )
 
 
@@ -120,8 +125,9 @@ class SqliteDeviceStore(AbstractDeviceStore):
                      rate_limit_rps, upstream_kind, upstream_transport,
                      tls_spki_sha256, tls_cert_sha256, tls_issuer, tls_not_after,
                      declared_name, declared_version, fingerprint_state,
-                     fingerprint_pinned_at, pending_tls_spki_sha256, fingerprint_policy)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     fingerprint_pinned_at, pending_tls_spki_sha256, fingerprint_policy,
+                     credential_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     hostname,
@@ -143,6 +149,7 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     record.get("fingerprint_pinned_at") or 0.0,
                     record.get("pending_tls_spki_sha256"),
                     record.get("fingerprint_policy"),
+                    record.get("credential_state") or "ok",
                 ),
             )
             await db.commit()
@@ -196,7 +203,8 @@ class SqliteDeviceStore(AbstractDeviceStore):
                 "rate_limit_rps, upstream_kind, upstream_transport, "
                 "tls_spki_sha256, tls_cert_sha256, tls_issuer, tls_not_after, "
                 "declared_name, declared_version, fingerprint_state, "
-                "fingerprint_pinned_at, pending_tls_spki_sha256, fingerprint_policy "
+                "fingerprint_pinned_at, pending_tls_spki_sha256, fingerprint_policy, "
+                "credential_state "
                 "FROM devices"
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -235,6 +243,7 @@ class SqliteDeviceStore(AbstractDeviceStore):
                     "fingerprint_pinned_at": row["fingerprint_pinned_at"] or 0.0,
                     "pending_tls_spki_sha256": row["pending_tls_spki_sha256"],
                     "fingerprint_policy": row["fingerprint_policy"],
+                    "credential_state": row["credential_state"] or "ok",
                 }
             )
         return result

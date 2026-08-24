@@ -38,6 +38,17 @@ def _cfg(**over):
 
 
 def test_summary_from_config_projects_lean_fields():
+    """Exact equality, not a subset check, and that is the point of this test.
+
+    "Lean" is not a property anything else enforces — every field added to ``DeviceSummary``
+    is added to the fleet-list response for every device, forever. Pinning the whole set
+    makes each addition a deliberate edit here with a reason attached, rather than something
+    that accretes. Two fields have earned a place since: ``upstream_kind``, because it
+    changes how every other field on the row should be read, and ``credential_state``
+    (ADR-0018 §3), because a device needing re-authorization after a restore is precisely
+    what an operator scans a list for — and its own precedent, ``fingerprint_state``, is
+    detail-only and therefore invisible in exactly that situation.
+    """
     s = DeviceSummary.from_config(_cfg())
     assert s.model_dump() == {
         "hostname": "dev",
@@ -48,6 +59,7 @@ def test_summary_from_config_projects_lean_fields():
         "last_check": 1234.5,
         "rate_limit_rps": 5.0,
         "upstream_kind": "openapi",
+        "credential_state": "ok",
     }
     # The lean summary must NOT leak detail-only fields.
     assert "spawn_error" not in s.model_dump()

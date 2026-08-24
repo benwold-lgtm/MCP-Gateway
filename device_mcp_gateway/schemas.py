@@ -32,6 +32,15 @@ class DeviceSummary(BaseModel):
     # summary because it changes how every other field should be read — an operator scanning
     # a list needs to know which upstreams are proxied without opening each one.
     upstream_kind: str = "openapi"
+    # "ok" | "needs_reconnect" (ADR-0018 §3). On the LEAN summary deliberately, and the
+    # reason is a defect in the field it copies: `fingerprint_state` is detail-only, so a
+    # device awaiting approval is invisible in the fleet list and discoverable only by
+    # opening it. A device needing re-authorization after a restore is precisely the case an
+    # operator scans a list for, and it would arrive with the same gap on day one.
+    #
+    # A client MUST NOT render this as health. The device may be reachable, its pod running,
+    # its spec fetching — it simply cannot authenticate, and only a human can fix that.
+    credential_state: str = "ok"
 
     @classmethod
     def from_config(cls, cfg: DeviceConfig) -> DeviceSummary:
@@ -47,6 +56,7 @@ class DeviceSummary(BaseModel):
             last_check=cfg.last_check or None,
             rate_limit_rps=cfg.rate_limit_rps,
             upstream_kind=cfg.upstream_kind,
+            credential_state=getattr(cfg, "credential_state", "ok"),
         )
 
 
@@ -118,6 +128,12 @@ class DeviceDetail(DeviceSummary):
             declared_name=cfg.declared_name,
             declared_version=cfg.declared_version,
             fingerprint_policy=cfg.fingerprint_policy,
+            # Repeated rather than inherited: `DeviceDetail.from_config` builds the whole
+            # model itself instead of extending the summary's mapping, so a field added only
+            # above silently defaults here. That is F-19's single-place rule already half
+            # broken; the test asserts both projections carry the value so the next addition
+            # cannot quietly land on one of them.
+            credential_state=getattr(cfg, "credential_state", "ok"),
         )
 
 
