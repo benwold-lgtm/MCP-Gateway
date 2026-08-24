@@ -78,11 +78,18 @@ from the original ordering.
 2026-08-20 but only reached the records on 2026-08-21 — the acceptance commit moved the status
 lines and nothing else, so fourteen answered questions sat in the files reading as open for a
 day. They are now written into each record's `Open questions` section, struck through with the
-resolution. **Two remain genuinely open, both deliberately, because both need data that does
-not exist yet:** [0018](0018-device-credentials-by-reference.md)'s credential-cache **TTL value**
-(networked backends only) and its **plan-digest validity window**. Neither blocks acceptance;
-the digest window sits on build item 4 and will want an answer as that work starts. Everything
-else in 0007 and 0017–0023 is decided.
+resolution. **Nothing remains open.** The last two — [0018](0018-device-credentials-by-reference.md)'s
+credential-cache **TTL value** (networked backends only) and its **plan-digest validity
+window** — were resolved on 2026-08-21 with starting defaults: **300 seconds** and **7 days**,
+both instrumented and tuned from operating history rather than fixed. See that record's
+`Open questions`, which carries the reasoning for each.
+
+⚠️ **This paragraph previously said both were still open, and that cost real time**: the
+plan-digest window was read as unanswered while assessing build item 4, and the assessment
+initially concluded the digest needed no expiry at all — which contradicts the resolution and,
+more importantly, contradicts what §6 fixes as the field's format. **A bare SHA-256 carries no
+age**, so the 7-day term is a design input to that build, not a footnote to it. An index that
+disagrees with the record it indexes is worse than one that says nothing.
 
 **[0024](0024-tenant-provisioning-is-a-request.md) is a prerequisite for 7 and 8**, and is
 cited by 0014/0019/0023 in already-shipped or near-term work. It defines the provisioning

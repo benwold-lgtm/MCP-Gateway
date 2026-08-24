@@ -511,6 +511,20 @@ Two mechanical requirements follow:
   response that produces it, and in the audit record, so the API contract and the audit schema
   cannot quietly diverge. Neither exists in the code today, so there is nothing to migrate.
 
+  ⚠️ **Implementation note (2026-08-24, found while assessing the build): this format and the
+  7-day validity resolved in `Open questions` cannot both hold as written.** A bare SHA-256
+  carries no age, and this section's own premise is that the gateway **persists no plan** — so
+  at apply time there is nothing to compare an age against. The three obvious repairs are all
+  worse than they look: a client-supplied `issued_at` lets the client choose the age; storing
+  issued digests contradicts the no-plan property and needs eviction; and looking the preview up
+  in the audit chain makes the audit chain load-bearing for authorization.
+
+  **The shape that survives all three objections is an HMAC-signed plan token carrying
+  `digest ‖ issued_at`** — stateless, unforgeable, expiry enforceable, no-plan property intact.
+  That is a *second* field beside `plan_digest`, or a redefinition of it, and it is the first
+  thing the build has to settle. Recorded here rather than left to the implementer for the same
+  reason canonicalization was: it is decided once, or decided inconsistently.
+
 ##### A dry run does not need `backup:write` at all
 
 The section above fixes the *consequence* of the dry run carrying `backup:write` — removing
