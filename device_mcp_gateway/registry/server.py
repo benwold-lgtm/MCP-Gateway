@@ -178,6 +178,20 @@ class Registry:
         await self._provision_in_background(profile, wait_budget=self._registration_provision_budget)
         return profile.config
 
+    async def _carry_credential_state(self, cfg: DeviceConfig, prev: DeviceConfig | None) -> DeviceConfig:
+        """Re-apply a non-default ``credential_state`` across a rebuild that kept the credential.
+
+        Writes through the backend as well as onto the returned object: the caller gets the
+        record it asked for, and the stored one agrees with it. Skipped entirely for the
+        common case, so an ordinary PUT costs no extra round trip.
+        """
+        state = getattr(prev, "credential_state", "ok") if prev is not None else "ok"
+        if state == "ok":
+            return cfg
+        cfg.credential_state = state
+        await self._backend.update_device_fields(cfg.hostname, credential_state=state)
+        return cfg
+
     async def replace_device(
         self,
         hostname: str,
@@ -199,6 +213,15 @@ class Registry:
         stored ``auth_config`` is Fernet ciphertext, so reconstructing it parsed the
         ciphertext as JSON, failed, and silently re-registered the device with NO
         credentials (the PUT-wipes-credentials bug).
+
+        **``credential_state`` follows ``keep_auth`` exactly** (ADR-0018 §3), and getting
+        that backwards is the trap. This method rebuilds a device from registration inputs
+        alone, so every field not passed through resets to its default — and the default is
+        ``"ok"``. A PUT that changed a rate limit and touched no credential would therefore
+        clear *needs reconnecting* from a device nobody had reconnected: the operator's list
+        goes quiet and the device still cannot authenticate. So the state is carried forward
+        whenever the credential was, and reset only when a new one actually arrived — which
+        is the reconnection itself, and is why no separate "clear" endpoint is needed.
         """
         up = (upstream_kind, upstream_transport)
         if self._mode == "distributed":
@@ -206,7 +229,7 @@ class Registry:
             if keep_auth:
                 prev = await self._backend.get_device(hostname)
                 # Pass the stored ciphertext straight through — no decrypt/re-encrypt.
-                return await self._write_distributed(
+                cfg = await self._write_distributed(
                     hostname,
                     base_url,
                     spec_url,
@@ -216,9 +239,11 @@ class Registry:
                     rate_limit_rps,
                     up,
                 )
+                return await self._carry_credential_state(cfg, prev)
             return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps, up)
         async with self._lock_for(hostname):
             existing = self._profiles.get(hostname)
+            prev_config = existing.config if (keep_auth and existing) else None
             if keep_auth and existing:
                 # Embedded keeps the live auth object on the profile; reuse it directly.
                 auth = existing.auth
@@ -226,6 +251,7 @@ class Registry:
                 await self._pod_supervisor.kill(existing)
                 self._spec_service.invalidate(existing.base_url)
             profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps, up)
+        await self._carry_credential_state(profile.config, prev_config)
         # Re-provision off the request path (F-11), same as register_device.
         await self._provision_in_background(profile, wait_budget=self._registration_provision_budget)
         return profile.config

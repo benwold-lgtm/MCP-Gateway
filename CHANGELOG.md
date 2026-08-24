@@ -10,6 +10,57 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Changed
+
+- **A backup archive no longer contains a live device credential**
+  ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md) §3). The OAuth2 refresh token
+  is **excluded from every archive, unconditionally** — not encrypted more carefully,
+  excluded. Everything that makes a device a device still travels: its registration, its
+  `credential_ref`, and the operator-provisioned `client_secret` / `password` it points at.
+
+  This applies a rule the archive already had rather than adding an exception to it. Exports
+  have always omitted claims, leases, worker membership, streams, sessions, idempotency
+  markers and rate-limit counters on the stated principle that an archive carries
+  **registration inputs, not runtime state**. A refresh token is gateway-accumulated runtime
+  state; it was slipping through only because it is stored inside `auth_config` next to
+  genuine inputs.
+
+  **What it costs, by grant, stated plainly:**
+
+  | Grant | After a restore |
+  |---|---|
+  | `client_credentials` | **Seamless.** `client_secret` survived; the gateway re-runs the token exchange on first use |
+  | `password` | **Seamless.** `username` and `password` survived; same path |
+  | `refresh_token` | **Needs re-authorization by a human** |
+
+  No archive design can avoid the third row: a refresh token exists because somebody
+  consented once, out of band, and nothing that can be put in an archive re-mints a token
+  that required consent. Excluding it stops the archive *pretending* otherwise while carrying
+  a copy that many providers have already invalidated server-side.
+
+- **A restore says which devices need a human, and the device keeps saying so.** Two new
+  per-device outcomes — `restored_needs_reconnect` and `would_restore_needs_reconnect` — plus
+  a top-level `needs_reconnect` count on the restore report, so a **dry run** predicts the
+  cost while it can still be stopped. The affected device is then left in a new persistent
+  state, `credential_state: "needs_reconnect"`, which appears on **both** the device detail
+  view and the fleet **list**.
+
+  On the list deliberately: `fingerprint_state` is the precedent for this kind of field and
+  carries a defect worth not repeating — it is absent from the list projection, so a device
+  awaiting approval is invisible until somebody opens it. A device needing reconnection after
+  a restore is precisely what an operator scans a list for.
+
+  `credential_state` is **not a health reading** and clients must not render it as one. Such
+  a device may be perfectly reachable, its pod running, its spec fetching; what it cannot do
+  is authenticate. It clears when a new credential actually arrives — a PUT that supplies one
+  — and survives a PUT that does not, so changing a rate limit cannot silently mark a device
+  reconnected that nobody reconnected.
+
+- An `auth_config` the exporting stack cannot parse is now **omitted from the archive** rather
+  than copied through unexamined. The exclusion above can only be *proved* on a payload the
+  exporter could read, and such a device is already dispatching without credentials on the
+  stack it came from.
+
 ### Added
 
 - **Break-glass access is individually attributable, expiring, and loud**

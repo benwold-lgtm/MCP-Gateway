@@ -373,6 +373,27 @@ never logged.
 not a bug: with no key the archive would be labelled ciphertext and contain plaintext
 credentials. Set a key, or take a portable archive.
 
+**An archive never contains an OAuth2 refresh token**
+([ADR-0018](adr/0018-device-credentials-by-reference.md) §3). It is excluded unconditionally
+— it is a credential the *gateway* mints and rotates, which makes it runtime state rather
+than a registration input, the same category as the claims, leases and sessions an archive
+has always omitted. `client_secret`, `password`, `api_key` and `credential_ref` all still
+travel.
+
+Check `counts.needs_reconnect` on every export:
+
+```bash
+jq '.counts' fleet-$(date +%F).json
+# { "devices": 50, "tool_changes": 12, "dead_letters": 0, "needs_reconnect": 3 }
+```
+
+A non-zero count is the number of `grant_type=refresh_token` devices that **will need a human
+to re-authorize them** if this archive is ever restored. It is not a fault in the backup and
+there is nothing to fix in it — a refresh token exists because somebody consented once, out
+of band, and nothing an archive can carry re-mints one. Know the number before you need the
+archive, not during the restore. (Devices on `client_credentials` or `password` are
+unaffected and restore seamlessly.)
+
 ### Restore from a backup
 
 **Preview first — that is the default.** `dry_run` is `true` unless you say otherwise, and
@@ -398,8 +419,35 @@ A portable archive additionally needs `"passphrase": "..."`. `on_conflict` is
 | Outcome | Means |
 |---|---|
 | `restored` / `would_restore` | Replayed through the ordinary registration path |
+| `restored_needs_reconnect` / `would_restore_needs_reconnect` | Replayed **and cannot authenticate** — a human must re-authorize it |
 | `skipped` | Hostname already exists and `on_conflict=skip` |
 | `failed` | This device did not pass registration — **see `reason`** |
+
+**`restored_needs_reconnect` is a success that is not finished.** The device is registered,
+reachable, correctly fingerprinted — and will fail its first tool call, because its OAuth2
+refresh token was excluded from the archive and that token *was* its credential. The dry run
+predicts this, so the count is knowable before you commit:
+
+```bash
+… "$GW/v1/admin/restore" | jq '.needs_reconnect, [.devices[] | select(.outcome | test("needs_reconnect"))]'
+```
+
+Each such device stays flagged afterwards as `credential_state: "needs_reconnect"`, on both
+`GET /v1/devices/{hostname}` and the fleet list — so a restore you walk away from is still
+findable later. **It is not a health signal**: the device may be entirely reachable.
+
+To clear it, re-authorize the device out of band and `PUT` the new credential:
+
+```bash
+curl -s -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"base_url":"…","auth_type":"oauth2","auth":{…,"refresh_token":"<newly consented>"}}' \
+  "$GW/v1/devices/<hostname>"
+```
+
+Supplying a credential is what clears the flag — there is no "mark reconnected" endpoint,
+because the flag *means* "no human has supplied a credential". A PUT that changes something
+else leaves it set, deliberately: otherwise a rate-limit edit would quietly mark a device
+reconnected that nobody reconnected.
 
 **A `failed` device is usually correct behaviour, not a broken restore.** Restore replays
 each device through the real registration gates, so a device whose `base_url` the *current*

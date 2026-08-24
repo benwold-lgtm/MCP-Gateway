@@ -277,3 +277,11 @@ Caveats:
   one-way data migration, restore from the pre-upgrade backup instead of rolling code back.
 - **Secret keys:** a rollback does **not** undo a completed key rotation — the new key
   stays primary. Keep both keys configured until you're settled on a version.
+- **Archives taken by the new version do not warn the old one.** An archive from a gateway
+  with [ADR-0018](adr/0018-device-credentials-by-reference.md) §3 carries no OAuth2 refresh
+  token, and says so in a per-device field a pre-§3 gateway does not read. Restoring one into
+  a rolled-back gateway therefore reinstates `grant_type=refresh_token` devices **silently
+  broken** — no `restored_needs_reconnect` outcome, no `credential_state`, just a device that
+  fails its first tool call. Restore such an archive into a gateway at or above the version
+  that produced it. (Every other grant is unaffected, and the reverse direction — an old
+  archive into a new gateway — is fine.)

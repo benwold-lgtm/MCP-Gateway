@@ -37,6 +37,13 @@ See :func:`plan_fingerprint_restore`.
 ``dry_run=True`` is the default. The destructive direction is never the one you get by
 omission — and a dry run runs the same preflight and the same per-device gates, so its
 report is a real prediction rather than a parse.
+
+**A restore can succeed and still leave a device unable to authenticate** (ADR-0018 §3). An
+OAuth2 refresh token is excluded from every archive, and for ``grant_type=refresh_token`` that
+token *was* the credential — so the device comes back registered, reachable, correctly
+fingerprinted, and unable to get a token until a human re-authorizes it. That is reported as
+its own outcome and left behind as its own persistent device state, because the failure this
+design exists to prevent is a device that looks restored and fails on its first tool call.
 """
 
 from __future__ import annotations
@@ -69,6 +76,28 @@ OUTCOME_RESTORED = "restored"
 OUTCOME_WOULD_RESTORE = "would_restore"
 OUTCOME_SKIPPED = "skipped"
 OUTCOME_FAILED = "failed"
+# ADR-0018 §3. Distinct outcomes rather than a flag on `restored`, because `counts` is what
+# an operator actually reads at the end of a restore: `{"restored": 47,
+# "restored_needs_reconnect": 3}` states the cost in the headline, where a count of 50 with
+# an advisory beside it invites the reading that the restore simply worked.
+#
+# The dry-run variant exists for the same reason the dry run exists at all — a prediction
+# that omitted the one outcome requiring a human would be predicting the easy half.
+OUTCOME_RESTORED_NEEDS_RECONNECT = "restored_needs_reconnect"
+OUTCOME_WOULD_RESTORE_NEEDS_RECONNECT = "would_restore_needs_reconnect"
+
+#: The persistent per-device state a `needs_reconnect` restore leaves behind, mirrored on
+#: ``DeviceConfig.credential_state``.
+CREDENTIAL_STATE_NEEDS_RECONNECT = "needs_reconnect"
+
+#: Said in the per-device `reason` and again in the device's own status. Deliberately names
+#: what the operator must DO and why nothing else can do it — "credential missing" would send
+#: them to the archive looking for a value that was never in it.
+RECONNECT_REASON = (
+    "restored without its OAuth2 refresh token, which is excluded from every archive "
+    "(ADR-0018 §3). The token was this device's credential and nothing in an archive can "
+    "re-mint one that required consent — re-authorize the device to restore it to service."
+)
 
 
 # The fingerprint fields an archive carries, in the order they are written back. Kept in
@@ -272,11 +301,25 @@ async def restore_archive(
     # list. A fingerprint warning on 3 of 500 devices is exactly the thing that gets
     # missed in a per-device report during an incident, and it is the thing worth reading.
     warned = sum(1 for r in results if r.get("fingerprint_warning"))
+    # Lifted out of `counts` as its own name for the same reason `fingerprint_warnings` is:
+    # this is the number a caller should branch on, and reading it out of a counts dict means
+    # knowing both outcome spellings and remembering to add the dry-run one.
+    reconnect = counts.get(OUTCOME_RESTORED_NEEDS_RECONNECT, 0) + counts.get(OUTCOME_WOULD_RESTORE_NEEDS_RECONNECT, 0)
 
     logger.info(
         f"Restore {'(dry run) ' if dry_run else ''}complete: {counts}"
         + (f" ({warned} fingerprint warning{'s' if warned != 1 else ''})" if warned else "")
     )
+    if reconnect:
+        # WARNING, not INFO. A restore that ends with devices nobody can bring back without a
+        # human is the one line from this operation that must survive a log level set during
+        # an incident to keep the noise down.
+        logger.warning(
+            f"{reconnect} device(s) {'would need' if dry_run else 'need'} re-authorizing: their "
+            "OAuth2 refresh token is excluded from every archive (ADR-0018 §3) and nothing in an "
+            "archive can re-mint one. They are registered and reachable but cannot authenticate "
+            "until a human reconnects them."
+        )
     return {
         "dry_run": dry_run,
         "kind": archive.get("kind"),
@@ -284,6 +327,7 @@ async def restore_archive(
         "created_at": archive.get("created_at"),
         "counts": counts,
         "fingerprint_warnings": warned,
+        "needs_reconnect": reconnect,
         "devices": results,
     }
 
@@ -348,8 +392,14 @@ async def _restore_one(
     # restore that would discard an archived pin must say so while it can still be stopped.
     fp_fields, fp_warning = plan_fingerprint_restore(record, existing)
 
+    # ADR-0018 §3: read from the archive rather than re-derived from the credential here.
+    # Export is where the payload was last readable, so it is where the question "was the
+    # excluded token this device's whole credential" has an answer; asking again after the
+    # value is gone could only guess.
+    reconnect = bool(record.get("needs_reconnect"))
+
     if dry_run:
-        return _result(OUTCOME_WOULD_RESTORE)
+        return _result(OUTCOME_WOULD_RESTORE_NEEDS_RECONNECT if reconnect else OUTCOME_WOULD_RESTORE)
 
     try:
         auth = _auth_for(record, opener)
@@ -383,7 +433,10 @@ async def _restore_one(
         backend,
         include_deadletters=include_deadletters,
         fingerprint_fields=fp_fields,
+        needs_reconnect=reconnect,
     )
+    if reconnect:
+        return _result(OUTCOME_RESTORED_NEEDS_RECONNECT, RECONNECT_REASON)
     return _result(OUTCOME_RESTORED)
 
 
@@ -410,6 +463,7 @@ async def _restore_governance(
     *,
     include_deadletters: bool,
     fingerprint_fields: dict[str, Any] | None = None,
+    needs_reconnect: bool = False,
 ) -> None:
     """Put back what registration does not reconstruct.
 
@@ -428,6 +482,13 @@ async def _restore_governance(
     if revision:
         fields["tools_revision"] = revision
     fields.update(fingerprint_fields or {})
+    if needs_reconnect:
+        # Written here, with the fingerprint block, because it is the same kind of thing:
+        # governance metadata ABOUT a registration rather than an input TO one. Registration
+        # has nothing to say about it, and `register_device` would have just reset it to the
+        # default — this device is not one whose credential is merely absent, it is one whose
+        # credential requires a human.
+        fields["credential_state"] = CREDENTIAL_STATE_NEEDS_RECONNECT
     if fields:
         await backend.update_device_fields(hostname, **fields)
     if change:

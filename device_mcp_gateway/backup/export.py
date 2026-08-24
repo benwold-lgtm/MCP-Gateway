@@ -16,6 +16,11 @@ worker membership, assignment and call streams, sessions, idempotency markers, r
 counters, the TTL'd manifest cache. Restoring a stale claim or a half-consumed stream would
 actively harm a fresh stack, so the omission is a feature, not a gap.
 
+**And, since ADR-0018 §3, the OAuth2 refresh token** — for exactly that reason rather than a
+new one. It is gateway-accumulated runtime state that had been slipping through only because
+it is stored inside ``auth_config`` next to genuine registration inputs. See
+``backup/rotating.py`` for the boundary and why it falls where it does.
+
 Per device the archive carries **registration inputs**, not runtime state. ``pod_active``,
 ``reachable``, ``last_check``, ``worker_id`` and ``spec_hash`` are all measurements of a
 particular running stack and mean nothing in another one — restoring them would assert
@@ -50,6 +55,8 @@ quietly downgraded.
 
 from __future__ import annotations
 
+import json
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,6 +75,7 @@ from device_mcp_gateway.backup.envelope import (
     generate_passphrase,
     seal_canary,
 )
+from device_mcp_gateway.backup.rotating import needs_reconnect, strip_rotating
 from device_mcp_gateway.shared.crypto import CredentialCodec
 
 # Registration inputs — the fields a restore feeds back through register_device. Runtime
@@ -226,6 +234,10 @@ async def build_archive(
     devices_raw = await registry.list_devices()
 
     devices: list[dict[str, Any]] = []
+    # Devices whose credential WAS the excluded token (ADR-0018 §3): they restore as
+    # configuration and then need a human. Counted at the top of the archive so an operator
+    # planning a restore learns the cost before running one, not from a per-device scan.
+    excluded_devices: list[str] = []
     tool_changes: dict[str, Any] = {}
     dead_letters: dict[str, list[dict]] = {}
     deadletter_limit = int(backup_cfg.get("deadletter_limit", 1000))
@@ -241,7 +253,19 @@ async def build_archive(
         # this device has no baseline yet.
         record["fingerprint"] = {field: getattr(cfg_obj, field, None) for field in _FINGERPRINT_FIELDS}
         plaintext = credential_plaintext(getattr(cfg_obj, "auth_config", None), codec)
+        plaintext, excluded, reconnect = _exclude_rotating(cfg_obj.hostname, record["auth_type"], plaintext)
         record["auth_config"] = _seal(plaintext, sealer) if plaintext else None
+        # Written even when empty, and that is the point: the *presence* of the key is how a
+        # reader tells an archive that applied ADR-0018 §3 from one made before it existed.
+        # Without it, "no refresh_token here" is unfalsifiable — indistinguishable from a
+        # device that never had one — and the exclusion becomes a claim rather than a record.
+        record["credential_excluded"] = excluded
+        if reconnect:
+            # Decided at export because this is where the credential is still readable. The
+            # restore must not have to decrypt a blob to work out that the blob is missing
+            # the one thing that mattered.
+            record["needs_reconnect"] = True
+            excluded_devices.append(cfg_obj.hostname)
         devices.append(record)
 
         change = await backend.get_last_tool_change(cfg_obj.hostname)
@@ -257,6 +281,7 @@ async def build_archive(
         "devices": len(devices),
         "tool_changes": len(tool_changes),
         "dead_letters": sum(len(v) for v in dead_letters.values()),
+        "needs_reconnect": len(excluded_devices),
     }
     archive = build_envelope(
         kind=kind,
@@ -274,7 +299,51 @@ async def build_archive(
         f"Backup archive built: kind={kind} devices={counts['devices']} "
         f"tool_changes={counts['tool_changes']} dead_letters={counts['dead_letters']}"
     )
+    if excluded_devices:
+        logger.warning(
+            f"{len(excluded_devices)} device(s) hold a gateway-minted refresh token, which is "
+            f"excluded from every archive (ADR-0018 §3): {', '.join(sorted(excluded_devices))}. "
+            "They will restore as configuration and need re-authorizing by a human — nothing "
+            "an archive can carry re-mints a token that required consent."
+        )
     return ExportResult(archive=archive, passphrase=revealed)
+
+
+def _exclude_rotating(
+    hostname: str, auth_type: str | None, plaintext: str | None
+) -> tuple[str | None, list[str], bool]:
+    """Drop gateway-minted material from one device's credential before it is sealed.
+
+    Returns ``(plaintext, excluded_fields, needs_reconnect)``.
+
+    **An unparseable payload is dropped whole rather than passed through**, and that is the
+    non-obvious branch. Exclusion can only be *proved* on a payload this function could read;
+    re-sealing an opaque blob would put a value in the archive that nobody has shown is free
+    of a live token, while the archive claims otherwise. A claim that holds except where it
+    silently does not is worth less than no claim.
+
+    Dropping it costs the device nothing it still had: a payload this stack cannot decode is
+    one the worker cannot decode either, so that device is already dispatching without
+    credentials. The archive records the fact instead of the blob.
+    """
+    if not plaintext:
+        return None, [], False
+    try:
+        payload = json.loads(plaintext)
+        if not isinstance(payload, dict):
+            raise ValueError(f"expected an object, got {type(payload).__name__}")
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning(
+            f"Device '{hostname}' has an unreadable stored credential ({exc}); it is omitted "
+            "from the archive rather than copied through unexamined, because ADR-0018 §3's "
+            "exclusion cannot be verified on a payload that cannot be parsed. This device is "
+            "already dispatching without credentials on this stack."
+        )
+        return None, [], False
+
+    excluded = strip_rotating(auth_type, payload)
+    reconnect = needs_reconnect(auth_type, payload)
+    return json.dumps(payload), excluded, reconnect
 
 
 def _seal(plaintext: str, sealer: Any) -> str:

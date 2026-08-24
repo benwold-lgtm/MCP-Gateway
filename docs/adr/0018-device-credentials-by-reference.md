@@ -191,6 +191,26 @@ contains no credentials, so:
 **Restore keeps its dry run.** That was never about credentials; it is about a plan being read
 before it is applied, and it has already caught real mistakes.
 
+> **Implementation note (2026-08-24): this section lands in two halves, and the second one is
+> blocked on §1 rather than on itself.**
+>
+> The **exclusion is built**. A gateway-minted refresh token is dropped from every archive,
+> and a `grant_type=refresh_token` device restores as `restored_needs_reconnect` and keeps a
+> `credential_state` an operator can find on the fleet list afterwards.
+>
+> Everything above it in this section — one kind of archive, no passphrase, no KDF, no
+> canary, no elevated export grant — rests on the first sentence: *"It contains no
+> credentials."* **That sentence is not yet true of the code**, and this record asserts it
+> without naming the dependency. `OAuth2Auth` has no `credential_ref` at all — `client_secret`
+> is mandatory and inline — and `ApiKeyAuth` still accepts an inline `api_key` alongside a
+> reference. An archive of either is a credential dump, so retiring `backup:*` now would
+> remove the protection while the thing it protects is still there.
+>
+> The prerequisite is **§1 finished, not §3 continued**: OAuth2 held by reference, and inline
+> literals refused rather than merely discouraged. Recorded here rather than left to be
+> discovered, because "an archive is configuration" is exactly the kind of claim that gets
+> read out of an Accepted ADR and acted on.
+
 **There is no exception for rotating-token devices.** An earlier draft made one: a stack with
 such a device would keep the whole `backup:*` apparatus, so an archive was configuration only as
 far as §1a's first row extended. That conditional is **withdrawn**. A gateway-minted rotating
