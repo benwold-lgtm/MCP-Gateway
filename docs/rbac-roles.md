@@ -49,10 +49,27 @@ invoking tools over SSE). One scope model serves both.
 | **auditor** | — | — | — | ✅ | — | — | — | Observability / compliance, no device access (human). Widens to `audit:read` when that scope exists |
 | **caller** (agent) | ✅ | — | ✅ | — | — | — | — | An MCP client/agent that discovers and invokes tools — **machine identity**, not a UI role |
 | **backup** (agent) | — | — | — | — | ✅ | ✅ | — | A scheduled backup/restore job — **machine identity**. Deliberately not `admin`: a nightly cron entry should not also be able to invoke tools or edit the fleet, and the portable archive stays an explicit operator action rather than a standing grant |
+| **console** (agent) | ✅ | ✅ | ✅ | ✅ | — | — | — | The console's BFF relaying a **password** session, which has no per-user token to pass through — **machine identity**. `operator` ∪ `caller`, and deliberately no `backup:*` (below) |
 
-All six roles are defined in [`ROLE_SCOPES`](../device_mcp_gateway/rbac.py) today
+All seven roles are defined in [`ROLE_SCOPES`](../device_mcp_gateway/rbac.py) today
 (`operator`/`auditor`/`caller` were added with the OIDC work, ADR-0007; `backup` with
-ADR-0011). Add a role by adding one entry to `ROLE_SCOPES` — no route changes.
+ADR-0011; `console` with ADR-0023 slice 4). Add a role by adding one entry to `ROLE_SCOPES`
+— no route changes.
+
+> **`console` exists because nothing else fitted, and that gap had a cost.** A password
+> session reaches device CRUD and diagnostics, `/metrics/summary`, and the MCP invocation
+> path — `operator` cannot invoke tools, `caller` cannot manage the fleet, so the console's
+> BFF was given an **admin** key and with it every `backup:*` scope. The BFF compensates by
+> refusing password sessions on all four backup/restore routes, in its own words because
+> *"a password session proxies with the stack's admin token, which holds every `backup:*`
+> scope, so admitting one here is a complete credential dump"*. That is a real guarantee
+> enforced in the wrong layer: it holds only as long as no BFF route forgets the guard. A
+> role that cannot express the scope moves it to the gateway, where a console-side bug
+> cannot undo it.
+>
+> It is written in the source as the **union** `operator | caller` rather than a copied
+> scope list, so that if `operator` gains a scope the console gains it too instead of
+> quietly drifting behind.
 
 Note that `operator` does **not** get the backup scopes even though it manages the fleet:
 one call as `backup:read` yields every device's configuration in a single file, which is a

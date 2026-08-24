@@ -68,9 +68,22 @@ process-global registry needs no multiprocess mode.
 | `mcp_calls_rejected_overload_total` | counter | `hostname` | gateway | Calls fast-failed with 429 because the device backlog exceeded the admission watermark (F-06). |
 | `mcp_oidc_validation_failures_total` | counter | `reason` | gateway | JWTs the OIDC validator rejected, falling through to static break-glass keys. `reason` ∈ `jwks_unavailable`/`expired`/`invalid_token`/`bad_algorithm`/`malformed`/`other` — a fixed set, because the raw error embeds attacker-controlled JWT contents. Sustained `jwks_unavailable` = the IdP is unreachable and the deployment has **silently degraded to break-glass-keys-only**; rising `invalid_token`/`bad_algorithm` usually means someone is probing with forged tokens. |
 | `mcp_circuit_breaker_opens_total` | counter | `hostname` | gateway/worker | Calls rejected because a device pod's circuit breaker was open. |
+| `mcp_break_glass_uses_total` | counter | `subject` | gateway | Requests authenticated with a `break_glass: true` credential (ADR-0023 §2). Every increment is a person using the emergency path; the matching high-severity `auth.break_glass` audit record names them and the request. |
+| `mcp_break_glass_activations_total` | counter | `subject` | gateway | Break-glass **activations** — a use following a quiet gap (`gateway.break_glass_session_gap_minutes`, default 60), so one incident worked through over hours counts once however many calls it takes. This, not call volume, is the signal ADR-0023 §3 asks to watch, and it is what `MCPBreakGlassActivated` pages on. |
+| `mcp_break_glass_review_flags_total` | counter | `subject` | gateway | Activations that crossed the reactivation-frequency threshold (default 3 per 30 days). **Flagging only — nothing is ever blocked**: a call budget that cut off a legitimate incident response mid-session is the one failure a break-glass mechanism cannot afford. |
+| `mcp_break_glass_expiry_timestamp_seconds` | gauge | `subject` | gateway | Unix timestamp at which a configured break-glass credential expires (ADR-0023 §3). Absolute rather than days-remaining, deliberately: it is set at startup, and a countdown would quietly become wrong on a gateway that has not restarted in a month — which is exactly when a lapsing credential is discovered dead during the incident it exists for. An expired entry keeps reporting its past expiry so the alert stays firing after the key has been dropped. |
 
 The standard `prometheus_client` process/runtime collectors (`process_*`,
 `python_gc_*`) are also exported.
+
+> **The break-glass metrics are a notification channel, not a dashboard.** ADR-0017 §4
+> requires that break-glass use produce "a notification the tenant receives, not a log line
+> they may one day read", and in this deployment the metrics plane is what delivers that:
+> `deploy/kubernetes/prometheus-rules.yaml` ships `MCPBreakGlassActivated` (`severity: page`,
+> with **no `for:`** — every SLO and operational alert in that file waits 2–15 minutes to filter
+> transients, and an activation is not a transient), `MCPBreakGlassBecomingRoutine`, and the two credential-expiry alerts. If
+> you do not run Alertmanager, wire the `auth.break_glass.activated` audit record
+> (`severity: critical`) into whatever does page, because nothing else will.
 
 > **Cardinality:** HTTP metrics use the route **template**, and tool-call metrics use
 > `hostname` (bounded by your device count). Avoid adding unbounded labels (raw paths,

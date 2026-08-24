@@ -10,7 +10,60 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Break-glass access is individually attributable, expiring, and loud**
+  ([ADR-0023](docs/adr/0023-gateway-break-glass-attribution.md)). A `gateway.rbac` entry may
+  now carry `break_glass: true`, which moves it from "a shared admin key" to one
+  individually-generated, individually-held credential per authorized person. The flag is
+  **selective by design** — CI keys, test fixtures and machine credentials stay exactly as
+  they are, because making routine automation loud, flagged and expiring would be noise for no
+  security benefit.
+
+  A flagged entry is held to three rules, all fatal at startup with **no `allow_...`
+  override**: `name` is mandatory (without it the audit subject falls back to the *role*, so
+  two people with two different credentials both appear as `key:admin` — the
+  shared-anonymous-credential problem arriving through an omitted field); `key` is a
+  `secret://` reference resolved through the [ADR-0018](docs/adr/0018-device-credentials-by-reference.md)
+  credential store, never a literal (a literal fails "never in configuration" however
+  carefully the value was generated — the document still carries the credential); and
+  `issued` (YYYY-MM-DD) is mandatory, because an entry with no issue date has indefinite
+  validity, which is the thing the lifetime rule exists to prevent.
+
+  Lifetime defaults to 90 days (`gateway.break_glass_expiry_days`), with escalating notice at
+  14 days and again at 3 — never a silent cutoff, because a break-glass credential that
+  expires quietly is discovered dead at the worst possible moment. **An expired credential
+  stops working; it does not stop the gateway** — refusing to boot would turn a
+  credential-hygiene lapse into an outage of the mechanism that exists for outages. It is
+  dropped, logged at ERROR, and everything else keeps serving; requests are then refused with
+  401 and never served anonymously.
+
+  Every use emits a dedicated `auth.break_glass` audit record (`severity: high`, WARNING),
+  distinct from ordinary static-key authentication rather than folded into request logging
+  where it would read as unremarkable. Every **activation** — a use following a quiet gap,
+  default 60 minutes — additionally emits `auth.break_glass.activated` (`severity: critical`,
+  ERROR) and increments `mcp_break_glass_activations_total`. One incident worked through over
+  hours is one activation however many calls it takes; notifying per request would bury the
+  signal during exactly the incident it exists to announce.
+
+  **Reactivation frequency raises a review flag and never blocks.** More than
+  `gateway.break_glass_review_threshold` activations (default 3) within
+  `gateway.break_glass_review_window_days` (default 30) flags the credential for review — a
+  call budget that could cut off a legitimate incident response mid-session is the one
+  failure a break-glass mechanism cannot afford. The tell worth watching is not call volume
+  but a credential reactivating week after week, which means normal work has started reaching
+  for the emergency path and needs its own credential.
+
+  New metrics: `mcp_break_glass_uses_total`, `mcp_break_glass_activations_total`,
+  `mcp_break_glass_review_flags_total`, `mcp_break_glass_expiry_timestamp_seconds` (absolute,
+  not days-remaining — a countdown set at startup goes quietly wrong on a gateway that has
+  not restarted in a month). `deploy/kubernetes/prometheus-rules.yaml` ships the matching
+  alerts, which are the notification path
+  [ADR-0017 §4](docs/adr/0017-provider-authority-is-delegated.md) requires: `MCPBreakGlassActivated`
+  pages with **no `for:`** delay, where every SLO and operational alert in that file waits 2–15
+  minutes to filter transients.
+
+  All defaults are starting values to be tuned from operating history, not final ones.
 
 ## [0.3.5] - 2026-08-21
 

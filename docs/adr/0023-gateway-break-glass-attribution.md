@@ -1,4 +1,4 @@
-# ADR-0023: Gateway break-glass is individually attributable, rate-limited, and loud
+# ADR-0023: Gateway break-glass is individually attributable, expiring, and loud
 
 - **Status:** Accepted
 - **Date:** 2026-08-20
@@ -43,7 +43,7 @@ entry.
 
 **Why the flag, and why it must be selective.** `gateway.rbac` already serves ordinary,
 legitimate static-key use cases — CI, test fixtures, persistent machine credentials — that
-should not become loud, rate-limited, or expiring; doing that indiscriminately would make routine
+should not become loud, flagged, or expiring; doing that indiscriminately would make routine
 automation noisy for no security benefit. The flag scopes §4's stronger treatment to exactly the
 entries that are actually break-glass, leaving every other static-key use case as it is today.
 
@@ -85,9 +85,17 @@ entries that are actually break-glass, leaving every other static-key use case a
    resolver ADR-0018 built for device credentials, rather than reading a literal — the mechanism
    already exists, this is not new machinery.
 2. **Audit and notification.** Using a `break_glass: true` credential emits a dedicated
-   high-severity audit event, distinct from ordinary static-key authentication, and triggers the
-   same tenant notification the console-level break-glass path already uses — not folded into
-   routine request logging where it would read as unremarkable.
+   high-severity audit event, distinct from ordinary static-key authentication, and fires a
+   dedicated Prometheus alert (`MCPBreakGlassActivated`, `severity: page`, deliberately with
+   no `for:` delay — every SLO and operational alert in that file waits 2–15 minutes to filter
+   transients, and an activation is not a transient; the requirement is loud, not
+   eventually-consistent) — not folded into routine request logging where it would read as
+   unremarkable. This is the metrics plane, not the console-level break-glass path in the UI
+   spec — that path is unbuilt, and citing it here would be a false claim of coverage. The
+   metrics plane is the correct delivery mechanism regardless: per ADR-0017 §5, it's *"the
+   only thing a provider sees without a tenant's involvement, so it must be good enough to run
+   an estate from"* — break-glass activation is exactly the kind of signal that requirement was
+   written for.
 
    **The audit subject must be the configured name, and a flagged entry without one must refuse
    to load — never fall back to the role name.** A `break_glass: true` entry with no `name` set
@@ -95,17 +103,23 @@ entries that are actually break-glass, leaving every other static-key use case a
    from every other, which is precisely the shared-anonymous-credential problem this ADR exists
    to close, reappearing through an omitted field instead of a shared key. `name` is mandatory,
    validated at config-load time, for any entry carrying the flag.
-3. **Rate limit and expiry.** A flagged credential carries a real lifetime, not indefinite
-   validity — starting default **90 days**, matching a widely-used compliance rotation cadence,
-   with the same escalating-warning mechanism built for standing consent (§3, ADR-0017) rather
-   than a silent cutoff: prominent notice at two weeks and again at three days before expiry.
+3. **Expiry, and flagging where §4 said rate-limiting.** A flagged credential carries a real
+   lifetime, not indefinite validity — starting default **90 days**, matching a widely-used
+   compliance rotation cadence, with the same escalating-warning mechanism built for standing
+   consent (§3, ADR-0017) rather than a silent cutoff: prominent notice at two weeks and again
+   at three days before expiry.
    The case for a warning here is if anything stronger than it was there — a break-glass
    credential that silently expires is discovered dead exactly when someone needs emergency
    access during a real IdP outage, the worst possible moment to find out.
 
-   This is **not** a simple call-count budget, and treating it as one is actively the wrong
-   shape: a fixed low call limit could cut off a legitimate incident response mid-session, the
-   exact failure mode a mechanism meant to work when everything else is broken cannot afford.
+   **This is a deliberate departure from §4's literal wording, and it should be read as one.**
+   §4 asks for a credential that is "rate-limited and expiring". This ADR delivers the expiry
+   and **declines the rate limit**, substituting a review flag — so nothing in this mechanism
+   is rate-limited, and a reader expecting a limiter will not find one.
+
+   The reason is that a call budget is actively the wrong shape here, not merely unnecessary: a
+   fixed low call limit could cut off a legitimate incident response mid-session, the exact
+   failure mode a mechanism meant to work when everything else is broken cannot afford.
    Instead: **no throttling within an active session** — a real incident may need many calls
    over hours, and artificially limiting that defeats the purpose at the moment it matters most.
    **Flag, don't hard-block, on cross-session reactivation frequency** — the actual signal worth
@@ -138,24 +152,28 @@ dividing line:
 - **OIDC configured** — the static key is a genuine fallback, tried only when the JWT path
   fails or is absent. This is break-glass in substance, not just in a comment calling it that,
   and it must get the identical `break_glass: true` treatment as `MCP_ADMIN_KEY`: a named
-  entry, a `secret://` reference, rate-limiting, expiry, loud audit. Leaving it as an unflagged,
-  unhardened parallel path here means property 1 is not met for the system as a whole, no
+  entry, a `secret://` reference, reactivation flagging, expiry, loud audit. Leaving it as an
+  unflagged, unhardened parallel path here means property 1 is not met for the system as a whole, no
   matter how well `MCP_ADMIN_KEY` itself is hardened.
 - **No OIDC configured at all** — there is no fallback happening, because there is nothing to
   fall back *from*. The plain `Authenticator` is the only one built, and this key is the
   deployment's ordinary, continuous, everyday credential — not a rare emergency path. Applying
-  break-glass treatment here would be wrong, not merely unnecessary: rate-limiting or flagging
-  "reactivation frequency" on what is, for this deployment shape, normal and expected traffic
-  would either need limits so generous they mean nothing, or would actively throttle correct,
-  everyday operation. This case is deliberately left untouched, exactly as it works today.
+  break-glass treatment here would be wrong, not merely unnecessary: flagging "reactivation
+  frequency" on what is, for this deployment shape, normal and expected traffic would either need
+  a threshold so generous it means nothing, or would flag correct everyday operation as an
+  incident on every quiet-gap boundary. This case is deliberately left untouched, exactly as it
+  works today.
 
 **One carve-out this makes necessary, and it is not hypothetical.** In an OIDC-configured
 deployment the BFF's *password* sessions already relay this key on every request — `upstream_bearer`
 returns `None` for a password session precisely so the client falls back to its configured admin
 token. That is continuous, ordinary traffic on the credential the rule above would flag: it would
-fire a high-severity event and a tenant notification per request, and the 90-day expiry would take
-the password path down with it. The flag is selective by design — CI, test fixtures and persistent
-machine credentials are meant to stay unflagged — so the answer is to give the BFF's password path
+emit a high-severity audit record on **every request**, page on the first request after each quiet
+gap — so roughly daily, whenever traffic pauses longer than the session gap — and permanently trip
+the reactivation-frequency review flag, since ordinary daily use crosses any threshold meant to
+catch emergencies. The 90-day expiry would then take the password path down entirely. The flag is
+selective by design — CI, test fixtures and persistent machine credentials are meant to stay
+unflagged — so the answer is to give the BFF's password path
 its own **named, unflagged** `gateway.rbac` entry, not to widen the condition. `gateway.api_key`
 then becomes genuinely emergency-only in an OIDC deployment, which is what this rule assumes rather
 than what is true today, and the password path gains an attributable subject instead of `key:legacy`
@@ -173,7 +191,10 @@ entries are provisioned.
 
 ## Consequences
 
-- **Positive:** closes three of four properties ADR-0017 §4 requires and never designed;
+- **Positive:** closes three of four properties ADR-0017 §4 requires and never designed — with
+  property 3 met on the expiry half and deliberately **substituted** on the other, a review flag
+  in place of the rate limit §4 asked for (see property 3 for why a call budget is the wrong
+  shape for this credential);
   revocation scoped to individuals instead of the whole team; reuses the existing `gateway.rbac`
   schema and the ADR-0018 resolver rather than introducing new mechanisms; the audit subject for
   a break-glass action is now a specific, mandatory, configured name, the same precision
@@ -188,7 +209,7 @@ entries are provisioned.
   threshold from real usage once there's operating history (both ship as starting defaults, not
   final values — see property 3 above); extend the automated custody-verification check from
   property 1 to the console-level break-glass account as well, once its reissuance cycle is
-  defined (the audit/rate-limit/attribution properties were already reconciled between the two
+  defined (the audit/expiry/attribution properties were already reconciled between the two
   mechanisms — see the UI spec's §6 — but this specific verification step is new here and hasn't
   been carried over yet).
 

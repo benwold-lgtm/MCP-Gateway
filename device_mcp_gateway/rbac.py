@@ -20,7 +20,8 @@ import concurrent.futures
 import os
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 from typing import TYPE_CHECKING, Optional, Union
 
 from fastapi import HTTPException, Request, Security
@@ -79,6 +80,23 @@ ROLE_SCOPES: dict[str, frozenset[str]] = {
     # thing a scheduler holds standing permission to produce.
     "backup": frozenset({SCOPE_BACKUP_READ, SCOPE_BACKUP_WRITE}),
 }
+
+# The console's own server-side identity: what the BFF presents to this gateway when it
+# relays a *password* session, which has no per-user token to pass through.
+#
+# **Written as a union rather than a scope list, because the relationship is the
+# definition.** The console is an operator's fleet management plus the tool invocation a
+# caller does; if `operator` gains a scope later, the console should gain it too, and a
+# hand-copied list would silently stop tracking.
+#
+# **What it deliberately excludes is the point: every `backup:*` scope.** The BFF already
+# refuses password sessions on all four backup/restore routes, with a comment saying why —
+# "a password session proxies with the stack's admin token, which holds every `backup:*`
+# scope, so admitting one here is a complete credential dump". That is a real guarantee
+# enforced in the wrong layer: it holds only as long as no BFF route forgets the guard. A
+# role that cannot express the scope moves it to the gateway, where a console-side bug
+# cannot undo it.
+ROLE_SCOPES["console"] = ROLE_SCOPES["operator"] | ROLE_SCOPES["caller"]
 
 
 @dataclass(frozen=True)
@@ -291,7 +309,11 @@ class CompositeAuthenticator:
         return principal
 
 
-class BreakGlassConfigError(ValueError):
+class RbacConfigError(ValueError):
+    """A ``gateway.rbac`` entry is malformed. Always fatal, in every mode."""
+
+
+class BreakGlassConfigError(RbacConfigError):
     """A ``break_glass: true`` entry is malformed. Always fatal, in every mode.
 
     Unlike the weak-key gate, this has no ``allow_...`` override. A misconfigured break-glass
@@ -300,26 +322,39 @@ class BreakGlassConfigError(ValueError):
     """
 
 
-def _resolve_break_glass_key(ref_raw: str, resolver: Optional[object], name: str) -> str:
-    """Read a flagged entry's key through the ADR-0018 resolver.
+def _is_secret_ref(raw: object) -> bool:
+    """Whether a configured key is a ``secret://`` reference rather than a literal."""
+    return isinstance(raw, str) and raw.startswith("secret://")
+
+
+def _resolve_key(ref_raw: str, resolver: Optional[object], name: str, *, break_glass: bool = False) -> str:
+    """Read an entry's key through the ADR-0018 resolver.
 
     Startup is synchronous and ``CredentialResolver.resolve`` is not, so the coroutine is run
     here. Reusing the resolver rather than reading the file directly is deliberate: it carries
     the ownership checks that decide whether a credential file is actually private to this
     workload, and a second reader would be a second place for that policy to drift.
+
+    **Failure is fatal for flagged and unflagged entries alike.** The alternative for an
+    ordinary entry — drop it and carry on — leaves its consumer (CI, the console's BFF)
+    getting 401s with the reason only in a log line nobody is reading yet. A reference the
+    operator wrote and got wrong is a misconfiguration, not the credential-hygiene lapse that
+    makes an *expired* flagged key a drop-and-warn rather than a refusal.
     """
     from device_mcp_gateway.credentials import CredentialRef, ResolverError
 
+    what = "is break_glass but" if break_glass else "has a secret:// key but"
     if resolver is None:
-        raise BreakGlassConfigError(
-            f"gateway.rbac[{name!r}] is break_glass but no credential resolver is configured. "
-            "A flagged entry takes a secret:// reference (ADR-0023), which needs "
-            "gateway.credentials.root (or MCP_CREDENTIAL_ROOT) set."
+        raise (BreakGlassConfigError if break_glass else RbacConfigError)(
+            f"gateway.rbac[{name!r}] {what} no credential resolver is configured. "
+            "A secret:// reference needs gateway.credentials.root (or MCP_CREDENTIAL_ROOT) set."
         )
     try:
         ref = CredentialRef.parse(ref_raw)
     except ResolverError as exc:
-        raise BreakGlassConfigError(f"gateway.rbac[{name!r}] has an unusable secret reference: {exc}") from exc
+        raise (BreakGlassConfigError if break_glass else RbacConfigError)(
+            f"gateway.rbac[{name!r}] has an unusable secret reference: {exc}"
+        ) from exc
 
     async def _go() -> str:
         return await resolver.resolve(ref)  # type: ignore[attr-defined]
@@ -333,10 +368,15 @@ def _resolve_break_glass_key(ref_raw: str, resolver: Optional[object], name: str
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, _go()).result()
     except ResolverError as exc:
-        raise BreakGlassConfigError(
-            f"gateway.rbac[{name!r}] is break_glass and its key could not be resolved: {exc}. "
-            "Refusing to start — a break-glass path that is broken is discovered during the "
-            "incident it exists for."
+        tail = (
+            "Refusing to start — a break-glass path that is broken is discovered during the " "incident it exists for."
+            if break_glass
+            else "Refusing to start — the entry would otherwise be silently absent, and its "
+            "holder would see only unexplained 401s."
+        )
+        raise (BreakGlassConfigError if break_glass else RbacConfigError)(
+            f"gateway.rbac[{name!r}] {'is break_glass and its' if break_glass else 'has a'} key "
+            f"could not be resolved: {exc}. {tail}"
         ) from exc
 
 
@@ -349,8 +389,13 @@ DEFAULT_BREAK_GLASS_EXPIRY_DAYS = 90
 _BREAK_GLASS_WARN_DAYS = (14, 3)
 
 
-def _break_glass_days_remaining(entry: dict, name: str, expiry_days: int, *, today: date) -> int:
-    """Days left on a flagged entry. Raises :class:`BreakGlassConfigError` if undatable.
+def _break_glass_days_remaining(entry: dict, name: str, expiry_days: int, *, today: date) -> tuple[int, date]:
+    """``(days_left, expires_on)`` for a flagged entry. Raises on an undatable one.
+
+    The expiry *date* comes back alongside the countdown so the metric can publish an
+    absolute timestamp. A days-remaining gauge set at startup silently becomes wrong on a
+    gateway that has not restarted in a month, which is the same "discovered dead during the
+    incident" failure the warnings exist to prevent, arriving through the monitoring instead.
 
     ``issued`` is mandatory on a flagged entry for the same reason ``name`` is: an omitted
     field must not silently produce the behaviour the ADR forbids. Without an issue date the
@@ -377,7 +422,7 @@ def _break_glass_days_remaining(entry: dict, name: str, expiry_days: int, *, tod
             f"gateway.rbac[{name!r}] has an 'issued' date in the future ({issued}). Refusing to "
             "start — a future issue date silently extends the credential's lifetime."
         )
-    return expiry_days - (today - issued).days
+    return expiry_days - (today - issued).days, issued + timedelta(days=expiry_days)
 
 
 def _break_glass_entries(cfg: dict) -> list[str]:
@@ -419,7 +464,8 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
     expiry_days = int(gateway.get("break_glass_expiry_days", DEFAULT_BREAK_GLASS_EXPIRY_DAYS))
     dropped = 0
     resolver = None
-    if any(isinstance(e, dict) and e.get("break_glass") for e in gateway.get("rbac", []) or []):
+    entries = [e for e in gateway.get("rbac", []) or [] if isinstance(e, dict)]
+    if any(e.get("break_glass") or _is_secret_ref(e.get("key")) for e in entries):
         from device_mcp_gateway.credentials import build_resolver
 
         resolver = build_resolver(cfg)
@@ -427,7 +473,20 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
     for entry in gateway.get("rbac", []) or []:
         role = entry.get("role", "viewer")
         if not entry.get("break_glass"):
-            _add(entry.get("key"), role, entry.get("name") or role)
+            name = entry.get("name") or role
+            raw = entry.get("key")
+            # An ordinary entry may ALSO hold its key by reference, and often must: the
+            # config document is mounted from a ConfigMap, so a literal here puts a live
+            # bearer credential somewhere `kubectl get configmap` prints it. Slice 1 required
+            # a reference for flagged entries; this permits one everywhere.
+            #
+            # ⚠️ Permitting it is also what closes a footgun. Before this, `key:
+            # "secret://..."` on an unflagged entry did not error — the reference STRING
+            # became the valid bearer token, so anyone who could read the ConfigMap could
+            # authenticate with the pointer itself. A scheme that means one thing in one
+            # entry and something else in the next is the kind of difference nobody sees in
+            # review.
+            _add(_resolve_key(raw, resolver, name) if _is_secret_ref(raw) else raw, role, name)
             continue
 
         # ── ADR-0023: a flagged entry is held to two rules, both fatal ──────────────────
@@ -462,7 +521,12 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
                 "however the value was generated."
             )
         # 3. A real lifetime (§3). `issued` is mandatory for the same reason `name` is.
-        remaining = _break_glass_days_remaining(entry, name, expiry_days, today=date.today())
+        remaining, expires_on = _break_glass_days_remaining(entry, name, expiry_days, today=date.today())
+        # Published for every flagged entry, expired ones included: the alert has to keep
+        # firing after the key is dropped, or the loudest moment goes quiet.
+        metrics.break_glass_expiry_timestamp_seconds.labels(subject=f"key:{name}").set(
+            datetime.combine(expires_on, dt_time.min, tzinfo=timezone.utc).timestamp()
+        )
 
         # **An expired credential stops working; it does NOT stop the gateway.** The ADR asks
         # for a real cutoff rather than indefinite validity, and says nothing about startup —
@@ -489,7 +553,7 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
         elif remaining <= _BREAK_GLASS_WARN_DAYS[0]:
             logger.warning(f"Break-glass credential '{name}' expires in {remaining} day(s); schedule a reissue.")
 
-        _add(_resolve_break_glass_key(str(raw), resolver, name), role, name, break_glass=True)
+        _add(_resolve_key(str(raw), resolver, name, break_glass=True), role, name, break_glass=True)
 
     # **`enabled` tracks whether keys were CONFIGURED, not whether they survived.** An expired
     # break-glass entry is dropped from `keys` above, and if it was the only key configured
@@ -644,7 +708,18 @@ async def authenticate_request(
     """
     authenticator = request.app.state.authenticator
     try:
-        request.state.principal = await authenticator.authenticate_async(credentials)
+        principal = await authenticator.authenticate_async(credentials)
+        request.state.principal = principal
+        if principal.break_glass:
+            # ADR-0023 §2/§3. Hung off the resolved Principal rather than off the
+            # authenticator, so it covers the static path and the OIDC composite's
+            # fall-through to a break-glass key identically — the fall-through is the case
+            # that matters most, and it is the one easiest to miss.
+            from device_mcp_gateway.breakglass import note_break_glass_use
+
+            await note_break_glass_use(
+                request.app.state, principal, rid=_audit_rid(request), target=_audit_target(request)
+            )
     except HTTPException as exc:
         if exc.status_code == 401:
             audit_event(

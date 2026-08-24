@@ -254,6 +254,45 @@ oidc_validation_failures_total = Counter(
     "means someone is probing with forged tokens.",
     ["reason"],
 )
+# --- Break-glass (ADR-0023 §2/§3) --------------------------------------------
+# Labelled by audit subject ("key:alice"). Cardinality is bounded by the number of
+# configured break-glass entries and every value is operator-chosen, never caller-supplied —
+# unlike the OIDC failure reasons above, which had to be a fixed allow-list precisely because
+# a caller controls them.
+break_glass_uses_total = Counter(
+    "mcp_break_glass_uses_total",
+    "Requests authenticated with a `break_glass: true` credential (ADR-0023). Every "
+    "increment is a person using the emergency path, and the matching high-severity "
+    "auth.break_glass audit record names them.",
+    ["subject"],
+)
+break_glass_activations_total = Counter(
+    "mcp_break_glass_activations_total",
+    "Break-glass *activations* — a use that follows a quiet gap, so one incident worked "
+    "through over hours counts once however many calls it takes. This, not call volume, is "
+    "the signal ADR-0023 §3 asks to watch: repeated activations across separate weeks mean "
+    "the credential has become routine access rather than emergency access.",
+    ["subject"],
+)
+break_glass_expiry_timestamp_seconds = Gauge(
+    "mcp_break_glass_expiry_timestamp_seconds",
+    "Unix timestamp at which a configured break-glass credential expires (ADR-0023 §3). An "
+    "ABSOLUTE timestamp rather than days-remaining, deliberately: this is set once at startup "
+    "and a days-remaining value would quietly become wrong on a gateway that has not restarted "
+    "in a month — which is precisely when a lapsing credential is discovered dead during the "
+    "incident it exists for. Prometheus does the arithmetic instead. An expired entry keeps "
+    "reporting its (past) expiry so the alert stays firing after the key has been dropped.",
+    ["subject"],
+)
+break_glass_review_flags_total = Counter(
+    "mcp_break_glass_review_flags_total",
+    "Activations that crossed the reactivation-frequency threshold and raised a review "
+    "flag. **Flagging only — nothing is ever blocked** (ADR-0023 §3): a call budget that "
+    "cut off a legitimate incident response mid-session is the one failure a break-glass "
+    "mechanism cannot afford.",
+    ["subject"],
+)
+
 worker_calls_throttled_total = Counter(
     "mcp_worker_calls_throttled_total",
     "Tool-call dispatches that had to wait on the worker-wide concurrency cap "

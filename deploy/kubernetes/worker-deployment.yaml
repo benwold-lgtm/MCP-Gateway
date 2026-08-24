@@ -45,6 +45,9 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+        # Required to read the credentials volume (root-owned Secret; group bit or
+        # nothing). Same reasoning as deployment.yaml.
+        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -79,6 +82,8 @@ spec:
                 # before SIGTERM fires, preventing new assignments during shutdown.
                 command: ["/bin/sh", "-c", "sleep 5"]
           env:
+            - name: MCP_CREDENTIAL_ROOT
+              value: /run/secrets/mcp
             - name: MCP_CONFIG
               value: /app/config.yaml
             - name: MCP_GATEWAY_API_KEY
@@ -115,6 +120,9 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
           volumeMounts:
+            - name: credentials
+              mountPath: /run/secrets/mcp
+              readOnly: true
             - name: config
               mountPath: /app/config.yaml
               subPath: config.yaml
@@ -157,6 +165,15 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
       volumes:
+        - name: credentials
+          secret:
+            # ADR-0018 credential store. The WORKER needs this too — in distributed mode it
+            # is the worker that resolves a device credential at dispatch, and §7b's rollout
+            # order (workers before the gateway) exists because of exactly that.
+            secretName: gateway-credentials
+            optional: true
+            # ⚠️ 0440 + `fsGroup` are measured, not chosen — see deployment.yaml.
+            defaultMode: 0440
         - name: config
           configMap:
             name: gateway-config
