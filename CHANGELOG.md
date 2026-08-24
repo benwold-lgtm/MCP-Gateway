@@ -12,6 +12,50 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Added
 
+- **An OAuth2 device can hold its `client_secret` and `password` by reference**
+  ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md) §1). §1a's table has always
+  listed them as by-reference alongside the API key; the code had no such thing — `OAuth2Auth`
+  carried no reference field at all and `client_secret` was mandatory and inline. That is the
+  concrete reason §3's archive simplification is blocked: an archive of an OAuth2 fleet is
+  still a credential dump whatever else §3 says about archives.
+
+  ```jsonc
+  "auth": {
+    "token_endpoint": "https://idp.example.com/token",
+    "client_id": "gateway",
+    "client_secret_ref": "secret://t-3f9a1c2b/devices/erp#client-secret",
+    // password grant only:
+    "grant_type": "password", "username": "svc",
+    "password_ref": "secret://t-3f9a1c2b/devices/erp#password"
+  }
+  ```
+
+  **Two references, not one, and that is the decision rather than an accident of naming.**
+  A single `credential_ref` was enough while an API key was the only by-reference case. These
+  two secrets are provisioned *and rotated* independently by the tenant, so folding them into
+  one store path with two fragments would tie two different rotation schedules to one
+  location — the opposite of what §1 buys.
+
+  Everything that needs "every reference this device depends on" now reads one accessor,
+  `AbstractAuth.credential_refs()`, rather than keeping its own list of field names — a second
+  list is exactly how a handler gets added and silently skipped by one caller. The restore-time
+  resolvability check reads it, so an unresolvable OAuth2 fleet is reported rather than passing
+  as fine.
+
+  **There is deliberately no `refresh_token_ref`** (§1a). The gateway is the only party present
+  when a provider rotates one, so there is nobody else to write it and a reference model cannot
+  describe it. It stays encrypted at rest, and `MCP_SECRET_KEY` remains a named, bounded,
+  permanent exception rather than a debt. A test asserts the field's absence so symmetry does
+  not "fix" it later.
+
+  Inline `client_secret` still works untouched — this permits a reference, it does not yet
+  require one. Supplying both is refused rather than resolved by precedence: any precedence
+  rule makes the losing value invisible, so a reference that silently never took effect would
+  look exactly like one that did. A bound handler re-serialises its **reference**, never the
+  material it resolved, so an update after a dispatch cannot write the secret back into the
+  registry.
+
+
 - **A restore now says when this stack cannot resolve a device's credential reference**
   ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md) §3). §3 states it as a
   consequence — restoring into a different stack "requires that stack to be able to resolve

@@ -31,7 +31,9 @@ from device_mcp_gateway.security.url_policy import (
     resolve_allowed_ports,
 )
 
-from .base import AbstractAuth, CredentialsChangedHook
+from device_mcp_gateway.credentials.resolver import CredentialRef
+
+from .base import AbstractAuth, CredentialNotBound, CredentialsChangedHook, exclusive_secret
 
 _BODY_GRANTS = ("client_credentials", "password", "refresh_token")
 
@@ -42,7 +44,9 @@ class OAuth2Auth(AbstractAuth):
 
     token_endpoint: str
     client_id: str
-    client_secret: str
+    # Optional since ADR-0018 §1: supply this **or** `client_secret_ref`, never both and never
+    # neither. It stays first for positional compatibility with every existing call site.
+    client_secret: str | None = None
     scopes: list[str] | None = None
     refresh_before_expiry: int = 300
     grant_type: str = "client_credentials"
@@ -52,10 +56,40 @@ class OAuth2Auth(AbstractAuth):
     password: str | None = None
     refresh_token: str | None = None
     extra_params: dict[str, str] | None = None
+    # ADR-0018 §1, the by-reference forms. Two named fields rather than one shared
+    # `credential_ref`, because these are two independently-provisioned, independently-rotated
+    # secrets; see `AbstractAuth.credential_refs`.
+    #
+    # There is deliberately no `refresh_token_ref`. That credential is gateway-minted (§1a) —
+    # the gateway is the only party present when the provider rotates it, so there is nobody
+    # else to write it and a reference model cannot describe it. It stays encrypted at rest.
+    client_secret_ref: str | None = None
+    password_ref: str | None = None
 
     def __post_init__(self):
         if self.grant_type not in _BODY_GRANTS:
             raise ValueError(f"grant_type must be one of {_BODY_GRANTS}, got {self.grant_type!r}")
+        # Checked here rather than at the route, so every construction path — registration, a
+        # restore, a worker rehydrating from the registry — gets the same answer. The same
+        # reasoning as ApiKeyAuth's, and the same helper.
+        exclusive_secret(
+            self.client_secret, self.client_secret_ref, field="client_secret", ref_field="client_secret_ref"
+        )
+        # Only for the grant that actually sends one. A `client_credentials` device carries no
+        # password, and demanding one of `password`/`password_ref` there would refuse a
+        # perfectly ordinary registration.
+        if self.grant_type == "password":
+            exclusive_secret(self.password, self.password_ref, field="password", ref_field="password_ref")
+        elif self.password_ref is not None:
+            raise ValueError(
+                f"password_ref is only meaningful for grant_type=password, not {self.grant_type!r}. "
+                "A reference that is never resolved looks exactly like one that is."
+            )
+        for raw in (self.client_secret_ref, self.password_ref):
+            if raw is not None:
+                # Parsed at construction so a malformed reference is a registration error, not
+                # a dispatch-time surprise on a device that looked fine when it was added.
+                CredentialRef.parse(raw)
         if self.auth_style not in ("request_body", "basic"):
             raise ValueError(f"auth_style must be 'request_body' or 'basic', got {self.auth_style!r}")
         self._access_token: str | None = None
@@ -72,6 +106,8 @@ class OAuth2Auth(AbstractAuth):
         # Set by the owning pod via on_credentials_changed() so a rotated refresh token
         # reaches durable storage. None means nobody is persisting us (tests, ad-hoc use).
         self._credentials_changed: CredentialsChangedHook | None = None
+        # Set by the owning pod via configure_credentials() at wire-up (ADR-0018 §2).
+        self._resolver: Any | None = None
 
     def configure_egress(self, *, allow_private: bool, allowed_ports: set[int] | None = None) -> None:
         self._allow_private = allow_private
@@ -80,18 +116,85 @@ class OAuth2Auth(AbstractAuth):
     def on_credentials_changed(self, hook: CredentialsChangedHook) -> None:
         self._credentials_changed = hook
 
+    def credential_refs(self) -> dict[str, str]:
+        refs = {}
+        if self.client_secret_ref:
+            refs["client_secret_ref"] = self.client_secret_ref
+        if self.password_ref:
+            refs["password_ref"] = self.password_ref
+        return refs
+
+    def configure_credentials(self, resolver: Any | None) -> None:
+        self._resolver = resolver
+
+    async def bind(self, resolver: Any) -> None:
+        """Resolve this handler's references for one token exchange.
+
+        The resolved values live on the instance and are never written back: ``to_dict``
+        re-emits the reference, not the material, so an update after a bind cannot quietly
+        put the secret back in the registry.
+
+        ``ReferenceInvalid`` and ``StoreUnavailable`` propagate unchanged — ADR-0018 §7's
+        whole point is that the caller can tell a bad reference from a store outage.
+        """
+        if self.client_secret_ref:
+            self.client_secret = await resolver.resolve(CredentialRef.parse(self.client_secret_ref))
+        if self.password_ref:
+            self.password = await resolver.resolve(CredentialRef.parse(self.password_ref))
+
+    async def _ensure_bound(self) -> None:
+        """Resolve before a token fetch, mirroring ``ApiKeyAuth._ensure_bound``.
+
+        The failure modes are named apart for the same reason they are there: "this deployment
+        has no resolver" and "the store said no" send an operator to different systems.
+        """
+        if not self.credential_refs():
+            return
+        resolver = getattr(self, "_resolver", None)
+        if resolver is not None:
+            await self.bind(resolver)
+            return
+        missing = [field for field, _ in self.credential_refs().items()]
+        if self.client_secret is None or (self.grant_type == "password" and self.password is None):
+            raise CredentialNotBound(
+                f"device credential(s) {missing} have not been resolved: this handler was never "
+                "given a credential resolver. Either the deployment has none configured "
+                "(gateway.credentials.root / MCP_CREDENTIAL_ROOT), or this dispatch path predates "
+                "the ADR-0018 wiring — which is what a replica mid-rolling-restart looks like."
+            )
+
     async def ensure_token(self) -> None:
         async with self._lock:
             if self._access_token and time.time() < self._token_expiry - self.refresh_before_expiry:
                 return
+            # Inside the cached-token check on purpose: a live access token means the secret
+            # was already good, and re-reading the store on every dispatch to prove it again
+            # would make the token cache pointless and the store a per-request dependency.
+            await self._ensure_bound()
             await self._fetch_token()
+
+    def _bound(self, value: str | None, field: str) -> str:
+        """The value, or a fail-closed error naming which secret was never resolved.
+
+        Reached only if a caller builds a token request without going through
+        ``ensure_token``. Raising beats sending ``"None"`` as a client secret, which the
+        provider answers with a 401 that reads as a wrong credential and sends the operator
+        to rotate a secret that was never the problem — the same reasoning as
+        ``ApiKeyAuth._value``.
+        """
+        if value is None:
+            raise CredentialNotBound(
+                f"oauth2 {field} is unresolved for this handler; the dispatch path must bind "
+                "the credential reference before building a token request"
+            )
+        return value
 
     def _build_request(self) -> tuple[dict[str, str], httpx.BasicAuth | None]:
         """Token-request body + optional HTTP Basic auth, per grant and auth_style."""
         data: dict[str, str] = {"grant_type": self.grant_type, "scope": " ".join(self._scopes)}
         if self.grant_type == "password":
             data["username"] = self.username or ""
-            data["password"] = self.password or ""
+            data["password"] = self._bound(self.password, "password")
         elif self.grant_type == "refresh_token":
             data["refresh_token"] = self.refresh_token or ""
         if self.audience:
@@ -100,10 +203,10 @@ class OAuth2Auth(AbstractAuth):
             data.update(self.extra_params)
 
         if self.auth_style == "basic":
-            return data, httpx.BasicAuth(self.client_id, self.client_secret)
+            return data, httpx.BasicAuth(self.client_id, self._bound(self.client_secret, "client_secret"))
         # request_body: client creds travel in the form body.
         data["client_id"] = self.client_id
-        data["client_secret"] = self.client_secret
+        data["client_secret"] = self._bound(self.client_secret, "client_secret")
         return data, None
 
     async def _fetch_token(self) -> None:
@@ -172,15 +275,21 @@ class OAuth2Auth(AbstractAuth):
             "type": "oauth2",
             "token_endpoint": self.token_endpoint,
             "client_id": self.client_id,
-            "client_secret": self.client_secret,
+            # A by-reference handler serialises its REFERENCE and not the material it may have
+            # resolved a moment ago. Emitting a bound value would write the secret back into
+            # the registry on the next update, quietly undoing ADR-0018 for that device — the
+            # same trap ApiKeyAuth.to_dict guards against.
+            "client_secret": None if self.client_secret_ref else self.client_secret,
             "scopes": self._scopes,
             "grant_type": self.grant_type,
             "auth_style": self.auth_style,
             "audience": self.audience,
             "username": self.username,
-            "password": self.password,
+            "password": None if self.password_ref else self.password,
             "refresh_token": self.refresh_token,
             "extra_params": self.extra_params,
+            "client_secret_ref": self.client_secret_ref,
+            "password_ref": self.password_ref,
         }
 
     @classmethod
@@ -197,4 +306,6 @@ class OAuth2Auth(AbstractAuth):
             password=data.get("password"),
             refresh_token=data.get("refresh_token"),
             extra_params=data.get("extra_params"),
+            client_secret_ref=data.get("client_secret_ref"),
+            password_ref=data.get("password_ref"),
         )

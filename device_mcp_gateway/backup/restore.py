@@ -57,7 +57,6 @@ flag recording its absence would go stale the moment somebody did. See
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from fastapi import HTTPException
@@ -295,18 +294,25 @@ async def plan_credential_refs(
     Read-only and side-effect-free: this resolves to find out whether resolution works, and
     keeps nothing. The material never leaves this function.
     """
+    from device_mcp_gateway.worker.runner import _auth_from_config
+
     refs: list[tuple[str, str]] = []
     for record in archive.get("devices", []):
         blob = record.get("auth_config")
         if not blob:
             continue
         try:
-            payload = json.loads(_open_credential(blob, opener))
+            # Through the real handler, not by reading a field name out of the JSON. A handler
+            # can hold more than one reference — `OAuth2Auth` holds `client_secret_ref` and
+            # `password_ref` — and a second copy of that list here is exactly how one gets
+            # added and silently skipped by this check. `credential_refs()` is the one answer.
+            auth = _auth_from_config(record.get("auth_type"), _open_credential(blob, opener))
         except Exception:  # noqa: BLE001 — preflight already proved these open; a shape
             continue  # surprise here is not worth failing a restore over.
-        ref = payload.get("credential_ref") if isinstance(payload, dict) else None
-        if ref:
-            refs.append((record.get("hostname") or "<unnamed>", ref))
+        if auth is None:
+            continue
+        for raw in auth.credential_refs().values():
+            refs.append((record.get("hostname") or "<unnamed>", raw))
 
     if not refs:
         return {}, None
