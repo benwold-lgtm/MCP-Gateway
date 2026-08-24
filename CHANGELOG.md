@@ -10,6 +10,41 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A device's TLS pin no longer dies on an unrelated edit**
+  ([ADR-0015](docs/adr/0015-endpoint-fingerprinting.md)). A PUT that changed only
+  `rate_limit_rps` cleared `fingerprint_state`, `fingerprint_pinned_at` and
+  `tls_spki_sha256`. One health check later the device **re-pinned by trust-on-first-use**
+  to whatever key it next saw and reported `pinned` again, with nothing logged — an end
+  state indistinguishable from a device that had never lost its pin.
+
+  Three things made it a security bug rather than an inconvenience: §8's out-of-band
+  pre-pinning (an operator verifying an SPKI by hand) was destroyed by the next edit and
+  cannot be re-established by observation; the re-pin runs through the ordinary first-sight
+  path, so it produces **no `key_changed` verdict and no quarantine** — the alarm ADR-0015
+  exists to raise cannot fire, because the gateway believes it is meeting the device for the
+  first time; and anyone holding `devices:write` could therefore clear a pin with a no-op
+  edit.
+
+  **The cause was already known on the other caller.** `plan_fingerprint_restore` writes the
+  live fingerprint back precisely because `replace_device` "builds a fresh `DeviceConfig`
+  from registration inputs alone". Restore compensated; the device-update route did not, and
+  no test paired a pin with a PUT. The carry-forward now lives in `replace_device`, so it
+  holds for every caller including ones not yet written; restore still writes afterwards and
+  still wins, which is correct — it arbitrates between an archived record and a live one, a
+  question the registry cannot answer.
+
+  The pin is carried **even when `base_url` changes**, deliberately: repointing a device is
+  a trust change, and the designed way to accept one is the `key_changed` → approve flow
+  (§6), loud and audited. Resetting instead would be silent, and would leave "change the
+  URL" as a way to launder a new key past the pin. What is preserved is the whole trust
+  record, not just the pin — an *unpinned* device can still carry a per-device `enforce`
+  policy, and dropping that downgrades it toward trusting more.
+
+  Found on a live cluster during an unrelated credential migration, and verified there
+  against the same reproduction after the fix.
+
 ### Added
 
 - **A deployment can refuse inline device credentials** —
