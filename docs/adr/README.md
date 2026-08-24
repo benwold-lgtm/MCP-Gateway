@@ -51,11 +51,15 @@ Re-ranked 2026-08-20, once every open question in the set was closed. The origin
 0019 → 0018 → 0020 → 0017 → 0021 — assumed all five records were unbuilt. Two are now wholly or
 partly shipped, and 0022/0023 have since joined, so the live order is:
 
+**Items 1 and 2 are complete** (2026-08-24). Numbering of the remainder is left as it was so
+that references elsewhere to "item 4, the plan digest" keep pointing at the same work; the
+next thing to build is item 3.
+
 | # | Work | Why it sits here |
 |---|------|------------------|
 | — | [0019](0019-opaque-tenant-identity.md) | **Done** — shipped in #128 (`tools/tenant_id.py`) |
-| 1 | [0018](0018-device-credentials-by-reference.md) §7c prerequisite: a declared `kind`/capability on `CredentialResolver` | The smallest unit in the set, and three behaviours — cache, breaker, metrics — are all blocked behind it. Today the resolver exposes only `backend: str`, and none of the three may branch on `backend.startswith("files:")` |
-| 2 | [0023](0023-gateway-break-glass-attribution.md) | Closes a gap in **shipped** code, depends on nothing else here, and [0017](0017-provider-authority-is-delegated.md) §4 cannot be satisfied until it lands |
+| — | [0018](0018-device-credentials-by-reference.md) §7c prerequisite: a declared `kind`/capability on `CredentialResolver` | **Done** — shipped in #149 (`ResolverKind`). Three behaviours (cache, breaker, metrics) branch on the declared property rather than on `backend.startswith("files:")` |
+| — | [0023](0023-gateway-break-glass-attribution.md) | **Done** — four slices: named entries (#150), expiry (#151), the loud audit event and reactivation flagging (#152), and `gateway.api_key`'s conditional treatment (#153). Two prerequisites came out of slice 4's specification and shipped with #152: any `gateway.rbac` entry may hold its key by `secret://` reference (a literal would sit in a ConfigMap), and a `console` role — nothing in `ROLE_SCOPES` matched what the UI's BFF needs, which is why it held an admin key. [0017](0017-provider-authority-is-delegated.md) §4 is now satisfied on three of four properties, with property 3 met on expiry and deliberately substituted on the other — see 0023 property 3 |
 | 3 | [0018](0018-device-credentials-by-reference.md) §3: archive exclusion, plus *needs reconnecting* on the device-list projection | Completes the backup simplification; no new dependencies |
 | 4 | [0018](0018-device-credentials-by-reference.md) §6: the plan digest | The critical path. Both restore and [0022](0022-agent-initiated-device-writes-are-plan-bound.md) wait on it, and it is specified but not yet built |
 | 5 | [0022](0022-agent-initiated-device-writes-are-plan-bound.md) | Directly gated by 4 |
