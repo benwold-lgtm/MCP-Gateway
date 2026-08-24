@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from device_mcp_gateway import API_V1_PREFIX, __version__, metrics
+from device_mcp_gateway.credentials.resolver import audit_inline_credentials, require_references
 from device_mcp_gateway.api import admin as api_admin
 from device_mcp_gateway.api import backup as api_backup
 from device_mcp_gateway.api import deadletter as api_deadletter
@@ -383,6 +384,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             registry = app.state.registry
             await registry.load_persisted_devices()
             health_task = asyncio.create_task(registry.start_health_loop())
+
+        # ADR-0018 §1 inventory. After the registry is loaded in either mode, and never fatal:
+        # a stack must not fail to start because a diagnostic could not be produced.
+        await audit_inline_credentials(app.state.registry, app.state.codec, required=require_references(cfg))
 
         # --- Metrics (dedicated port + gauge refresher) ---
         gauge_task = None

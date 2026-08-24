@@ -90,6 +90,9 @@ class ApiKeyAuth(AbstractAuth):
                 ) from exc
         return value
 
+    def inline_secret_fields(self) -> list[str]:
+        return ["api_key"] if self.api_key is not None else []
+
     async def bind(self, resolver: Any) -> None:
         """Resolve ``credential_ref`` into the live key for this dispatch.
 

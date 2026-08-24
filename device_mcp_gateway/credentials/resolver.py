@@ -27,8 +27,10 @@ import re
 import stat
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, runtime_checkable
 from urllib.parse import urlsplit
+
+from loguru import logger
 
 SCHEME = "secret"
 
@@ -360,6 +362,80 @@ class MountedFilesResolver:
         if not material:
             raise ReferenceInvalid(f"secret at {ref.raw!r} is empty")
         return material
+
+
+async def audit_inline_credentials(registry: Any, codec: Any, *, required: bool) -> int:
+    """Count the devices still holding a secret inline, and say so at startup.
+
+    **The number nobody could answer before.** ADR-0018 §1's migration is "move every device
+    to a reference, then turn the gate on", and until now a fleet had no way to know how far
+    through that it was — the gate could only be flipped and the breakage discovered. An
+    inventory is what makes the migration plannable rather than a leap.
+
+    Best-effort by construction: it decrypts to read a credential's *shape*, never its value,
+    and any failure is logged and swallowed. A stack must not fail to start because a
+    diagnostic could not be produced.
+
+    Returns the count, so callers can assert on it rather than parse a log line.
+    """
+    try:
+        devices = await registry.list_devices()
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never break startup
+        logger.debug(f"inline-credential audit skipped: {type(exc).__name__}: {exc}")
+        return 0
+
+    from device_mcp_gateway.worker.runner import _auth_from_config
+
+    inline: list[str] = []
+    for cfg_obj in devices:
+        blob = getattr(cfg_obj, "auth_config", None)
+        if not blob:
+            continue
+        try:
+            plaintext = codec.decrypt(blob) if getattr(codec, "enabled", False) else blob
+        except Exception:  # noqa: BLE001 - embedded stores plaintext; a failure means neither
+            plaintext = blob
+        try:
+            auth = _auth_from_config(getattr(cfg_obj, "auth_type", None), plaintext)
+        except Exception:  # noqa: BLE001
+            continue
+        if auth is not None and auth.inline_secret_fields():
+            inline.append(cfg_obj.hostname)
+
+    if not inline:
+        return 0
+    shown = ", ".join(sorted(inline)[:10]) + (" …" if len(inline) > 10 else "")
+    if required:
+        # The gate is ON and these devices predate it. They keep dispatching — the gate is a
+        # write-path rule — but they are exactly the set that cannot be re-registered or
+        # restored as they stand, so an operator needs the list, not just the count.
+        logger.warning(
+            f"{len(inline)} device(s) still hold a credential inline while "
+            f"gateway.credentials.require_references is ON: {shown}. They keep working, but any "
+            "update that supplies a credential, and any restore, will be refused until they are "
+            "moved into the credential store (ADR-0018 §1)."
+        )
+    else:
+        logger.info(
+            f"{len(inline)} device(s) hold a credential inline (ADR-0018 §1): {shown}. Move them "
+            "to secret:// references, then set gateway.credentials.require_references: true to "
+            "stop new ones appearing."
+        )
+    return len(inline)
+
+
+def require_references(cfg: dict) -> bool:
+    """Whether this deployment refuses inline device credentials (ADR-0018 §1).
+
+    Default **false**, and that is not timidity: turning it on is breaking for any fleet
+    registered before references existed, so it is a deployment's decision to make when its
+    secret store is ready — not one an upgrade makes for it.
+    """
+    creds = (cfg.get("gateway", {}) or {}).get("credentials", {}) or {}
+    raw = creds.get("require_references", os.getenv("MCP_REQUIRE_CREDENTIAL_REFS"))
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return bool(raw)
 
 
 def build_resolver(cfg: dict) -> Optional[CredentialResolver]:

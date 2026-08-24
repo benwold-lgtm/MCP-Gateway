@@ -25,6 +25,7 @@ of a failed batch.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -144,6 +145,8 @@ def validate_device_registration(
     declared: set[str],
     allow_private: bool,
     allowed_ports: set[int] | None = None,
+    auth: Any = None,
+    require_references: bool = False,
 ) -> None:
     """Every gate a device must pass to be registered, in one call.
 
@@ -156,3 +159,40 @@ def validate_device_registration(
     _validate_transport(transport)
     _check_target_url(spec_url, "spec_url", allow_private, allowed_ports)
     _validate_upstream(upstream_kind, upstream_transport, spec_url, declared)
+    check_credential_form(auth, require_references)
+
+
+def check_credential_form(auth: Any, require_references: bool) -> None:
+    """ADR-0018 §1: refuse an inline secret where the deployment requires references.
+
+    **Gated, and off by default.** Turning it on is a deployment decision, because it is a
+    breaking one for any fleet registered before references existed.
+
+    **A write-path gate, deliberately, and not a constructor check.** Every other ADR-0018
+    rule lives in the handler's ``__post_init__`` so that registration, a restore and a worker
+    rehydrating from the registry all get the same answer. This one must not: the rehydrate
+    path constructs the same handler from an *already stored* device, so refusing there would
+    turn a policy change into an outage — every existing inline device would fail to load on
+    the next restart. Existing devices keep dispatching; only new writes are refused.
+
+    It sits in the composite rather than in the route so the **restore path is gated too**,
+    which is F-67's rule: a `backup:write` holder must not be able to reinstate a device that
+    a fresh registration would refuse.
+    """
+    if not require_references or auth is None:
+        return
+    inline = auth.inline_secret_fields()
+    if not inline:
+        return
+    fields = ", ".join(inline)
+    refs = ", ".join(f"{f}_ref" if f != "api_key" else "credential_ref" for f in inline)
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"this deployment requires credentials by reference (ADR-0018 §1) and this device "
+            f"supplies {fields} inline. Put the secret in the credential store and register it "
+            f"with {refs} instead. Existing devices are unaffected; this applies to new "
+            f"registrations and updates. To allow inline credentials again, set "
+            f"gateway.credentials.require_references: false."
+        ),
+    )

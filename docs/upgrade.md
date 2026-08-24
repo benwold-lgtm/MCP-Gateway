@@ -212,6 +212,35 @@ first.
 
 ---
 
+### Requiring credentials by reference — opt-in, and breaking when you opt in
+
+`gateway.credentials.require_references: true` (or `MCP_REQUIRE_CREDENTIAL_REFS=true`) refuses
+any **new** device credential supplied inline ([ADR-0018](adr/0018-device-credentials-by-reference.md)
+§1). It ships **off**; upgrading never turns it on.
+
+Migrate before you flip it, not after:
+
+1. **Count what you have.** Every start logs the inventory:
+   `N device(s) hold a credential inline (ADR-0018 §1): …`
+2. **Move each secret into the store**, then update the device to reference it:
+   `{"auth": {"credential_ref": "secret://<tenant>/devices/<name>#api-key"}}`, or for OAuth2
+   `client_secret_ref` / `password_ref`.
+3. **Flip the gate** once the inventory reaches zero.
+
+What changes when it is on, and what does not:
+
+| | With the gate on |
+|---|---|
+| An existing inline device dispatching | **Unaffected.** The gate is a write-path rule; nothing stops working at a restart |
+| Editing that device without touching its credential | **Allowed** — a rate-limit change is not a credential change |
+| Registering, or supplying a new inline credential | **Refused, 400**, naming the field and the `*_ref` that replaces it |
+| Restoring an archive containing inline credentials | **Refused per device**, and the dry run says so first |
+| A `grant_type=refresh_token` device | **Unaffected.** Its token is gateway-minted and cannot be by reference (§1a); only its `client_secret` must be |
+
+⚠️ **The archive is the one to plan for.** With the gate on, an archive taken from a legacy
+stack cannot be restored into it — every inline device fails. Re-export after migrating, or the
+backup you are keeping for a disaster is one that stack will refuse.
+
 ## Embedded mode
 
 Single process, single SQLite file — there is no rolling story:

@@ -77,6 +77,7 @@ from device_mcp_gateway.credentials.resolver import (
     ResolverError,
     StoreUnavailable,
     build_resolver,
+    require_references,
 )
 from device_mcp_gateway.registry.validation import validate_device_registration
 from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
@@ -375,6 +376,9 @@ async def restore_archive(
     # stack cannot resolve is exactly the thing worth learning while the restore can still be
     # stopped — after the fact it is indistinguishable from a device nobody has used yet.
     cred_warnings, cred_fleet_warning = await plan_credential_refs(archive, opener, build_resolver(config))
+    # F-67's rule applied to ADR-0018 §1: a restore must not be a way to reinstate a device
+    # that a fresh registration would refuse.
+    require_refs = require_references(config)
 
     results: list[dict[str, Any]] = []
     for record in archive.get("devices", []):
@@ -391,6 +395,7 @@ async def restore_archive(
                 allowed_ports=allowed_ports,
                 include_deadletters=include_deadletters,
                 credential_warning=cred_warnings.get(record.get("hostname") or "<unnamed>"),
+                require_references_setting=require_refs,
             )
         )
 
@@ -462,6 +467,7 @@ async def _restore_one(
     allowed_ports: set[int] | None,
     include_deadletters: bool,
     credential_warning: str | None = None,
+    require_references_setting: bool = False,
 ) -> dict[str, Any]:
     hostname = record.get("hostname") or "<unnamed>"
     # Assigned once the device is known to be one this restore will write; read by
@@ -489,6 +495,14 @@ async def _restore_one(
     upstream_kind = record.get("upstream_kind") or "openapi"
     upstream_transport = record.get("upstream_transport") or "http"
     spec_url = record.get("spec_url")
+    # Built before the gates rather than just before the write, so `validate_device_registration`
+    # can see the credential form (ADR-0018 §1) and the DRY RUN predicts a refusal. Rebuilding
+    # it later would mean the preview passed and the apply failed — the one thing a dry run
+    # exists to rule out.
+    try:
+        auth = _auth_for(record, opener)
+    except Exception as exc:  # noqa: BLE001 — reported per device, never fatal to the batch
+        return _result(OUTCOME_FAILED, f"credential could not be rebuilt: {exc}")
     try:
         # The same gates POST /v1/devices runs (F-67). `declared` names only the upstream
         # keys an OpenAPI device may legitimately carry, so a restored record does not trip
@@ -503,6 +517,8 @@ async def _restore_one(
             declared={"upstream_kind"} if upstream_kind == "mcp" else set(),
             allow_private=allow_private,
             allowed_ports=allowed_ports,
+            auth=auth,
+            require_references=require_references_setting,
         )
     except HTTPException as exc:
         # A device the current policy no longer permits. Correct behaviour, reported —
@@ -528,11 +544,6 @@ async def _restore_one(
 
     if dry_run:
         return _result(OUTCOME_WOULD_RESTORE_NEEDS_RECONNECT if reconnect else OUTCOME_WOULD_RESTORE)
-
-    try:
-        auth = _auth_for(record, opener)
-    except Exception as exc:  # noqa: BLE001 — reported per device, never fatal to the batch
-        return _result(OUTCOME_FAILED, f"credential could not be rebuilt: {exc}")
 
     kwargs = dict(
         hostname=hostname,
