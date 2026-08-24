@@ -110,6 +110,18 @@ class Principal:
     #: (ADR-0023). Carried on the Principal rather than recomputed at each call site so the
     #: audit event, the metrics and the reactivation-frequency signal all read one fact.
     break_glass: bool = False
+    #: Whether this principal's subject names a holder an operator actually configured.
+    #: False for the env-var keys (``gateway.api_key`` → ``key:legacy``, ``MCP_ADMIN_KEY`` →
+    #: ``key:admin``), whose subjects are fixed placeholders rather than names: they look
+    #: enough like identities to be mistaken for them.
+    #:
+    #: It matters most once slice 4 flags those keys as break-glass in an OIDC deployment,
+    #: because then the audit says a break-glass credential was used and cannot say by whom —
+    #: so the loud event states the limit instead of implying an attribution it lacks. But the
+    #: field means the same thing whether or not the credential is flagged, deliberately:
+    #: a value that is only valid under a condition is one a later call site reads without
+    #: checking the condition.
+    attributable: bool = True
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -434,6 +446,57 @@ def _break_glass_entries(cfg: dict) -> list[str]:
     return out
 
 
+def _oidc_is_configured(cfg: dict) -> bool:
+    """Whether this deployment federates identity (ADR-0023 slice 4's dividing line).
+
+    Deliberately a **config-shape** check, not a call to ``build_oidc_validator``: the static
+    authenticator is built first, and building the validator here would both duplicate the
+    work and make a malformed issuer block fail in the wrong place, reported as a static-key
+    problem. It reads the one field ``build_oidc_validator`` gates on, so the two cannot
+    disagree about whether OIDC is on.
+    """
+    return bool(((cfg.get("gateway", {}) or {}).get("oidc", {}) or {}).get("enabled", False))
+
+
+def _warn_unnamed_break_glass(sources: list[str], flagged: list[str]) -> None:
+    """Say what flagging an unnamed key does and does NOT buy (ADR-0023 slice 4).
+
+    Emitted once at startup rather than left to be discovered from the first
+    high-severity event, which would arrive mid-incident — the worst moment to learn that
+    the audit cannot name who is holding the credential.
+    """
+    names = ", ".join(sources)
+    many = len(sources) > 1
+    subj, verb, noun = ("They", "authenticate", "credentials") if many else ("It", "authenticates", "credential")
+    parts = [
+        f"OIDC is enabled, so {names} {'are' if many else 'is a'} BREAK-GLASS {noun}, not "
+        f"{'ordinary keys' if many else 'an ordinary key'} — {subj.lower()} {verb} only when "
+        "the JWT path fails or is absent. Use is now audited at high severity and counted as "
+        "an activation (ADR-0023 §2/§3).",
+        f"  * {subj} ha{'ve' if many else 's'} no configured name, so the audit records that "
+        "break-glass was used and CANNOT say by whom. Flagging makes it loud; only a named "
+        "gateway.rbac entry makes it attributable.",
+        f"  * {subj} also carr{'y' if many else 'ies'} NO EXPIRY. A flagged rbac entry has "
+        "an 'issued' date and a real lifetime; an env-var key has neither, so §3's rotation "
+        "cadence does not reach it.",
+        "  -> Provision one break_glass: true gateway.rbac entry per authorized person and "
+        f"remove {'them' if many else 'this key'}. {subj} may remain as a first-deploy "
+        "bootstrap fallback, but not as the steady-state break-glass path.",
+    ]
+    if flagged:
+        parts.append(
+            f"  * {len(flagged)} named break-glass entry/entries already exist "
+            f"({', '.join(flagged)}), so the bootstrap window is over — this key is a "
+            "SECOND, unattributable break-glass path running beside them."
+        )
+    parts.append(
+        "  * If a UI/BFF relays this key for password sessions, give that path its own "
+        "NAMED, UNFLAGGED gateway.rbac entry first — otherwise every console login fires "
+        "a high-severity event on the credential above."
+    )
+    logger.warning(chr(10).join(parts))
+
+
 def build_static_authenticator(cfg: dict) -> Authenticator:
     """Build the static-API-key Authenticator from config + env.
 
@@ -447,7 +510,14 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
     gateway = cfg.get("gateway", {})
     keys: dict[str, Principal] = {}
 
-    def _add(token: Optional[str], role: str, name: str, *, break_glass: bool = False) -> None:
+    def _add(
+        token: Optional[str],
+        role: str,
+        name: str,
+        *,
+        break_glass: bool = False,
+        attributable: bool = True,
+    ) -> None:
         if not token:
             return
         keys[token] = Principal(
@@ -455,10 +525,28 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
             scopes=scopes_for_role(role),
             auth_method="break_glass" if break_glass else "api_key",
             break_glass=break_glass,
+            attributable=attributable,
         )
 
-    _add(os.getenv("MCP_GATEWAY_API_KEY") or gateway.get("api_key"), "admin", "legacy")
-    _add(os.getenv("MCP_ADMIN_KEY"), "admin", "admin")
+    # ── ADR-0023 slice 4: `gateway.api_key` is break-glass, CONDITIONALLY ────────────────
+    #
+    # The condition is deployment shape, not which config field the key happens to be in.
+    # Per `build_authenticator`'s own docstring, with OIDC enabled the static key is reached
+    # *only* when the JWT path fails or is absent — that is break-glass in substance, and
+    # leaving it unflagged would be a second, unhardened emergency path beside the named
+    # entries. With no OIDC there is nothing to fall back *from*: the key is the deployment's
+    # ordinary, continuous, everyday credential, and flagging it would fire a high-severity
+    # event on normal traffic. That case is left exactly as it works today.
+    oidc_on = _oidc_is_configured(cfg)
+    legacy_key = os.getenv("MCP_GATEWAY_API_KEY") or gateway.get("api_key")
+    admin_key = os.getenv("MCP_ADMIN_KEY")
+    # `attributable=False` because neither has a configured name — see Principal.attributable.
+    _add(legacy_key, "admin", "legacy", break_glass=oidc_on, attributable=False)
+    _add(admin_key, "admin", "admin", break_glass=oidc_on, attributable=False)
+    # MCP_VIEWER_KEY is never flagged, in either shape. Break-glass exists to *repair* a
+    # deployment whose normal identity path is down; a read-only credential cannot repair
+    # anything, so treating it as the emergency path would be loudness with no incident
+    # behind it.
     _add(os.getenv("MCP_VIEWER_KEY"), "viewer", "viewer")
 
     expiry_days = int(gateway.get("break_glass_expiry_days", DEFAULT_BREAK_GLASS_EXPIRY_DAYS))
@@ -575,6 +663,20 @@ def build_static_authenticator(cfg: dict) -> Authenticator:
             f"Gateway static-key auth: {len(keys)} API key(s) configured"
             + (f"; {len(flagged)} break-glass ({', '.join(flagged)})" if flagged else "")
         )
+        # ADR-0023 slice 4. Warned once at startup rather than left to be discovered from the
+        # first high-severity event during an incident, which is the worst moment to learn
+        # that the audit cannot name who is holding the credential.
+        if oidc_on:
+            unnamed = [
+                label
+                for label, token in (
+                    ("MCP_GATEWAY_API_KEY/gateway.api_key", legacy_key),
+                    ("MCP_ADMIN_KEY", admin_key),
+                )
+                if token
+            ]
+            if unnamed:
+                _warn_unnamed_break_glass(unnamed, flagged)
         for name, why in weak_static_keys(cfg):
             logger.warning(
                 f"Gateway API key '{name}' is weak ({why}). It is a full bearer credential — "

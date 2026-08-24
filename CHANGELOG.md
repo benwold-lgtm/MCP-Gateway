@@ -65,6 +65,29 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
   All defaults are starting values to be tuned from operating history, not final ones.
 
+- **`gateway.api_key` is now break-glass in an OIDC deployment — and only there**
+  ([ADR-0023](docs/adr/0023-gateway-break-glass-attribution.md) slice 4). The rule is
+  conditional on deployment shape, not on which config field the key sits in. With
+  `gateway.oidc` enabled, `gateway.api_key` / `MCP_GATEWAY_API_KEY` and `MCP_ADMIN_KEY`
+  authenticate *only* when the JWT path fails or is absent — break-glass in substance — so
+  they get the loud treatment above. With no OIDC configured there is nothing to fall back
+  *from*: the key is the deployment's ordinary everyday credential and is left exactly as it
+  works today, because flagging it there would fire a high-severity event on normal traffic.
+  `MCP_VIEWER_KEY` is never flagged in either shape: break-glass exists to *repair* a broken
+  deployment, and a read-only credential cannot.
+
+  **The limits are stated rather than implied.** These keys have no configured name, so the
+  audit records that break-glass was used and cannot say by whom — the events carry
+  `attributable: false` — and no `issued` date, so no expiry applies. Flagging makes them
+  loud; only a named `break_glass: true` entry makes them attributable and expiring. A
+  startup warning says exactly this, escalating once named entries exist (the bootstrap
+  window is then over), and calls out the BFF password-session hazard by name.
+
+  ⚠️ **Upgrade note for OIDC deployments whose console relays this key** — see
+  [docs/upgrade.md](docs/upgrade.md). Nothing breaks and nothing is blocked, but every
+  console login becomes a break-glass use until that path gets its own named, unflagged
+  `console`-role entry.
+
 ## [0.3.5] - 2026-08-21
 
 > **The provider-plane work built here was superseded before it shipped, and is not in this
