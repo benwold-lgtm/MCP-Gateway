@@ -69,7 +69,7 @@ from device_mcp_gateway.security.url_policy import (
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.shared.session_router import SessionRouter
-from device_mcp_gateway.worker.dispatch import CallDispatcher, _decode_fields  # noqa: F401  (re-exported)
+from device_mcp_gateway.worker.dispatch import CallDispatcher
 from device_mcp_gateway.worker.health import WorkerHealthLoop, _manifest_to_dict, spec_fingerprint
 from device_mcp_gateway.worker.rebalance import Rebalancer
 from device_mcp_gateway.worker.reconcile import Reconciler
@@ -528,7 +528,7 @@ class DeviceWorker:
                 for _stream, messages in results:
                     for msg_id, fields in messages:
                         last_id = msg_id
-                        hostname = _decode_fields(fields).get("hostname", "")
+                        hostname = fields.get("hostname", "")
                         try:
                             await self._kill_pod(hostname)  # idempotent: no-op unless we own it
                         except Exception:
