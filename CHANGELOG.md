@@ -56,6 +56,20 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   — and survives a PUT that does not, so changing a rate limit cannot silently mark a device
   reconnected that nobody reconnected.
 
+### Fixed
+
+- **The test suite no longer poisons itself through a shared on-disk registry.** The embedded
+  backup tests built apps whose SQLite store defaulted to the *relative* `./data/devices.db`,
+  so every run wrote its fixture devices into the repository working directory and left them
+  there. They then loaded on the next run of any test that actually enters the app's lifespan,
+  which probed each one — turning a 0.7s startup into 18s and failing `test_main.py`'s
+  `test_livez_does_not_require_auth` with `Semaphore is bound to a different event loop`.
+
+  Contributors would have seen a test fail that passes on a fresh clone, with the cause
+  sitting in a gitignored directory. Each app now gets its own throwaway working directory.
+  This was pre-existing rather than new: `origin/main` fails identically once the leaked
+  database is put in place, and passes without it.
+
 - An `auth_config` the exporting stack cannot parse is now **omitted from the archive** rather
   than copied through unexamined. The exclusion above can only be *proved* on a payload the
   exporter could read, and such a device is already dispatching without credentials on the

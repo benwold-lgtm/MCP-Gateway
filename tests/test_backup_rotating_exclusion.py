@@ -29,6 +29,8 @@ That last part is a defect ``fingerprint_state`` already has and this field must
 
 from __future__ import annotations
 
+import itertools
+
 import json
 
 import pytest
@@ -44,6 +46,9 @@ from device_mcp_gateway.backup.restore import (
 )
 from device_mcp_gateway.backup.rotating import needs_reconnect, strip_rotating
 
+#: One working directory per app built in this module — see `_client`.
+_STACK_SEQ = itertools.count()
+
 ADMIN_KEY = "a" * 40
 REFRESH_TOKEN = "REFRESH-TOKEN-SENTINEL-4c81ba97"
 CLIENT_SECRET = "CLIENT-SECRET-SENTINEL-70de2f13"
@@ -51,7 +56,26 @@ DEVICE_PASSWORD = "DEVICE-PASSWORD-SENTINEL-1a9fe4"
 TOKEN_ENDPOINT = "http://127.0.0.1:9/token"
 
 
-def _client(monkeypatch, *, secret_key: str):
+def _client(monkeypatch, tmp_path, *, secret_key: str):
+    # Embedded mode persists to ``storage.db_path``, which defaults to the RELATIVE
+    # "./data/devices.db" — so without this every test here writes its devices into the
+    # repository's own working directory and leaves them there. They then load on the next
+    # run of ANY embedded test, whose lifespan probes each one; a fleet of unreachable
+    # `127.0.0.1:9` devices turns a 0.7s startup into 18s and makes `test_main.py`'s
+    # shared-app livez test fail with "Semaphore is bound to a different event loop".
+    #
+    # Verified rather than assumed: `origin/main` fails that test identically once the
+    # leaked database is put in place, and passes without it. Chdir-ing into `tmp_path`
+    # keeps the relative default pointing somewhere pytest cleans up.
+    #
+    # A fresh directory PER CLIENT, not per test: several tests here build two stacks to
+    # export from one and restore into the other, and a shared store would couple them.
+    # (They get away with it today only because a `TestClient` used without `with` never
+    # runs the lifespan, so nothing ever reads the file back — these tests leak writes and
+    # perform no loads. That is not a property worth depending on.)
+    stack_dir = tmp_path / f"stack-{next(_STACK_SEQ)}"
+    stack_dir.mkdir()
+    monkeypatch.chdir(stack_dir)
     monkeypatch.setenv("MCP_ADMIN_KEY", ADMIN_KEY)
     monkeypatch.setenv("MCP_SECRET_KEY", secret_key)
     monkeypatch.setenv("MCP_ALLOW_PRIVATE_TARGETS", "true")
@@ -188,7 +212,7 @@ def test_a_by_reference_device_is_untouched():
 # ── The archive, end to end through the real registration path ───────────────────────────
 
 
-def test_the_token_appears_nowhere_in_the_archive_opened_or_closed(monkeypatch):
+def test_the_token_appears_nowhere_in_the_archive_opened_or_closed(monkeypatch, tmp_path):
     """The headline property, tested the way it can actually fail.
 
     Two assertions because they fail to different bugs. The **opened** one is what proves the
@@ -200,7 +224,7 @@ def test_the_token_appears_nowhere_in_the_archive_opened_or_closed(monkeypatch):
     value instead of a name.
     """
     key = Fernet.generate_key().decode()
-    client = _client(monkeypatch, secret_key=key)
+    client = _client(monkeypatch, tmp_path, secret_key=key)
     _register_oauth2(client, "rotator", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     _register_oauth2(client, "cc", refresh_token=REFRESH_TOKEN)
 
@@ -209,11 +233,11 @@ def test_the_token_appears_nowhere_in_the_archive_opened_or_closed(monkeypatch):
     assert REFRESH_TOKEN not in json.dumps(archive), "the token leaked into an unencrypted field"
 
 
-def test_the_operator_provisioned_secret_still_travels(monkeypatch):
+def test_the_operator_provisioned_secret_still_travels(monkeypatch, tmp_path):
     """The bound on the cost. If the client secret went too this would be a data-loss bug
     wearing a security argument — a ``client_credentials`` device must restore seamlessly."""
     key = Fernet.generate_key().decode()
-    client = _client(monkeypatch, secret_key=key)
+    client = _client(monkeypatch, tmp_path, secret_key=key)
     _register_oauth2(client, "cc", refresh_token=REFRESH_TOKEN)
 
     archive = _backup(client)
@@ -224,12 +248,12 @@ def test_the_operator_provisioned_secret_still_travels(monkeypatch):
     assert "refresh_token" not in payload
 
 
-def test_the_archive_records_what_it_dropped(monkeypatch):
+def test_the_archive_records_what_it_dropped(monkeypatch, tmp_path):
     """An absence is unfalsifiable: a record with no ``refresh_token`` may be one this rule
     stripped, or a device that never had one. The marker is what makes the exclusion a
     record rather than a claim — and it is written even when empty, so its presence
     distinguishes a §3-aware archive from one made before §3 existed."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_oauth2(client, "rotator", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     _register_oauth2(client, "plain")
 
@@ -240,9 +264,9 @@ def test_the_archive_records_what_it_dropped(monkeypatch):
     assert "needs_reconnect" not in by_host["plain"]
 
 
-def test_the_export_counts_the_devices_that_will_need_a_human(monkeypatch):
+def test_the_export_counts_the_devices_that_will_need_a_human(monkeypatch, tmp_path):
     """At the top of the archive, so the cost of a restore is knowable before running one."""
-    client = _client(monkeypatch, secret_key=Fernet.generate_key().decode())
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register_oauth2(client, "rotator-a", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     _register_oauth2(client, "rotator-b", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     _register_oauth2(client, "cc")
@@ -299,14 +323,14 @@ async def test_an_unreadable_credential_is_dropped_rather_than_copied_through():
 # ── The restore says so, and the device keeps saying so ──────────────────────────────────
 
 
-def test_a_restored_rotator_reports_its_own_outcome(monkeypatch):
+def test_a_restored_rotator_reports_its_own_outcome(monkeypatch, tmp_path):
     key = Fernet.generate_key().decode()
-    source = _client(monkeypatch, secret_key=key)
+    source = _client(monkeypatch, tmp_path, secret_key=key)
     _register_oauth2(source, "rotator", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     _register_oauth2(source, "cc")
     archive = _backup(source)
 
-    target = _client(monkeypatch, secret_key=key)
+    target = _client(monkeypatch, tmp_path, secret_key=key)
     report = _restore(target, archive, dry_run=False)
 
     outcomes = {d["hostname"]: d["outcome"] for d in report["devices"]}
@@ -318,22 +342,22 @@ def test_a_restored_rotator_reports_its_own_outcome(monkeypatch):
     assert "re-authorize" in reason, "the reason must name the action, not just the symptom"
 
 
-def test_the_dry_run_predicts_it_too(monkeypatch):
+def test_the_dry_run_predicts_it_too(monkeypatch, tmp_path):
     """A prediction that omitted the one outcome requiring a human would be predicting the
     easy half — and the dry run exists so the cost is known while it can still be stopped."""
     key = Fernet.generate_key().decode()
-    source = _client(monkeypatch, secret_key=key)
+    source = _client(monkeypatch, tmp_path, secret_key=key)
     _register_oauth2(source, "rotator", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     _register_oauth2(source, "cc")
     archive = _backup(source)
 
-    target = _client(monkeypatch, secret_key=key)
+    target = _client(monkeypatch, tmp_path, secret_key=key)
     dry = _restore(target, archive)
     assert dry["counts"] == {OUTCOME_WOULD_RESTORE_NEEDS_RECONNECT: 1, OUTCOME_WOULD_RESTORE: 1}
     assert dry["needs_reconnect"] == 1
 
 
-def test_the_restored_device_still_says_so_on_the_FLEET_LIST(monkeypatch):
+def test_the_restored_device_still_says_so_on_the_FLEET_LIST(monkeypatch, tmp_path):
     """The precedent's defect, not repeated.
 
     ``fingerprint_state`` is absent from ``DeviceSummary``, so a device awaiting approval is
@@ -342,28 +366,28 @@ def test_the_restored_device_still_says_so_on_the_FLEET_LIST(monkeypatch):
     would arrive with the same gap on day one. This reads the LIST endpoint deliberately.
     """
     key = Fernet.generate_key().decode()
-    source = _client(monkeypatch, secret_key=key)
+    source = _client(monkeypatch, tmp_path, secret_key=key)
     _register_oauth2(source, "rotator", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     _register_oauth2(source, "cc")
     archive = _backup(source)
 
-    target = _client(monkeypatch, secret_key=key)
+    target = _client(monkeypatch, tmp_path, secret_key=key)
     _restore(target, archive, dry_run=False)
 
     assert _summary(target, "rotator")["credential_state"] == CREDENTIAL_STATE_NEEDS_RECONNECT
     assert _summary(target, "cc")["credential_state"] == "ok"
 
 
-def test_the_condition_is_not_a_health_reading(monkeypatch):
+def test_the_condition_is_not_a_health_reading(monkeypatch, tmp_path):
     """It is an AUTHORIZATION condition requiring a human, carried as its own orthogonal
     field. A device that needs reconnecting may be perfectly reachable, and collapsing the
     two would make a health signal answer a question health cannot answer."""
     key = Fernet.generate_key().decode()
-    source = _client(monkeypatch, secret_key=key)
+    source = _client(monkeypatch, tmp_path, secret_key=key)
     _register_oauth2(source, "rotator", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     archive = _backup(source)
 
-    target = _client(monkeypatch, secret_key=key)
+    target = _client(monkeypatch, tmp_path, secret_key=key)
     _restore(target, archive, dry_run=False)
 
     summary = _summary(target, "rotator")
@@ -373,13 +397,13 @@ def test_the_condition_is_not_a_health_reading(monkeypatch):
     assert detail["credential_state"] == CREDENTIAL_STATE_NEEDS_RECONNECT, "detail view too"
 
 
-def test_a_dry_run_leaves_no_state_behind(monkeypatch):
+def test_a_dry_run_leaves_no_state_behind(monkeypatch, tmp_path):
     key = Fernet.generate_key().decode()
-    source = _client(monkeypatch, secret_key=key)
+    source = _client(monkeypatch, tmp_path, secret_key=key)
     _register_oauth2(source, "rotator", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     archive = _backup(source)
 
-    target = _client(monkeypatch, secret_key=key)
+    target = _client(monkeypatch, tmp_path, secret_key=key)
     _restore(target, archive)
     assert target.get("/v1/devices/rotator", headers=_auth()).status_code == 404
 
@@ -387,16 +411,16 @@ def test_a_dry_run_leaves_no_state_behind(monkeypatch):
 # ── Clearing it is the reconnection, and only the reconnection ───────────────────────────
 
 
-def test_a_put_that_supplies_a_new_credential_clears_it(monkeypatch):
+def test_a_put_that_supplies_a_new_credential_clears_it(monkeypatch, tmp_path):
     """The reconnection itself. No separate "mark reconnected" endpoint is needed or wanted:
     the condition is "this device has no credential a human has supplied", so supplying one
     is what ends it."""
     key = Fernet.generate_key().decode()
-    source = _client(monkeypatch, secret_key=key)
+    source = _client(monkeypatch, tmp_path, secret_key=key)
     _register_oauth2(source, "rotator", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     archive = _backup(source)
 
-    target = _client(monkeypatch, secret_key=key)
+    target = _client(monkeypatch, tmp_path, secret_key=key)
     _restore(target, archive, dry_run=False)
     assert _summary(target, "rotator")["credential_state"] == CREDENTIAL_STATE_NEEDS_RECONNECT
 
@@ -419,7 +443,7 @@ def test_a_put_that_supplies_a_new_credential_clears_it(monkeypatch):
     assert _summary(target, "rotator")["credential_state"] == "ok"
 
 
-def test_a_put_that_touches_no_credential_does_NOT_clear_it(monkeypatch):
+def test_a_put_that_touches_no_credential_does_NOT_clear_it(monkeypatch, tmp_path):
     """The trap, and the reason ``_carry_credential_state`` exists.
 
     ``replace_device`` rebuilds a device from registration inputs alone, so every field not
@@ -428,11 +452,11 @@ def test_a_put_that_touches_no_credential_does_NOT_clear_it(monkeypatch):
     reconnected: the operator's list goes quiet and the device still cannot authenticate.
     """
     key = Fernet.generate_key().decode()
-    source = _client(monkeypatch, secret_key=key)
+    source = _client(monkeypatch, tmp_path, secret_key=key)
     _register_oauth2(source, "rotator", grant_type="refresh_token", refresh_token=REFRESH_TOKEN)
     archive = _backup(source)
 
-    target = _client(monkeypatch, secret_key=key)
+    target = _client(monkeypatch, tmp_path, secret_key=key)
     _restore(target, archive, dry_run=False)
 
     resp = target.put(
