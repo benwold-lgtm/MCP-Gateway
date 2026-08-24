@@ -20,6 +20,7 @@ In distributed mode (registry.mode = "distributed"):
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from typing import Any
 
@@ -32,6 +33,7 @@ from device_mcp_gateway.core.manifest_diff import record_tool_change
 from device_mcp_gateway.registry.models import DeviceProfile
 from device_mcp_gateway.registry.pod_supervisor import PodSupervisor
 from device_mcp_gateway.registry.spec_service import SpecService
+from device_mcp_gateway.security import fingerprint as fp
 from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import (
@@ -192,6 +194,48 @@ class Registry:
         await self._backend.update_device_fields(cfg.hostname, credential_state=state)
         return cfg
 
+    async def _carry_fingerprint(self, cfg: DeviceConfig, prev: DeviceConfig | None) -> DeviceConfig:
+        """Re-apply the endpoint trust record across a rebuild (ADR-0015).
+
+        **A PUT is not evidence about a TLS key.** This method rebuilds from registration
+        inputs alone, so without this an ordinary edit — a rate-limit change — silently
+        reset ``fingerprint_state`` to *unpinned* and cleared the SPKI. The device then
+        re-pinned by trust-on-first-use at the next health check and reported ``pinned``
+        again, with nothing logged: the end state was indistinguishable from a device that
+        had never lost its pin. Measured on a live cluster, not hypothesised.
+
+        Three things that made it worth a security fix rather than a tidy-up:
+
+        - ADR-0015 §8's out-of-band pre-pinning — an operator verifying an SPKI by hand —
+          was destroyed by the next unrelated edit.
+        - The re-pin happens through the ordinary first-sight path, so it produces **no**
+          ``key_changed`` verdict and no quarantine. The alarm ADR-0015 exists to raise
+          cannot fire, because the gateway believes it is meeting the device for the first
+          time.
+        - Anyone holding ``devices:write`` could therefore clear a pin with a no-op edit.
+
+        **The restore path already knew.** ``plan_fingerprint_restore`` writes the live
+        values back precisely because "``replace_device`` builds a fresh ``DeviceConfig``
+        from registration inputs alone — so by the time this lands, the live pin has already
+        been wiped". One caller of this method compensated; the other did not. Fixing it
+        *here* is what makes that true for every caller, including ones not yet written.
+        Restore still writes afterwards and still wins, which is correct: it arbitrates
+        between an archived record and a live one, a question this cannot answer.
+
+        **The pin is carried even when ``base_url`` changes**, deliberately. Repointing a
+        device at a new endpoint is a trust change, and the designed way to accept one is
+        the ``key_changed`` → approve flow (ADR-0015 §6) — loud and audited. Resetting
+        instead would be silent, and would leave "change the URL" as a way to launder a new
+        key past the pin.
+        """
+        if not fp.has_trust_record(prev):
+            return cfg
+        fields = {field: getattr(prev, field) for field in fp.TRUST_FIELDS}
+        for field, value in fields.items():
+            setattr(cfg, field, value)
+        await self._backend.update_device_fields(cfg.hostname, **fields)
+        return cfg
+
     async def replace_device(
         self,
         hostname: str,
@@ -226,8 +270,11 @@ class Registry:
         up = (upstream_kind, upstream_transport)
         if self._mode == "distributed":
             await self._backend.publish_assignment("unassign", hostname)
+            # Read the previous record on BOTH paths. The credential only needs it when it
+            # is being kept, but the endpoint's trust record has to survive either way — a
+            # PUT that supplies a new credential says nothing about the device's TLS key.
+            prev = await self._backend.get_device(hostname)
             if keep_auth:
-                prev = await self._backend.get_device(hostname)
                 # Pass the stored ciphertext straight through — no decrypt/re-encrypt.
                 cfg = await self._write_distributed(
                     hostname,
@@ -239,10 +286,18 @@ class Registry:
                     rate_limit_rps,
                     up,
                 )
-                return await self._carry_credential_state(cfg, prev)
-            return await self._register_distributed(hostname, base_url, spec_url, auth, transport, rate_limit_rps, up)
+                cfg = await self._carry_credential_state(cfg, prev)
+                return await self._carry_fingerprint(cfg, prev)
+            cfg = await self._register_distributed(
+                hostname, base_url, spec_url, auth, transport, rate_limit_rps, up
+            )
+            return await self._carry_fingerprint(cfg, prev)
         async with self._lock_for(hostname):
             existing = self._profiles.get(hostname)
+            # Snapshot the values, not the object: the rebuild below replaces the profile,
+            # and holding a reference across it is how a "previous" record quietly becomes
+            # the current one.
+            prev_fingerprint = copy.copy(existing.config) if existing else None
             prev_config = existing.config if (keep_auth and existing) else None
             if keep_auth and existing:
                 # Embedded keeps the live auth object on the profile; reuse it directly.
@@ -252,6 +307,7 @@ class Registry:
                 self._spec_service.invalidate(existing.base_url)
             profile = await self._setup_device_nolock(hostname, base_url, spec_url, auth, transport, rate_limit_rps, up)
         await self._carry_credential_state(profile.config, prev_config)
+        await self._carry_fingerprint(profile.config, prev_fingerprint)
         # Re-provision off the request path (F-11), same as register_device.
         await self._provision_in_background(profile, wait_budget=self._registration_provision_budget)
         return profile.config

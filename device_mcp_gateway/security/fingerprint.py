@@ -54,6 +54,48 @@ NEEDS_APPROVAL = frozenset({VERDICT_KEY_CHANGED, VERDICT_KEY_AND_DECLARED_CHANGE
 POLICY_WARN = "warn"
 POLICY_ENFORCE = "enforce"
 
+# The device fields that together constitute one endpoint's TRUST RECORD: what key was
+# seen, what state that leaves the device in, and which policy governs a change.
+#
+# Named here rather than at either call site because it is the fingerprint module's
+# business what a pin consists of, and because two callers now have to agree about it —
+# a restore writing an archived record back, and an update carrying the live one across a
+# rebuild. A second hand-maintained list of field names is how one of them silently stops
+# covering a field that was added to the other.
+#
+# ⚠️ Deliberately NOT the same list as the archive's fingerprint block, which also carries
+# `declared_name`/`declared_version`. Those describe what the upstream *said it was*, are
+# re-derived from the spec on every provision, and are not part of what is trusted. See
+# ``backup.restore._FINGERPRINT_FIELDS``, which is a *format* list and a superset of this.
+TRUST_FIELDS = (
+    "tls_spki_sha256",
+    "tls_cert_sha256",
+    "tls_issuer",
+    "tls_not_after",
+    "fingerprint_state",
+    "fingerprint_pinned_at",
+    "pending_tls_spki_sha256",
+    "fingerprint_policy",
+)
+
+
+def has_trust_record(cfg: Any) -> bool:
+    """Whether this device carries anything worth preserving across a rebuild.
+
+    A pin is the obvious case, but not the only one: a device can be *unpinned* and still
+    carry a per-device ``fingerprint_policy`` of ``enforce``, and dropping that on an
+    unrelated edit downgrades the device to whatever the fleet default happens to be.
+    A pending approval is likewise a decision in progress that an edit must not discard.
+    """
+    if cfg is None:
+        return False
+    return bool(
+        getattr(cfg, "tls_spki_sha256", None)
+        or getattr(cfg, "pending_tls_spki_sha256", None)
+        or getattr(cfg, "fingerprint_policy", None)
+        or getattr(cfg, "fingerprint_state", STATE_UNPINNED) != STATE_UNPINNED
+    )
+
 
 @dataclass(frozen=True)
 class Observation:

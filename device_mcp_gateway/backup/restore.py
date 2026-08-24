@@ -119,6 +119,11 @@ RECONNECT_REASON = (
 
 # The fingerprint fields an archive carries, in the order they are written back. Kept in
 # lockstep with ``backup.export._FINGERPRINT_FIELDS`` — the two halves of one format.
+#
+# A *superset* of ``security.fingerprint.TRUST_FIELDS``, which is the subset that actually
+# constitutes trust; the extra two describe what the upstream said it was. The relationship
+# is asserted by a test rather than left to this comment, because a field added to the trust
+# record and forgotten here would silently stop being archived.
 _FINGERPRINT_FIELDS = (
     "tls_spki_sha256",
     "tls_cert_sha256",
