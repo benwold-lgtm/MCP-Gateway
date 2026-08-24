@@ -166,6 +166,50 @@ breaks a log parser the day someone adds one.
 saved queries, dashboards — needs to accept both forms. Records written before the upgrade
 keep the short form; the chain itself is unaffected, since it commits to whole records.
 
+### `gateway.api_key` becomes break-glass — **only if OIDC is enabled**
+
+Not a startup gate — nothing refuses to boot, and no request is ever blocked — but in an
+**OIDC-configured** deployment this changes how much noise your existing static key makes,
+so read it before upgrading. If you do not configure `gateway.oidc`, **nothing on this page
+applies to you**: the key stays exactly the ordinary, everyday credential it is today.
+
+**What changed and why.** With OIDC enabled, `gateway.api_key` / `MCP_GATEWAY_API_KEY` (and
+`MCP_ADMIN_KEY`) authenticate *only* when the JWT path fails or is absent. That is break-glass
+in substance, whatever field it sits in, so it now gets ADR-0023's loud treatment: a
+high-severity `auth.break_glass` audit record per use, an `auth.break_glass.activated` record
+plus a page-severity alert per activation, and reactivation-frequency flagging. With no OIDC
+there is nothing to fall back *from*, so the rule does not reach it.
+
+**What this does not buy, which is the part worth acting on.** These keys have no configured
+name, so the audit records that break-glass was used and **cannot say by whom** — the events
+carry `attributable: false` for exactly this reason. They also have no `issued` date, so the
+90-day expiry does not apply to them. Flagging makes them loud; only a named
+`break_glass: true` `gateway.rbac` entry makes them attributable and expiring. The gateway
+warns once at startup saying so.
+
+**⚠️ The upgrade hazard, and it is not hypothetical.** If a UI/BFF relays this key for
+**password sessions**, every console login is now a break-glass use: high-severity records on
+each request, and an activation — hence a page — on the first request after each quiet gap.
+Nothing breaks and nothing is blocked, but the signal becomes noise on ordinary traffic.
+
+**What to do, in this order:**
+
+1. Give the console's password path its own **named, unflagged** `gateway.rbac` entry with
+   `role: console` (see `deploy/kubernetes/configmap.yaml`), and point the BFF's
+   `GATEWAY_API_TOKEN` at it.
+2. Verify no request still authenticates as `key:legacy` — the audit `subject` is directly
+   observable proof, and a `console`-role token is additionally refused (`403`) on the
+   `backup:*` routes an admin key would have been allowed.
+3. Provision one `break_glass: true` entry per authorized person and remove the shared key.
+   It may stay as a first-deploy bootstrap fallback, but it is not the steady-state
+   break-glass path.
+
+**What to check:** anything alerting on audit `severity` or on
+`mcp_break_glass_activations_total` will start seeing this key. `deploy/kubernetes/prometheus-rules.yaml`
+ships `MCPBreakGlassActivated` at `severity: page` with no `for:` delay — deliberate for a
+real emergency credential, and worth confirming your console traffic has been migrated off it
+first.
+
 ---
 
 ## Embedded mode

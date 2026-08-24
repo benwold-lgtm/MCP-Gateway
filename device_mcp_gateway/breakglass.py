@@ -243,6 +243,11 @@ async def note_break_glass_use(app_state: Any, principal: Any, *, rid: str = "-"
             level="WARNING",
             severity="high",
             auth_method=getattr(principal, "auth_method", "break_glass"),
+            # False for the unnamed env-var keys slice 4 flags in an OIDC deployment. The
+            # record has to carry this: "break-glass was used" and "break-glass was used by
+            # Alice" are different facts, and a reader who cannot tell them apart will assume
+            # the stronger one.
+            attributable=getattr(principal, "attributable", True),
         )
 
         gap, window, threshold = _settings(app_state)
@@ -269,8 +274,16 @@ async def note_break_glass_use(app_state: Any, principal: Any, *, rid: str = "-"
             review_flag=flagged,
             days_since_last_use=_days(activity.seconds_since_last_use),
             signal_degraded=activity.degraded,
+            attributable=getattr(principal, "attributable", True),
         )
-        _log_activation(subject, activity, threshold=threshold, window_days=window_days, flagged=flagged)
+        _log_activation(
+            subject,
+            activity,
+            threshold=threshold,
+            window_days=window_days,
+            flagged=flagged,
+            attributable=getattr(principal, "attributable", True),
+        )
     except Exception as exc:  # noqa: BLE001 — see the docstring
         logger.warning(f"Break-glass event emission failed for {subject!r}: {exc}. Access itself is unaffected.")
 
@@ -279,9 +292,30 @@ def _days(seconds: Optional[float]) -> Optional[float]:
     return None if seconds is None else round(seconds / 86400, 2)
 
 
-def _log_activation(subject: str, activity: Activity, *, threshold: int, window_days: int, flagged: bool) -> None:
+def _log_activation(
+    subject: str,
+    activity: Activity,
+    *,
+    threshold: int,
+    window_days: int,
+    flagged: bool,
+    attributable: bool = True,
+) -> None:
     since = _days(activity.seconds_since_last_use)
     history = "first recorded activation" if since is None else f"last activated {since} day(s) ago"
+    # An unnamed env-var key (ADR-0023 slice 4) names no person. Saying so in the line an
+    # operator actually reads matters more than the audit field: "break-glass was used" and
+    # "break-glass was used by Alice" are different facts, and a subject like `key:legacy`
+    # looks enough like an identity to be mistaken for one.
+    unnamed = (
+        ""
+        if attributable
+        else (
+            " ⚠️ This credential has no configured name, so this record CANNOT say who used "
+            "it — only that someone did. Provision a named break_glass gateway.rbac entry "
+            "per person to get attribution."
+        )
+    )
     if flagged:
         logger.error(
             f"BREAK-GLASS REACTIVATION FLAG: {subject} has activated "
@@ -289,11 +323,11 @@ def _log_activation(subject: str, activity: Activity, *, threshold: int, window_
             f"threshold of {threshold} ({history}). Nothing has been blocked and nothing will "
             "be — this is a review flag, not a limit. Repeated activation across separate "
             "weeks means the emergency path has become routine access: find out what normal "
-            "work is reaching for it and give that work its own credential (ADR-0023 §3)."
+            "work is reaching for it and give that work its own credential (ADR-0023 §3)." + unnamed
         )
         return
     logger.warning(
         f"BREAK-GLASS ACTIVATED: {subject} ({history}); "
         f"{activity.activations} activation(s) in the last {window_days} day(s). If this was "
-        "not an authorized emergency, treat the credential as compromised and reissue it."
+        "not an authorized emergency, treat the credential as compromised and reissue it." + unnamed
     )

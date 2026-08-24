@@ -10,6 +10,21 @@ gateway:
   # Require Authorization: Bearer <token> on all API routes (leave empty to disable).
   # Override with MCP_GATEWAY_API_KEY environment variable. This single key maps to
   # the "admin" role (full access) — today's behaviour, unchanged.
+  #
+  # ⚠️ IF gateway.oidc IS ENABLED, THIS KEY IS BREAK-GLASS (ADR-0023 slice 4). With OIDC on
+  # it authenticates only when the JWT path fails or is absent, which is the emergency path
+  # whatever field it sits in — so its use emits a high-severity audit record and counts as
+  # an activation. With NO OIDC it is the deployment's ordinary everyday credential and
+  # nothing about it changes; flagging it there would fire on normal traffic.
+  #
+  # It has NO NAME and NO 'issued' date, so the audit can say break-glass was used but not
+  # BY WHOM, and no expiry applies. Flagging makes it loud; only a named break_glass entry
+  # below makes it attributable and expiring. Provision one per person and remove this key —
+  # it may stay as a first-deploy bootstrap fallback, not as the steady-state path.
+  #
+  # ⚠️ If a UI/BFF relays this key for password sessions, give that path its own NAMED,
+  # UNFLAGGED entry first (see `console` below), or every console login fires a
+  # high-severity event.
   api_key: ""
   # Scoped API keys (RBAC). Each key maps to a role; routes authorize on scopes:
   #   admin  → devices:read, devices:write, tools:call, metrics:read (full access)
