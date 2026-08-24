@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_request
 from device_mcp_gateway.auth.api_key import ApiKeyAuth
 from device_mcp_gateway.credentials import ReferenceInvalid
+from device_mcp_gateway.credentials.resolver import require_references
 from device_mcp_gateway.auth.base import AbstractAuth
 from device_mcp_gateway.auth.oauth2 import OAuth2Auth
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
@@ -60,6 +61,7 @@ from device_mcp_gateway.registry.validation import (  # noqa: F401  (re-exported
     _validate_hostname,
     _validate_transport,
     _validate_upstream,
+    check_credential_form,
     validate_device_registration,
 )
 
@@ -184,6 +186,10 @@ async def register_device(request: Request):
     transport = data.get("transport") or cfg.get("transport", {}).get("default", "sse")
     spec_url = data.get("spec_url")
     upstream_kind, upstream_transport = _read_upstream(data)
+    # Built BEFORE the gates, not after, so `validate_device_registration` can see the
+    # credential form (ADR-0018 §1). `_parse_auth` raises its own 400s for a malformed
+    # credential, which is the same class of refusal and no less appropriate first.
+    auth = _parse_auth(data, cfg, allow_private, allowed_ports)
     validate_device_registration(
         hostname=hostname,
         base_url=base_url,
@@ -194,9 +200,10 @@ async def register_device(request: Request):
         declared=set(data.keys()),
         allow_private=allow_private,
         allowed_ports=allowed_ports,
+        auth=auth,
+        require_references=require_references(cfg),
     )
     rate_limit_rps = _parse_rate_limit(data)
-    auth = _parse_auth(data, cfg, allow_private, allowed_ports)
 
     existing = await reg.get_device(hostname)
     if existing:
@@ -284,6 +291,11 @@ async def update_device(hostname: str, request: Request):
     keep_auth = False
     if _AUTH_KEYS & data.keys():
         auth = _parse_auth(data, cfg, allow_private, allowed_ports)
+        # Gated only when the PUT actually SUPPLIES a credential. A `keep_auth` update carries
+        # the stored one through untouched, and refusing that would block an ordinary edit —
+        # a rate-limit change — on every device registered before references existed. The
+        # promise is that existing devices keep working; only new credentials are refused.
+        check_credential_form(auth, require_references(cfg))
     else:
         # No auth field in the PUT body → preserve the stored credentials. We must
         # NOT reconstruct them here: in distributed mode existing.auth_config is

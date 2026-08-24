@@ -116,6 +116,19 @@ class OAuth2Auth(AbstractAuth):
     def on_credentials_changed(self, hook: CredentialsChangedHook) -> None:
         self._credentials_changed = hook
 
+    def inline_secret_fields(self) -> list[str]:
+        fields = []
+        if self.client_secret is not None and self.client_secret_ref is None:
+            fields.append("client_secret")
+        # Only for the grant that sends one — a `client_credentials` device carrying a stale
+        # `password` in its record is not a device holding an inline password.
+        if self.grant_type == "password" and self.password is not None and self.password_ref is None:
+            fields.append("password")
+        # `refresh_token` is deliberately absent: it is gateway-minted (§1a) and cannot be held
+        # by reference, so counting it here would make the gate unsatisfiable for the devices
+        # §1a already carved out.
+        return fields
+
     def credential_refs(self) -> dict[str, str]:
         refs = {}
         if self.client_secret_ref:

@@ -211,8 +211,23 @@ before it is applied, and it has already caught real mistakes.
 > reference. An archive of either is a credential dump, so retiring `backup:*` now would
 > remove the protection while the thing it protects is still there.
 >
-> The prerequisite is **§1 finished, not §3 continued**: OAuth2 held by reference, and inline
-> literals refused rather than merely discouraged. Recorded here rather than left to be
+> **Update (2026-08-24): the prerequisite is now BUILT, and the blocker has changed shape.**
+> OAuth2 holds `client_secret`/`password` by reference, and
+> `gateway.credentials.require_references` refuses inline secrets on every write path —
+> registration, update, and restore.
+>
+> What remains is **not more code**. §3's simplification is safe only where that gate is ON,
+> and it ships OFF by default because turning it on is breaking for any fleet registered
+> before references existed. So §3's second half now waits on the **default flipping**, in a
+> release that can carry a breaking change.
+>
+> Making the simplification *conditional* on the setting is the one option to avoid. §1a
+> already argues that a protection path which almost never executes is the shape of code that
+> rots quietly and fails the one time an incident depends on it — and a `backup:*` apparatus
+> kept alive only for gate-off stacks would be exactly that.
+>
+> Originally: the prerequisite is **§1 finished, not §3 continued** — OAuth2 held by
+> reference, and inline literals refused rather than merely discouraged. Recorded here rather than left to be
 > discovered, because "an archive is configuration" is exactly the kind of claim that gets
 > read out of an Accepted ADR and acted on.
 

@@ -93,6 +93,21 @@ class AbstractAuth(ABC):
         """
         return {"credential_ref": self.credential_ref} if self.credential_ref else {}
 
+    def inline_secret_fields(self) -> list[str]:
+        """Operator-provisioned secrets this handler holds **inline**, by field name.
+
+        The mirror of :meth:`credential_refs`, and the thing
+        ``gateway.credentials.require_references`` gates on. Empty for a handler that holds no
+        secret at all, which is a legitimate device (``auth_type: none``) and not a violation.
+
+        **A gateway-minted credential is never listed here**, and that is load-bearing rather
+        than an omission: an OAuth2 ``refresh_token`` has no external writer (§1a), so it
+        cannot be held by reference at all. Counting it as "inline" would make the gate
+        unsatisfiable for exactly the devices §1a already carved out — they would be refused
+        for failing to do something the ADR says is impossible.
+        """
+        return []
+
     async def bind(self, resolver: Any) -> None:
         """Resolve this handler's reference into usable material for one dispatch.
 

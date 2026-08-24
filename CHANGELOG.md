@@ -12,6 +12,44 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Added
 
+- **A deployment can refuse inline device credentials** —
+  `gateway.credentials.require_references` (or `MCP_REQUIRE_CREDENTIAL_REFS`), **off by
+  default** ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md) §1). With it on, a
+  registration, an update, or a restore that supplies an `api_key`, `client_secret` or
+  `password` inline is refused with a message naming the field, the `*_ref` that replaces it,
+  and how to turn the gate back off.
+
+  Off by default is not timidity: turning it on is breaking for any fleet registered before
+  references existed, so it is a deployment's decision when its secret store is ready — not
+  one an upgrade makes for it.
+
+  **Three guarantees, each with a test holding it:**
+
+  - **Existing devices keep dispatching.** The gate is on the *write* path, not in the handler
+    constructor where every other ADR-0018 rule lives. That asymmetry is deliberate: the
+    rehydrate path builds the same handler from an already-stored device, so a constructor
+    check would turn a policy change into an outage at the next restart.
+  - **An ordinary edit still works.** A PUT that changes a rate limit and carries no credential
+    is not refused — otherwise the gate would freeze every legacy device in place, unable to be
+    touched until its secret was migrated. A PUT that *supplies* a new inline credential is.
+  - **The §1a carve-out stays reachable.** A `grant_type=refresh_token` device holds a
+    gateway-minted token that cannot be held by reference, so it is never counted as an inline
+    secret. Counting it would refuse the device for failing to do something the ADR calls
+    impossible.
+
+  The restore path is gated too, which is F-67's rule applied to §1: a `backup:write` holder
+  must not be able to reinstate a device that a fresh registration would refuse. The **dry run
+  predicts it**, so the preview and the apply agree.
+
+- **A startup inventory of devices still holding a credential inline.** The number nobody could
+  answer before: §1's migration is "move every device to a reference, then turn the gate on",
+  and a fleet had no way to know how far through that it was — the gate could only be flipped
+  and the breakage discovered. Logged at INFO with the gate off, at WARNING with it on (naming
+  the devices, since those are exactly the ones that can no longer be updated or restored as
+  they stand). Best-effort by construction: it reads a credential's *shape*, never its value,
+  and a stack never fails to start because a diagnostic could not be produced.
+
+
 - **An OAuth2 device can hold its `client_secret` and `password` by reference**
   ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md) §1). §1a's table has always
   listed them as by-reference alongside the API key; the code had no such thing — `OAuth2Auth`
