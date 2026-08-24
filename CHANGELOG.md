@@ -10,6 +10,38 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **A restore now says when this stack cannot resolve a device's credential reference**
+  ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md) §3). §3 states it as a
+  consequence — restoring into a different stack "requires that stack to be able to resolve
+  the references, which is an honest and visible failure rather than a silent one" — and it
+  was neither: `restore.py` never touched the resolver, so a device whose `credential_ref`
+  the target could not resolve was reported `restored` and failed at its first tool call.
+
+  Every archived reference is now resolved **before anything is written**, so the **dry run**
+  reports it while the restore can still be stopped. New on the report: `credential_warnings`
+  (a count), a per-device `credential_warning`, and `credential_store_error`.
+
+  **The two failure kinds stay two** (§7). A bad reference is one device's problem and is
+  reported per device; an unreachable secret store is the *fleet's*, and is reported once in
+  `credential_store_error` with **no** per-device results at all. Reporting an unmounted
+  volume as N independent bad references is the exact misdiagnosis §7 is written against — it
+  sends an operator to check N references when one mount is wrong. "No resolver configured on
+  this stack" is a third, separately-worded case, because an operator told "store unavailable"
+  would go looking for a mount that was never meant to exist.
+
+  **The device still restores.** Refusing would couple a restore to the order the secret store
+  came back in, so a DR rebuild of a large fleet would fail wholesale because the registry was
+  restored first. The archive carries configuration, the configuration is valid, and the
+  missing part is a secret somebody provisions separately (§2a).
+
+  Deliberately **not** a persistent device field, unlike *needs reconnecting*: that one is
+  cleared by the very act that fixes it (a human supplying a credential), whereas a missing
+  secret is fixed by putting it in the store — and nothing tells the gateway that happened, so
+  a stored flag would go stale and start lying. A skipped device is not warned about either:
+  its reference is the live record's business, not this restore's.
+
 ### Changed
 
 - **A backup archive no longer contains a live device credential**

@@ -44,10 +44,20 @@ token *was* the credential — so the device comes back registered, reachable, c
 fingerprinted, and unable to get a token until a human re-authorizes it. That is reported as
 its own outcome and left behind as its own persistent device state, because the failure this
 design exists to prevent is a device that looks restored and fails on its first tool call.
+
+**And the same is true of a credential reference this stack cannot resolve** (ADR-0018 §3,
+which asks for "an honest and visible failure rather than a silent one"). The restore now
+resolves every archived ``credential_ref`` before writing anything, so the dry run reports it
+while the restore can still be stopped. It is a *warning* rather than an outcome, and
+deliberately not a persistent device field: unlike *needs reconnecting* — which only a human
+supplying a credential can clear — a missing secret is fixed by putting it in the store, and a
+flag recording its absence would go stale the moment somebody did. See
+:func:`plan_credential_refs`, which also keeps §7's two failure kinds apart.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import HTTPException
@@ -61,6 +71,13 @@ from device_mcp_gateway.backup.envelope import (
     fernet_for_passphrase,
     parse_archive,
     verify_canary,
+)
+from device_mcp_gateway.credentials.resolver import (
+    CredentialRef,
+    ReferenceInvalid,
+    ResolverError,
+    StoreUnavailable,
+    build_resolver,
 )
 from device_mcp_gateway.registry.validation import validate_device_registration
 from device_mcp_gateway.security.url_policy import resolve_allow_private, resolve_allowed_ports
@@ -254,6 +271,78 @@ def _no_pin_warning(record: dict[str, Any], message: str) -> str | None:
     return message if base_url.startswith("https://") else None
 
 
+async def plan_credential_refs(
+    archive: dict[str, Any], opener: Any, resolver: Any
+) -> tuple[dict[str, str], str | None]:
+    """Can this stack actually resolve the references the archive carries?
+
+    Returns ``(per_device_reason, fleet_reason)``.
+
+    ADR-0018 §3 says restoring into a different stack "requires that stack to be able to
+    resolve the references, which is an honest and visible failure rather than a silent one."
+    It was neither: restore never touched the resolver, so a device whose ``credential_ref``
+    the target cannot resolve came back reported as ``restored`` and failed at its first tool
+    call. That is the same shape as a device that looks restored and cannot authenticate —
+    one field over from the condition §3 spends most of its length preventing.
+
+    **The two failure kinds stay two, which is the whole design.** §7 draws the line and the
+    resolver already encodes it: a ``ReferenceInvalid`` is one device's problem, a
+    ``StoreUnavailable`` is the fleet's. Reporting an unmounted secret store as N independent
+    bad references is precisely the misdiagnosis §7 is written against — so the first store
+    failure ends the pass and is reported once, at the top, instead of being smeared across
+    every device in the archive.
+
+    Read-only and side-effect-free: this resolves to find out whether resolution works, and
+    keeps nothing. The material never leaves this function.
+    """
+    refs: list[tuple[str, str]] = []
+    for record in archive.get("devices", []):
+        blob = record.get("auth_config")
+        if not blob:
+            continue
+        try:
+            payload = json.loads(_open_credential(blob, opener))
+        except Exception:  # noqa: BLE001 — preflight already proved these open; a shape
+            continue  # surprise here is not worth failing a restore over.
+        ref = payload.get("credential_ref") if isinstance(payload, dict) else None
+        if ref:
+            refs.append((record.get("hostname") or "<unnamed>", ref))
+
+    if not refs:
+        return {}, None
+
+    if resolver is None:
+        # Distinct from "the store is down": nothing is misconfigured at the store, this stack
+        # simply has no credential-by-reference set up at all. An operator told "store
+        # unavailable" would go looking for a mount that was never meant to exist.
+        return {}, (
+            f"{len(refs)} device(s) in this archive hold their credential by reference, but this "
+            "stack has no credential resolver configured (gateway.credentials.root / "
+            "MCP_CREDENTIAL_ROOT). They will restore as configuration and fail to authenticate "
+            "until the secret store is mounted."
+        )
+
+    per_device: dict[str, str] = {}
+    for hostname, raw in refs:
+        try:
+            await resolver.resolve(CredentialRef.parse(raw))
+        except StoreUnavailable as exc:
+            return {}, (
+                f"the secret store is not usable on this stack ({exc}). Every by-reference device "
+                "in this archive is affected, so per-device results are not reported — fix the "
+                "store and re-run."
+            )
+        except ReferenceInvalid as exc:
+            per_device[hostname] = (
+                f"this stack cannot resolve {raw!r}: {exc}. The device restores as configuration "
+                "and cannot authenticate until the secret exists in this stack's store — "
+                "provisioning it is a separate operation (ADR-0018 §2a)."
+            )
+        except ResolverError as exc:
+            per_device[hostname] = f"this stack cannot resolve {raw!r}: {type(exc).__name__}: {exc}"
+    return per_device, None
+
+
 async def restore_archive(
     *,
     raw_archive: Any,
@@ -276,6 +365,11 @@ async def restore_archive(
     allowed_ports = resolve_allowed_ports(config)
     backend = registry._backend
 
+    # Decided before anything is written, so the DRY RUN carries it too. A reference that this
+    # stack cannot resolve is exactly the thing worth learning while the restore can still be
+    # stopped — after the fact it is indistinguishable from a device nobody has used yet.
+    cred_warnings, cred_fleet_warning = await plan_credential_refs(archive, opener, build_resolver(config))
+
     results: list[dict[str, Any]] = []
     for record in archive.get("devices", []):
         results.append(
@@ -290,6 +384,7 @@ async def restore_archive(
                 allow_private=allow_private,
                 allowed_ports=allowed_ports,
                 include_deadletters=include_deadletters,
+                credential_warning=cred_warnings.get(record.get("hostname") or "<unnamed>"),
             )
         )
 
@@ -304,12 +399,24 @@ async def restore_archive(
     # Lifted out of `counts` as its own name for the same reason `fingerprint_warnings` is:
     # this is the number a caller should branch on, and reading it out of a counts dict means
     # knowing both outcome spellings and remembering to add the dry-run one.
+    # Counted from the RESULTS, not from the plan: a device the conflict rules skipped is not
+    # one this restore is putting into service, and warning about its reference would send an
+    # operator to fix something nothing is waiting on.
+    cred_warned = sum(1 for r in results if r.get("credential_warning"))
     reconnect = counts.get(OUTCOME_RESTORED_NEEDS_RECONNECT, 0) + counts.get(OUTCOME_WOULD_RESTORE_NEEDS_RECONNECT, 0)
 
     logger.info(
         f"Restore {'(dry run) ' if dry_run else ''}complete: {counts}"
         + (f" ({warned} fingerprint warning{'s' if warned != 1 else ''})" if warned else "")
     )
+    if cred_fleet_warning:
+        logger.error(f"Restore: {cred_fleet_warning}")
+    elif cred_warned:
+        logger.warning(
+            f"{cred_warned} restored device(s) hold a credential reference this stack cannot "
+            "resolve; they are registered and will fail to authenticate until the secret exists "
+            "in this stack's secret store."
+        )
     if reconnect:
         # WARNING, not INFO. A restore that ends with devices nobody can bring back without a
         # human is the one line from this operation that must survive a log level set during
@@ -327,6 +434,10 @@ async def restore_archive(
         "created_at": archive.get("created_at"),
         "counts": counts,
         "fingerprint_warnings": warned,
+        "credential_warnings": cred_warned,
+        #: Set when the failure is the STORE rather than any one device (ADR-0018 §7). Its
+        #: presence means per-device credential results were deliberately not produced.
+        "credential_store_error": cred_fleet_warning,
         "needs_reconnect": reconnect,
         "devices": results,
     }
@@ -344,6 +455,7 @@ async def _restore_one(
     allow_private: bool,
     allowed_ports: set[int] | None,
     include_deadletters: bool,
+    credential_warning: str | None = None,
 ) -> dict[str, Any]:
     hostname = record.get("hostname") or "<unnamed>"
     # Assigned once the device is known to be one this restore will write; read by
@@ -356,6 +468,16 @@ async def _restore_one(
             out["reason"] = reason
         if fp_warning:
             out["fingerprint_warning"] = fp_warning
+        # Attached only to outcomes this restore is actually putting into service. A `skipped`
+        # device is one the conflict rules left alone; its reference is the live record's
+        # business, not this restore's, and warning about it is an errand nothing is waiting on.
+        if credential_warning and outcome in (
+            OUTCOME_RESTORED,
+            OUTCOME_WOULD_RESTORE,
+            OUTCOME_RESTORED_NEEDS_RECONNECT,
+            OUTCOME_WOULD_RESTORE_NEEDS_RECONNECT,
+        ):
+            out["credential_warning"] = credential_warning
         return out
 
     upstream_kind = record.get("upstream_kind") or "openapi"

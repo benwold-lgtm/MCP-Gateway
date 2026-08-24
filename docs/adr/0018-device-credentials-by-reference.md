@@ -194,7 +194,12 @@ before it is applied, and it has already caught real mistakes.
 > **Implementation note (2026-08-24): this section lands in two halves, and the second one is
 > blocked on §1 rather than on itself.**
 >
-> The **exclusion is built**. A gateway-minted refresh token is dropped from every archive,
+> The **exclusion is built**, and so is the resolvability check this section asks for —
+> a restore resolves every archived reference before writing, reports a bad one per
+> device and a failed store once (§7's distinction, preserved), and the dry run predicts
+> both.
+>
+> Originally: A gateway-minted refresh token is dropped from every archive,
 > and a `grant_type=refresh_token` device restores as `restored_needs_reconnect` and keeps a
 > `credential_state` an operator can find on the fleet list afterwards.
 >
