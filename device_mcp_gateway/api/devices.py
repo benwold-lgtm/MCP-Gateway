@@ -110,9 +110,17 @@ def _parse_auth(
         token_endpoint = auth_cfg.get("token_endpoint") or oauth_defaults.get("token_endpoint")
         client_id = auth_cfg.get("client_id") or oauth_defaults.get("client_id")
         client_secret = auth_cfg.get("client_secret") or oauth_defaults.get("client_secret")
+        client_secret_ref = auth_cfg.get("client_secret_ref") or oauth_defaults.get("client_secret_ref")
+        password_ref = auth_cfg.get("password_ref")
         scopes = auth_cfg.get("scopes") or oauth_defaults.get("scopes", ["read"])
-        if not token_endpoint or not client_id or not client_secret:
-            raise HTTPException(status_code=400, detail="oauth2 requires token_endpoint, client_id, and client_secret")
+        if not token_endpoint or not client_id or not (client_secret or client_secret_ref):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "oauth2 requires token_endpoint, client_id, and either client_secret or "
+                    "client_secret_ref (ADR-0018)"
+                ),
+            )
         # SSRF-2: the gateway POSTs the client_secret to token_endpoint, so it is an
         # outbound device target too — run it through the same URL policy as base_url/
         # spec_url. Without this a devices:write caller could exfiltrate the secret to
@@ -132,7 +140,13 @@ def _parse_auth(
                 password=auth_cfg.get("password"),
                 refresh_token=auth_cfg.get("refresh_token"),
                 extra_params=auth_cfg.get("extra_params"),
+                client_secret_ref=client_secret_ref,
+                password_ref=password_ref,
             )
+        except ReferenceInvalid as exc:
+            # Named apart from a generic ValueError so the operator is told the reference is
+            # malformed rather than hunting through the rest of the oauth2 block.
+            raise HTTPException(status_code=400, detail=f"Invalid credential reference: {exc}")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid oauth2 auth: {exc}")
     if auth_type == "none":

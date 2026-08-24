@@ -71,6 +71,28 @@ class AbstractAuth(ABC):
     #: ``None`` and are unaffected by ADR-0018.
     credential_ref: str | None = None
 
+    def credential_refs(self) -> dict[str, str]:
+        """Every operator-provisioned secret this handler holds **by reference**, keyed by the
+        field each one fills.
+
+        A single ``credential_ref`` was enough while ``ApiKeyAuth`` was the only by-reference
+        handler, because an API key is one secret. ``OAuth2Auth`` is not: it can hold a
+        ``client_secret`` *and* a ``password``, provisioned and rotated independently by the
+        tenant, and one field cannot name two locations. Forcing them into one path with two
+        fragments would couple two secrets that rotate on different schedules to a single
+        store location, which is the opposite of what §1 buys.
+
+        So the wire format names them individually — ``client_secret_ref``, ``password_ref``
+        — and this accessor is what everything else reads, so callers that need "all the
+        references this device depends on" (dispatch binding, a restore's resolvability
+        check) do not each grow their own list of field names to look for. That list is how
+        a handler gets added and quietly skipped by one of them.
+
+        ``refresh_token`` is deliberately never here. It is gateway-minted (§1a), has no
+        external writer, and stays encrypted at rest.
+        """
+        return {"credential_ref": self.credential_ref} if self.credential_ref else {}
+
     async def bind(self, resolver: Any) -> None:
         """Resolve this handler's reference into usable material for one dispatch.
 

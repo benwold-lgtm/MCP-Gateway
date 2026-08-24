@@ -377,8 +377,8 @@ credentials. Set a key, or take a portable archive.
 ([ADR-0018](adr/0018-device-credentials-by-reference.md) §3). It is excluded unconditionally
 — it is a credential the *gateway* mints and rotates, which makes it runtime state rather
 than a registration input, the same category as the claims, leases and sessions an archive
-has always omitted. `client_secret`, `password`, `api_key` and `credential_ref` all still
-travel.
+has always omitted. `client_secret`, `password`, `api_key` and every `*_ref` all still travel —
+and where a device holds those by reference, what travels is the reference and not the secret.
 
 Check `counts.needs_reconnect` on every export:
 
