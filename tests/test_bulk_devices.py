@@ -8,6 +8,7 @@ trips on the /health, /metrics/summary, and /devices hot paths. The Redis backen
 fetches all configs in a single pipeline.
 """
 
+import fakeredis.aioredis
 import pytest
 
 from device_mcp_gateway.shared.registry_backend import (
@@ -38,43 +39,43 @@ async def test_memory_get_devices_empty():
 # --- Redis backend single-pipeline override --------------------------------
 
 
-class _StubPipe:
-    def __init__(self, store):
-        self._store = store
-        self._keys: list[str] = []
+class _CountingRedis:
+    """A real fakeredis client that also counts how many pipelines were opened.
 
-    def hgetall(self, key):
-        self._keys.append(key)
+    The count is the point of the test below — ``get_devices`` overrides the default
+    one-``get_device``-per-hostname loop precisely to avoid N round trips, and nothing else
+    can observe that. Everything else delegates, so the hashes are really written and really
+    parsed rather than handed back from a dict.
 
-    async def execute(self):
-        return [self._store.get(k, {}) for k in self._keys]
+    This used to be a hand-written stub returning str-keyed hashes, because fakeredis before
+    2.37.1 did not decode hash replies and ``from_redis_hash`` could not read them. The floor
+    in pyproject.toml is what makes the real client usable here.
+    """
 
-
-class _StubRedis:
-    """Minimal redis stub returning str-keyed hashes (real Redis decodes; this
-    sidesteps the fakeredis byte-key quirk so from_redis_hash works)."""
-
-    def __init__(self, store):
-        self._store = store
+    def __init__(self, inner):
+        self._inner = inner
         self.pipelines = 0
 
-    def pipeline(self):
+    def pipeline(self, *a, **kw):
         self.pipelines += 1
-        return _StubPipe(self._store)
+        return self._inner.pipeline(*a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
 
 @pytest.mark.asyncio
 async def test_redis_get_devices_uses_single_pipeline():
-    store = {
-        "device:a:config": {"hostname": "a", "base_url": "http://a"},
-        "device:b:config": {"hostname": "b", "base_url": "http://b"},
-    }
-    stub = _StubRedis(store)
-    backend = RedisRegistryBackend(stub)
+    client = _CountingRedis(fakeredis.aioredis.FakeRedis(decode_responses=True))
+    backend = RedisRegistryBackend(client)
+    await backend.set_device("a", DeviceConfig(hostname="a", base_url="http://a"))
+    await backend.set_device("b", DeviceConfig(hostname="b", base_url="http://b"))
+    before = client.pipelines
 
     got = await backend.get_devices(["a", "b", "gone"])
+
     assert sorted(c.hostname for c in got) == ["a", "b"]
-    assert stub.pipelines == 1  # one pipeline, not N round-trips
+    assert client.pipelines - before == 1  # one pipeline, not N round-trips
 
 
 # --- Registry integration ---------------------------------------------------

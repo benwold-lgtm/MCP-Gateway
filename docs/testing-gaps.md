@@ -22,7 +22,7 @@ confidence: link the run, the baseline, or the recording that closed it.
 | [TG-3](#tg-3--ha-redis-failover) | HA Redis failover behaviour | A real Sentinel/Cluster deployment able to promote a replica | The retry/health-check settings may not cover a real election window |
 | ~~[TG-4](#tg-4--the-kubernetes-manifests-on-a-real-cluster--closed)~~ | ~~The k8s manifests on a real cluster~~ | **CLOSED 2026-08-06** — see below | — |
 | [TG-5](#tg-5--the-arm64-image-on-real-arm64-hardware) | arm64 image on real arm64 hardware | A Pi / arm64 host | QEMU-built arm64 layers can pass build and still fail at runtime |
-| [TG-6](#tg-6--hash-reading-redis-paths-in-the-unit-tier) | Hash-reading Redis paths in the unit tier | A fakeredis fix, or moving the test to the real-Redis tier | Unit tests cannot exercise any `hgetall` consumer. **Demonstrated 2026-08-10** — the R6 defect was exactly this class, and reached a live cluster |
+| ~~[TG-6](#tg-6--hash-reading-redis-paths-in-the-unit-tier--closed)~~ | ~~Hash-reading Redis paths in the unit tier~~ | **CLOSED 2026-08-24** — fakeredis 2.37.1 decodes; floor raised, four workarounds removed. See below | — |
 | ~~[TG-7](#tg-7--disaster-recovery-restore-into-a-genuinely-fresh-stack--closed)~~ | ~~DR: restore into a genuinely fresh stack~~ | **CLOSED 2026-08-11** — walked end to end; see below | — |
 | [TG-8](#tg-8--backup-and-restore-at-fleet-scale) | Backup/restore at fleet scale | A fleet in the hundreds with workers under real assignment pressure | Export is one synchronous response over the whole registry; it may time out precisely on the fleets where the archive matters most |
 | [TG-9](#tg-9--backup-across-a-key-rotation-on-a-live-distributed-stack) | Backup across a live key rotation | A rolling restart with overlapping `MCP_SECRET_KEY` sets | Double-encrypted credentials in an archive that verifies clean; surfaces only when a restored device authenticates upstream |
@@ -91,6 +91,14 @@ command issued *during* the election window.
 connection errors and timeouts recover, that a permanent outage still surfaces, that the
 budget is finite — plus health-check and connect-timeout settings. The policy is tested; the
 event is not.
+
+**Do this while you are here.** A Sentinel client is built with `master_for()`, which takes
+its own connection kwargs — and `decode_responses` is exactly the one that gets forgotten,
+because the single existing construction site passes it as a literal and nothing enforces it.
+[TG-6](#tg-6--hash-reading-redis-paths-in-the-unit-tier) measures what that costs: every
+device read returns `None` and the fleet endpoint reports **empty**, with a warning blaming a
+delete that never happened. Adding an HA path is the change that arms it, so the guard TG-6
+defers belongs in the same piece of work.
 
 **Specifically unverified:**
 
@@ -213,9 +221,32 @@ build cleanly and still fault at runtime on real silicon, typically in a native 
 **What would close it.** `docker compose -f docker-compose.lite.yml up` on a Pi or other
 arm64 box, through to a registered device and a successful tool call.
 
-## TG-6 — Hash-reading Redis paths in the unit tier
+## TG-6 — Hash-reading Redis paths in the unit tier — CLOSED
 
-**What is unvalidated.** Nothing, in the end — but not where you would expect, and the
+**✅ CLOSED 2026-08-24 — fakeredis 2.37.1 decodes hash *and* stream replies.** Measured
+across every construction path, and against `RedisRegistryBackend.get_device`, which now
+round-trips a device over the fake. The floor in `pyproject.toml` is raised to `>=2.37.1` so
+the fix is guaranteed rather than incidental, and the four production workarounds are gone
+(`breakglass.py`, `session_router.py` ×2, `worker/dispatch.py`), along with the hand-written
+`_StubRedis`.
+
+**How it was found is the part worth keeping.** A tripwire test asserting the quirk still
+existed failed on its first CI run — because **CI had floated to 2.37.1 while a local venv sat
+on 2.36.0**. The two environments disagreed about a behaviour four pieces of production code
+depended on, and the pin (`>=2.26,<3.0.0`) allowed both. Nothing else would have reported it:
+the workarounds were written to tolerate *either* behaviour, so both environments passed.
+
+That is [[feedback-resync-the-venv]] again, inverted — the usual failure is local drift making
+a fixed bug look present; here it also meant a gap documented as current had quietly closed
+upstream and nobody knew. **A dependency whose behaviour code depends on needs a floor, not a
+range.**
+
+The historical account follows, since the reasoning about what a double can and cannot show
+outlived the quirk.
+
+---
+
+**What was unvalidated.** Nothing, in the end — but not where you would expect, and the
 detail matters to anyone adding a test.
 
 **The trap.** `fakeredis` 2.36 does **not** honour `decode_responses=True` for `hgetall`,
@@ -228,10 +259,23 @@ smembers   -> {'m'}
 hgetall    -> {b'a': b'1'}
 ```
 
-Every `DeviceConfig.from_redis_hash` consumer therefore raises `KeyError: 'hostname'` under
-fakeredis, so `RedisRegistryBackend.get_device` — and anything downstream of it, including
-the worker's `_spawn_pod` config read — **cannot be unit-tested against the fake.** This is
-easy to mistake for a bug in the code under test; it is not.
+Every `DeviceConfig.from_redis_hash` consumer is therefore unreachable under fakeredis, so
+`RedisRegistryBackend.get_device` — and anything downstream of it, including the worker's
+`_spawn_pod` config read — **cannot be unit-tested against the fake.** This is easy to
+mistake for a bug in the code under test; it is not.
+
+⚠️ **The symptom changed, and got quieter (measured 2026-08-24).** This section used to say
+the consumer raises `KeyError: 'hostname'`. It no longer does: `_config_or_none`, added with
+the R6 zombie-device fix, catches a hash with no `hostname`, logs "left over from a delete
+that raced a field update", and returns `None`. That guard is right for the case it was
+written for and wrong for this one — **an undecoded hash has *every* field and no
+`hostname`, so it takes the same branch.** A loud failure became a silent one. Nothing is
+currently harmed by that (see below), but a fix that quiets an unrelated failure mode is
+worth noticing when it happens.
+
+**Three tripwires now assert the quirk still exists** (`tests/test_fakeredis_assumptions.py`).
+They are meant to fail one day; when they do, the fix is to delete them along with the four
+production workarounds they justify, not to adjust them.
 
 **What exists instead.** CI runs a real `redis:7-alpine` service and the integration tier
 (`tests/test_integration_redis.py`) exercises these paths for real, so they are covered —
@@ -242,6 +286,30 @@ just not by the unit tier. A test needing a device config from a backend should 
 **What would close it.** A fakeredis release that decodes hash replies, or a small decoding
 wrapper in `conftest.py`. Neither is urgent while CI has a real Redis; the cost of the gap
 is confusion, not missing coverage.
+
+**Measured 2026-08-24 — the same failure on real Redis, and how far it can reach.** A real
+client built without `decode_responses=True` behaves identically, so this is a property of
+the code, not of the double: `get_device` returns `None` for every device while
+`list_hostnames()` returns `[b'...']`, and `GET /v1/devices` reports an **empty fleet** for a
+registry holding 27 fields per device — with a per-device warning blaming a delete that never
+happened.
+
+It is not reachable in production today, which is why the guard below is deferred rather than
+built. Checked, not assumed: there is exactly **one** client construction site
+(`shared/redis_client.py`), it passes `decode_responses=True` as a literal, a URL query
+parameter cannot override it on redis-py 8.1 (`?decode_responses=false` still yields `str`),
+and no Sentinel path exists to construct a second client differently.
+
+**What would arm it**, and therefore what to do this alongside: a second construction site —
+an HA/Sentinel client is [TG-3](#tg-3--ha-redis-failover), and `master_for()` takes its own
+connection kwargs, which is exactly where `decode_responses` gets forgotten; a redis-py change
+in kwarg-versus-URL precedence, which has differed across versions and which nothing of ours
+pins; or a directly injected client, which `RedisRegistryBackend(redis_client: Any)` accepts.
+
+**Deferred fix, to land with TG-3 — unaffected by this closure.** It is about a misconfigured *real* client, not about the fake. Teach `_config_or_none` to tell the two cases apart: a
+raced delete leaves one or two fields, an undecoded hash leaves all of them with `bytes` keys.
+The second is a misconfigured client and should say so loudly, rather than reporting an empty
+fleet.
 
 **Risk if the design is wrong.** Low for correctness, real for velocity: the failure mode
 looks like a product bug, and the natural "fix" is to weaken the test.

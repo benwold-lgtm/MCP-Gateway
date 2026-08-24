@@ -93,22 +93,13 @@ def _fleet_tools_key(session_id: str) -> str:
 
 
 def _field(fields: dict, name: str) -> str | None:
-    """Read a stream-entry field tolerant of str or bytes keys/values.
+    """Read one field out of a stream entry.
 
-    Real Redis with decode_responses=True yields str keys/values; fakeredis does
-    not decode stream fields, so the same entry comes back with bytes keys. Accept
-    both so the unit suite (fakeredis) and production (real Redis) agree.
+    Both clients decode: real Redis because ``decode_responses=True`` is set at the single
+    construction site, and fakeredis since 2.37.1. It used to accept bytes as well, purely
+    to accommodate the older fake.
     """
-    val = fields.get(name)
-    if val is None:
-        val = fields.get(name.encode())
-    if isinstance(val, bytes):
-        val = val.decode()
-    return val
-
-
-def _decode(val: Any) -> str:
-    return val.decode() if isinstance(val, bytes) else val
+    return fields.get(name)
 
 
 class _RefreshThrottle:
@@ -178,12 +169,7 @@ class SessionRouter:
         h = await self._r.hgetall(KEYS.session(session_id))
         if not h:
             return None
-        # Decode defensively: real Redis with decode_responses=True already returns
-        # str, so this is a no-op there. Some test doubles (fakeredis) don't honour
-        # decode_responses for hash fields, returning bytes -- silently breaking any
-        # str comparison against the result, including the F-37 owner-mismatch
-        # check callers run on the "owner" field.
-        return {_decode(k): _decode(v) for k, v in h.items()}
+        return dict(h)
 
     async def refresh(self, session_id: str, ttl: int = SESSION_TTL) -> None:
         # Keep the session hash, its results stream, and (for a fleet session) its
@@ -226,7 +212,7 @@ class SessionRouter:
         h = await self._r.hgetall(_fleet_tools_key(session_id))
         if not h:
             return None
-        return {_decode(k): json.loads(_decode(v)) for k, v in h.items()}
+        return {k: json.loads(v) for k, v in h.items()}
 
     async def subscribe(self, session_id: str) -> AsyncGenerator[dict, None]:
         """Yield JSON-RPC response dicts from this session's durable results stream.

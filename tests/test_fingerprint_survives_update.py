@@ -28,9 +28,9 @@ actually touches.
 
 from __future__ import annotations
 
-import copy
 import itertools
 
+import fakeredis.aioredis
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
@@ -40,7 +40,7 @@ from device_mcp_gateway.backup.restore import _FINGERPRINT_FIELDS
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.security import fingerprint as fp
 from device_mcp_gateway.shared.crypto import CredentialCodec
-from device_mcp_gateway.shared.registry_backend import DeviceConfig, MemoryRegistryBackend
+from device_mcp_gateway.shared.registry_backend import DeviceConfig, RedisRegistryBackend
 
 SPKI_A = "a" * 64
 SPKI_B = "b" * 64
@@ -64,34 +64,26 @@ def _pinned_fields(spki: str | None = SPKI_A, *, state: str = fp.STATE_PINNED, *
     return fields
 
 
-class _StoringBackend(MemoryRegistryBackend):
-    """``MemoryRegistryBackend`` that STORES rather than aliases.
+async def _redis_backed():
+    """A ``RedisRegistryBackend`` over fakeredis — hashes really written, really parsed.
 
-    The stock double keeps the caller's ``DeviceConfig`` by reference on ``set_device`` and
-    hands the same object back from ``get_device``. Every assertion about "was it
-    persisted?" is then answered by the object the code under test is still holding, so
-    writing to the backend and mutating the returned record become indistinguishable — two
-    mutants of this fix survived a full pass because of it.
+    This was a copy-at-both-boundaries subclass of ``MemoryRegistryBackend`` when it was
+    written, because fakeredis before 2.37.1 did not decode hash replies and ``get_device``
+    silently yielded ``None`` over it. The stock in-memory double stores the caller's
+    ``DeviceConfig`` **by reference**, so "was it persisted?" was answered by the object the
+    code under test was still holding — two mutants of this fix survived a full pass because
+    of it.
 
-    The real backend serialises to a Redis hash and parses a fresh object back, so copying
-    at both boundaries is the faithful imitation. (``RedisRegistryBackend`` over fakeredis
-    would be more faithful still, but the installed fakeredis ignores
-    ``decode_responses=True`` and returns bytes keys, so ``get_device`` silently yields
-    ``None`` — a double that lies in a different direction.)
+    Now that the real backend can be driven, use it: it distinguishes those mutants for the
+    right reason (a serialise/parse round trip) rather than by imitating one.
     """
-
-    async def set_device(self, hostname, config):
-        await super().set_device(hostname, copy.copy(config))
-
-    async def get_device(self, hostname):
-        cfg = await super().get_device(hostname)
-        return copy.copy(cfg) if cfg is not None else None
+    return RedisRegistryBackend(fakeredis.aioredis.FakeRedis(decode_responses=True))
 
 
 async def _distributed(hostname: str = "dev1", *, auth=None, **pin):
     """A distributed registry holding one pinned device."""
     codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
-    backend = _StoringBackend()
+    backend = await _redis_backed()
     reg = Registry(config={"mode": "distributed"}, backend=backend, codec=codec)
     await reg.register_device(hostname, "http://dev1", auth=auth)
     await backend.update_device_fields(hostname, **_pinned_fields(**pin))
@@ -220,7 +212,7 @@ async def test_a_device_that_was_never_pinned_is_left_alone():
     over itself — harmless but pure cost, on the most common path there is.
     """
     codec = CredentialCodec.from_secret(Fernet.generate_key().decode())
-    backend = MemoryRegistryBackend()
+    backend = await _redis_backed()
     reg = Registry(config={"mode": "distributed"}, backend=backend, codec=codec)
     await reg.register_device("dev1", "http://dev1")
 
@@ -243,8 +235,8 @@ async def test_a_device_that_was_never_pinned_is_left_alone():
 async def test_the_pin_is_actually_persisted_not_just_set_on_the_object():
     """Storage and the returned object are two claims, and only one of them is the fix.
 
-    Separated because the stock in-memory double conflates them (see ``_StoringBackend``):
-    a fix that only mutated the record it hands back would leave the *stored* device
+    Separated because they are separable only against a backend that really stores: a fix
+    that only mutated the record it hands back would leave the *stored* device
     unpinned, and the next read — the next health check — would re-TOFU it exactly as
     before, while the response to the operator's edit looked correct.
     """

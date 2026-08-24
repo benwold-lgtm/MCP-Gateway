@@ -174,16 +174,13 @@ class RedisBreakGlassActivity:
 
 
 def _seconds_since(raw: Any, now: float) -> Optional[float]:
-    """Decode a stored epoch and return the elapsed seconds, or None if unusable.
+    """Read a stored epoch and return the elapsed seconds, or None if unusable.
 
-    Defensive about bytes because fakeredis does not honour ``decode_responses`` for hash
-    fields the way real Redis does — the same trap already documented in
-    ``shared/session_router.py``.
+    Still tolerant of a missing or malformed value — a tracker hash can be absent or
+    half-written — but no longer of ``bytes``: both clients decode now.
     """
     if raw is None:
         return None
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", "replace")
     try:
         elapsed = now - float(raw)
     except (TypeError, ValueError):

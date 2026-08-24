@@ -52,19 +52,6 @@ def _runner_mod():
     return runner
 
 
-def _decode_fields(fields: dict) -> dict:
-    """Return stream-entry fields with str keys/values.
-
-    Real Redis with decode_responses=True already yields str; fakeredis returns
-    bytes for stream fields. Normalising here lets dispatch_call read fields the
-    same way whether they came from XREADGROUP or XAUTOCLAIM, under either client.
-    """
-    out = {}
-    for k, v in fields.items():
-        out[k.decode() if isinstance(k, bytes) else k] = v.decode() if isinstance(v, bytes) else v
-    return out
-
-
 class CallDispatcher:
     """Consumes a device's call stream and executes tool calls on its pod."""
 
@@ -112,7 +99,7 @@ class CallDispatcher:
                     continue
                 for _s, messages in results:
                     for msg_id, fields in messages:
-                        await w._schedule_dispatch(sem, hostname, stream, group, msg_id, _decode_fields(fields))
+                        await w._schedule_dispatch(sem, hostname, stream, group, msg_id, fields)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -178,7 +165,7 @@ class CallDispatcher:
         for msg_id, fields in messages:
             mid = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
             logger.info(f"Reclaimed stranded call {mid} for {hostname}")
-            await w._schedule_dispatch(sem, hostname, stream, group, mid, _decode_fields(fields))
+            await w._schedule_dispatch(sem, hostname, stream, group, mid, fields)
 
     async def dead_letter(self, hostname: str, fields: dict, reason: str) -> None:
         """Move an undeliverable tool call to the device's dead-letter stream (SRE #4).

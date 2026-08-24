@@ -10,6 +10,26 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Changed
+
+- **`fakeredis` floor raised to 2.37.1, and four production workarounds removed.** Earlier
+  versions did not honour `decode_responses=True` for hash and stream replies, which had put
+  defensive byte-decoding into `breakglass.py`, `shared/session_router.py` (twice) and
+  `worker/dispatch.py` — production code accommodating a test double — plus a hand-written
+  stub standing in for a client the fake could not be. 2.37.1 decodes both, verified across
+  every construction path and against a real `RedisRegistryBackend` round trip, so all of it
+  is gone and TG-6 is closed.
+
+  **A range let CI and a local venv disagree about behaviour that code depended on.** CI had
+  floated to 2.37.1 while a local environment sat on 2.36.0. Both passed, because the
+  workarounds tolerated either. A dependency whose *behaviour* is depended upon needs a floor,
+  not a range — which is what this change is.
+
+  Two tests move onto the real backend as a result, and are stronger for it: the bulk-fetch
+  test now really serialises and parses (keeping its pipeline count, which was the stub's
+  other job), and the TLS-pin persistence tests distinguish "stored" from "mutated in memory"
+  through an actual round trip rather than through a double built to imitate one.
+
 ### Fixed
 
 - **A device's TLS pin no longer dies on an unrelated edit**
