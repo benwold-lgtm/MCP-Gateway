@@ -171,6 +171,16 @@ def _parse_auth(
 )
 async def register_device(request: Request):
     data = await request.json()
+    return await _apply_register(data, request)
+
+
+async def _apply_register(data: dict, request: Request) -> DeviceMutationResult:
+    """The validate-then-write body of a registration, apart from parsing the request.
+
+    Split out (ADR-0022 slice 5) so `POST /v1/devices/plans/apply` can run exactly this —
+    SSRF guard included — against a plan an agent proposed and a human already approved,
+    without a second copy of the gates to drift from this one.
+    """
     reg: Registry = request.app.state.registry
     cfg = request.app.state.config
     allow_private = resolve_allow_private(cfg)
@@ -271,6 +281,14 @@ async def register_device(request: Request):
     dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))],
 )
 async def update_device(hostname: str, request: Request):
+    data = await request.json()
+    return await _apply_update(hostname, data, request)
+
+
+async def _apply_update(hostname: str, data: dict, request: Request) -> DeviceMutationResult:
+    """The validate-then-write body of an update, apart from parsing the request.
+
+    Split out (ADR-0022 slice 5) for the same reason as `_apply_register`."""
     reg: Registry = request.app.state.registry
     cfg = request.app.state.config
     allow_private = resolve_allow_private(cfg)
@@ -279,7 +297,6 @@ async def update_device(hostname: str, request: Request):
     if not existing:
         raise HTTPException(status_code=404, detail=f"Device '{hostname}' not found")
 
-    data = await request.json()
     base_url = data.get("base_url") or existing.base_url
     spec_url = data.get("spec_url", existing.spec_url)
     # Re-validate target URLs on update (a PUT can change base_url/spec_url) — Tier-0 F-02.

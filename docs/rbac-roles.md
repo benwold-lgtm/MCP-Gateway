@@ -10,7 +10,7 @@ for the role/scope model; the *decision* behind it is
 
 | Scope | Grants | Route guards (examples) |
 |-------|--------|--------------------------|
-| `devices:read` | See devices and their state; **propose** a device-write plan (ADR-0022) — writes nothing, reaches nothing (see below) | `GET /v1/devices`, `GET /v1/devices/{h}`, `…/diagnostics`, `…/tools`, `…/tools/diff`, `…/deadletter` (inspect), `GET /v1/admin/overview`, `POST /v1/devices/plans` |
+| `devices:read` | See devices and their state; **propose** a device-write plan (ADR-0022) — writes nothing, reaches nothing (see below); also the `require_scope` guard on **apply** (the actual gate there is the `devices:write-planned` grant below, checked inline) | `GET /v1/devices`, `GET /v1/devices/{h}`, `…/diagnostics`, `…/tools`, `…/tools/diff`, `…/deadletter` (inspect), `GET /v1/admin/overview`, `POST /v1/devices/plans`, `POST /v1/devices/plans/apply` |
 | `devices:write` | Manage the fleet; **review and approve** a proposed device-write plan (ADR-0022) | `POST/PUT/DELETE /v1/devices/{h}`, `POST …/deadletter/replay`, `DELETE …/deadletter` (drain), `GET /v1/devices/plans/{id}`, `POST /v1/devices/plans/{id}/approve` |
 | `tools:call` | Invoke a device's MCP tools | `GET /v1/devices/{h}/sse`, `POST /v1/devices/{h}/messages` |
 | `metrics:read` | Read operational metrics | `GET /v1/metrics/summary` |
