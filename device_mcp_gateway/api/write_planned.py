@@ -155,7 +155,7 @@ async def get_device_plan(proposal_id: str, request: Request):
     }
 
 
-def _approval_ttl(config: dict, *, repeatable: bool, requested: object) -> float:
+def _approval_ttl(config: dict, *, repeatable: bool, requested: object) -> int:
     """The grant's lifetime: the deployment's configured ceiling for this grant kind,
     shortened if the reviewer asked for less, never lengthened beyond it.
 
@@ -169,7 +169,7 @@ def _approval_ttl(config: dict, *, repeatable: bool, requested: object) -> float
         return ceiling
     if isinstance(requested, bool) or not isinstance(requested, (int, float)) or requested <= 0:
         raise HTTPException(status_code=400, detail="'ttl_seconds' must be a positive number")
-    return min(float(requested), ceiling)
+    return int(min(float(requested), ceiling))
 
 
 @router.post(
