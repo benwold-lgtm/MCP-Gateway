@@ -95,10 +95,22 @@ def _register(client, hostname, *, base_url="http://127.0.0.1:9", secret=None):
 
 
 def _restore(client, archive, *, dry_run=True, **over):
+    """Preview, or preview-then-apply with the plan_token the preview minted.
+
+    ADR-0018 §6: an apply must reference the plan it was previewed from. When the
+    preview itself fails (a wrong key, a bad on_conflict, ...), the apply would fail
+    identically — nothing else to bind a token to — so that response is returned as-is.
+    """
     body = {"archive": archive}
     body.update(over)
-    path = "/v1/admin/restore/preview" if dry_run else "/v1/admin/restore/apply"
-    return client.post(path, headers=_auth(), json=body)
+    if dry_run:
+        return client.post("/v1/admin/restore/preview", headers=_auth(), json=body)
+
+    preview = client.post("/v1/admin/restore/preview", headers=_auth(), json=body)
+    if preview.status_code != 200:
+        return preview
+    token = preview.json()["plan_token"]
+    return client.post("/v1/admin/restore/apply", headers=_auth(), json={**body, "plan_token": token})
 
 
 def _hostnames(client):
@@ -430,9 +442,108 @@ def test_apply_requires_backup_write_and_read_alone_is_not_enough(monkeypatch, t
 
 def test_a_body_without_an_archive_is_a_400_not_a_500(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
-    for path in ("/v1/admin/restore/preview", "/v1/admin/restore/apply"):
-        assert client.post(path, headers=_auth(), json={}).status_code == 400
-        assert client.post(path, headers=_auth(), json={"archive": "nonsense"}).status_code == 409
+    # A missing archive is caught before plan_token is even considered, on both routes.
+    assert client.post("/v1/admin/restore/preview", headers=_auth(), json={}).status_code == 400
+    assert client.post("/v1/admin/restore/apply", headers=_auth(), json={}).status_code == 400
+
+    # Preview has no plan_token concept — a nonsense archive fails parsing directly.
+    assert client.post("/v1/admin/restore/preview", headers=_auth(), json={"archive": "nonsense"}).status_code == 409
+
+    # Apply without plan_token is refused before an archive — sensible or not — is ever
+    # touched: there is no legitimate way to hold a token for a plan that never previewed
+    # successfully, since preview would have failed on the same nonsense archive too.
+    resp = client.post("/v1/admin/restore/apply", headers=_auth(), json={"archive": "nonsense"})
+    assert resp.status_code == 400
+    assert "plan_token" in resp.json()["detail"]
+
+
+# --- ADR-0018 §6: plan_digest / plan_token ------------------------------------
+
+
+def test_a_successful_preview_returns_plan_digest_and_plan_token(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+
+    preview = client.post("/v1/admin/restore/preview", headers=_auth(), json={"archive": archive}).json()
+    assert len(preview["plan_digest"]) == 64
+    int(preview["plan_digest"], 16)  # hex
+    assert isinstance(preview["plan_token"], str) and preview["plan_token"]
+
+
+def test_a_successful_apply_also_carries_plan_digest(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
+    _register(client, "alpha")
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+    client.delete("/v1/devices/alpha", headers=_auth())
+
+    applied = _restore(client, archive, dry_run=False).json()
+    assert applied["plan_digest"]
+    assert "plan_token" not in applied, "apply does not need to mint a fresh one"
+
+
+def test_apply_without_a_plan_token_is_refused(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+    resp = client.post("/v1/admin/restore/apply", headers=_auth(), json={"archive": archive})
+    assert resp.status_code == 400
+    assert "plan_token" in resp.json()["detail"]
+
+
+def test_apply_with_a_forged_plan_token_is_refused_as_stale(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+    resp = client.post(
+        "/v1/admin/restore/apply", headers=_auth(), json={"archive": archive, "plan_token": "not-a-real-token"}
+    )
+    assert resp.status_code == 409
+    body = resp.json()["detail"]
+    assert body["error_code"] == "ERR_PLAN_STALE"
+    # Names the field space the digest covers, never a diff or a previous value — there
+    # is nothing to diff against, since a forged token never decodes to real inputs.
+    assert set(body["fields"]) == {"archive", "passphrase", "on_conflict", "include_deadletters"}
+
+
+def test_apply_with_a_plan_token_from_a_different_request_is_refused_as_stale(monkeypatch, tmp_path):
+    """The legitimate-drift case: the token verifies (it is real, unexpired) but was
+    minted over a different on_conflict than the one now being submitted."""
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
+    _register(client, "alpha")
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+
+    skip_preview = client.post(
+        "/v1/admin/restore/preview", headers=_auth(), json={"archive": archive, "on_conflict": "skip"}
+    ).json()
+
+    resp = client.post(
+        "/v1/admin/restore/apply",
+        headers=_auth(),
+        json={"archive": archive, "on_conflict": "overwrite", "plan_token": skip_preview["plan_token"]},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error_code"] == "ERR_PLAN_STALE"
+    # And nothing was written: the check runs before restore_archive is ever called.
+    live = client.get("/v1/devices/alpha", headers=_auth()).json()
+    assert live["base_url"] == archive["devices"][0]["base_url"]
+
+
+def test_an_expired_plan_token_is_refused_as_stale(monkeypatch, tmp_path):
+    import time
+
+    import device_mcp_gateway.api.backup as backup_module
+
+    monkeypatch.setattr(backup_module, "plan_digest_validity_seconds", lambda cfg: 0)
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+
+    preview = client.post("/v1/admin/restore/preview", headers=_auth(), json={"archive": archive}).json()
+    time.sleep(1.2)  # past the 0s window
+    resp = client.post(
+        "/v1/admin/restore/apply",
+        headers=_auth(),
+        json={"archive": archive, "plan_token": preview["plan_token"]},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error_code"] == "ERR_PLAN_STALE"
 
 
 # --- Dead letters -----------------------------------------------------------

@@ -12,12 +12,18 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Changed
 
-- **`POST /v1/admin/restore` is now two routes, split by scope** ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md)
-  §6). `POST /v1/admin/restore/preview` writes nothing and needs only `backup:read`;
-  `POST /v1/admin/restore/apply` is the destructive call and needs `backup:write`. There is
-  no `dry_run` body field on either — which operation runs is now which route you call,
-  not a flag inside a body a caller controls. **Breaking**: update any script or client
-  posting to the old single endpoint. See [docs/runbook.md](docs/runbook.md#restore-from-a-backup).
+- **`POST /v1/admin/restore` is now two routes, split by scope, and the apply must
+  reference the plan it was previewed from** ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md)
+  §6). `POST /v1/admin/restore/preview` writes nothing, needs only `backup:read`, and
+  returns `plan_digest`/`plan_token`; `POST /v1/admin/restore/apply` is the destructive
+  call, needs `backup:write`, and requires `plan_token` from that preview — a missing,
+  mismatched, forged, or expired (default 7-day) token is refused as `ERR_PLAN_STALE`
+  before anything is written. There is no `dry_run` body field on either — which operation
+  runs is now which route you call, not a flag inside a body a caller controls. Restore is
+  no longer single-use: preview as many times as needed while adjusting `on_conflict`, with
+  no elevation held until the one call that applies. **Breaking**: update any script or
+  client posting to the old single endpoint. See
+  [docs/runbook.md](docs/runbook.md#restore-from-a-backup).
 
 - **`fakeredis` floor raised to 2.37.1, and four production workarounds removed.** Earlier
   versions did not honour `decode_responses=True` for hash and stream replies, which had put

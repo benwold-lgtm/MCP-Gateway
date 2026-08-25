@@ -403,14 +403,22 @@ Preview performs the same fail-closed preflight and the same per-device gates as
 its report is a prediction rather than a parse — and because it costs no elevation, run it
 as many times as you need while adjusting `on_conflict`.
 
-```bash
-# 1. Preview. Reports per device: would_restore | skipped | failed.
-curl -s -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d "{\"archive\": $(cat fleet-2026-08-11.json)}" "$GW/v1/admin/restore/preview" | jq '.counts, .devices'
+**The apply must carry the `plan_token` its preview returned**, and it must be *this*
+preview's token: change `archive`, `on_conflict`, `include_deadletters` or the passphrase
+between the two calls and the apply is refused (`ERR_PLAN_STALE`, 409) rather than silently
+applying something other than what you read. A token is valid for
+`backup.plan_digest_validity_seconds` (default 7 days) — preview again if it has expired.
 
-# 2. Apply.
+```bash
+# 1. Preview. Reports per device: would_restore | skipped | failed. Capture plan_token.
+resp=$(curl -s -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d "{\"archive\": $(cat fleet-2026-08-11.json)}" "$GW/v1/admin/restore/preview")
+echo "$resp" | jq '.counts, .devices'
+TOKEN=$(echo "$resp" | jq -r '.plan_token')
+
+# 2. Apply — same archive/on_conflict as the preview, plus its plan_token.
 curl -s -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d "{\"archive\": $(cat fleet-2026-08-11.json), \"on_conflict\": \"skip\"}" \
+  -d "{\"archive\": $(cat fleet-2026-08-11.json), \"on_conflict\": \"skip\", \"plan_token\": \"$TOKEN\"}" \
   "$GW/v1/admin/restore/apply" | jq '.counts'
 ```
 

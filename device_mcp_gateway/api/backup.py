@@ -24,6 +24,8 @@ destructive and needs ``backup:write``. See the comment above the routes themsel
 
 from __future__ import annotations
 
+import secrets
+
 from fastapi.responses import JSONResponse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -32,6 +34,7 @@ from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, AUDIT_OUTCOME_SUCCESS
 from device_mcp_gateway.backup.envelope import ARCHIVE_KINDS, BackupError, KIND_CIPHERTEXT, KIND_PORTABLE
 from device_mcp_gateway.backup.export import build_archive
 from device_mcp_gateway.backup.restore import ON_CONFLICT_SKIP, restore_archive
+from device_mcp_gateway.cfg import plan_digest_validity_seconds
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
 from device_mcp_gateway.rbac import (
     Principal,
@@ -39,6 +42,15 @@ from device_mcp_gateway.rbac import (
     SCOPE_BACKUP_READ,
     SCOPE_BACKUP_WRITE,
     require_scope,
+)
+from device_mcp_gateway.shared.canonical_json import compute_digest
+from device_mcp_gateway.shared.crypto import secret_keys_from_config
+from device_mcp_gateway.shared.plan_token import (
+    InvalidPlanToken,
+    PlanTokenExpired,
+    derive_plan_token_keys,
+    mint_plan_token,
+    verify_plan_token,
 )
 
 router = APIRouter()
@@ -206,11 +218,13 @@ async def export_backup_with_body(request: Request):
 # read-level authority through a body a caller controls. The apply route below has no
 # `dry_run` parameter to get wrong.
 #
-# Both routes share the same body shape today — ``{archive, passphrase?, on_conflict?,
-# include_deadletters?}`` — and the same parsing/execution/audit path. What ADR-0018 §6
-# adds next (build item 4, slice 3, not yet built here) is a `plan_token` this pair binds
-# together: the preview mints one, the apply must submit it, and a mismatch is refused as
-# stale rather than silently accepted.
+# The pair is bound by a plan_token: the preview computes plan_digest over its own parsed,
+# canonicalized inputs and returns an HMAC-signed token committing to it; the apply must
+# submit that token, and the gateway recomputes the digest of ITS OWN inputs and refuses
+# (ERR_PLAN_STALE) unless the token verifies and its digest matches. This is what makes
+# restore repeatable rather than single-use: unlimited preview/adjust/preview, and every
+# apply bound to a plan a human actually read, without rationing how many attempts an
+# operator gets (ADR-0018 §6, "What replaces it is a better control").
 
 _RESTORE_PREVIEW_LIMITS = [
     Depends(rate_limit("10/minute", "backup_restore_preview")),
@@ -221,8 +235,30 @@ _RESTORE_APPLY_LIMITS = [
     Depends(rate_limit_principal("20/minute", "backup_restore_apply")),
 ]
 
+#: Process-local fallback HMAC key, used only when no MCP_SECRET_KEY is configured at all
+#: (embedded/dev mode — CredentialCodec.from_config's own docstring calls this "convenient
+#: for local/embedded development"; distributed/production mode refuses to start without a
+#: key, so this path is unreachable there). A plan_token minted under it does not survive a
+#: restart, which only means "preview again" in that mode — the same cost a keyless
+#: deployment already accepts for credential storage, never a security regression, since no
+#: key existed to bind to either way.
+_EPHEMERAL_PLAN_TOKEN_KEY = secrets.token_bytes(32)
 
-async def _parse_restore_body(request: Request) -> tuple[object, str | None, str, bool]:
+
+def _plan_token_keys(config: dict) -> list[bytes]:
+    secret_keys = secret_keys_from_config(config)
+    if secret_keys:
+        return derive_plan_token_keys(secret_keys)
+    return [_EPHEMERAL_PLAN_TOKEN_KEY]
+
+
+#: The fields the plan digest commits to — the entire canonicalized apply request, by
+#: construction (ADR-0018 §6). `plan_token` itself is deliberately excluded: it cannot be
+#: part of what it authenticates, or a token would need to predict its own value.
+_PLAN_DIGEST_FIELDS = ("archive", "passphrase", "on_conflict", "include_deadletters")
+
+
+async def _parse_restore_body(request: Request) -> tuple[object, str | None, str, bool, str | None]:
     try:
         data = await request.json()
     except Exception:
@@ -235,11 +271,84 @@ async def _parse_restore_body(request: Request) -> tuple[object, str | None, str
         raise HTTPException(status_code=400, detail="body must contain 'archive' (the exported document)")
 
     on_conflict = data.get("on_conflict") or ON_CONFLICT_SKIP
-    return archive, data.get("passphrase"), on_conflict, bool(data.get("include_deadletters", False))
+    return (
+        archive,
+        data.get("passphrase"),
+        on_conflict,
+        bool(data.get("include_deadletters", False)),
+        data.get("plan_token"),
+    )
+
+
+def _plan_stale(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error_code": "ERR_PLAN_STALE",
+            "message": detail,
+            # Named because the digest binds the whole request, by construction — the
+            # gateway persists no plan to diff against, so this is the field space a
+            # divergence could be in, never a computed diff, and never a previous value
+            # (ADR-0018 §6: "A stale rejection names which fields diverged. It never
+            # returns the previewed value, nor the previewed digest's inputs.").
+            "fields": list(_PLAN_DIGEST_FIELDS),
+        },
+    )
 
 
 async def _run_restore(request: Request, *, dry_run: bool) -> dict:
-    archive, passphrase, on_conflict, include_deadletters = await _parse_restore_body(request)
+    archive, passphrase, on_conflict, include_deadletters, plan_token = await _parse_restore_body(request)
+    digest = compute_digest(
+        {
+            "archive": archive,
+            "passphrase": passphrase,
+            "on_conflict": on_conflict,
+            "include_deadletters": include_deadletters,
+        }
+    )
+
+    if not dry_run:
+        # The apply must reference the plan it was previewed from. Checked before anything
+        # is executed — no restore_archive call happens on a stale or forged apply.
+        if not plan_token:
+            raise HTTPException(
+                status_code=400, detail="apply requires 'plan_token', from a preceding preview's response"
+            )
+
+        stale_cause: str | None = None
+        keys = _plan_token_keys(request.app.state.config)
+        max_age = plan_digest_validity_seconds(request.app.state.config)
+        try:
+            verified = verify_plan_token(plan_token, keys=keys, max_age_seconds=max_age)
+        except PlanTokenExpired:
+            # The mechanism working as intended: legitimate drift, just past the window.
+            stale_cause = "expired"
+        except InvalidPlanToken:
+            # Malformed, or signed by no key this stack holds — replayed, copied, or
+            # guessed against a request it never described (ADR-0018 §6's other cause).
+            stale_cause = "invalid_signature"
+        else:
+            if verified.digest != digest:
+                # Verifies and is fresh, but commits to a different request: the
+                # legitimate-drift case — something changed since the preview.
+                stale_cause = "digest_mismatch"
+
+        if stale_cause is not None:
+            audit_request(
+                request,
+                "backup.restore",
+                outcome=AUDIT_OUTCOME_DENIED,
+                target="registry",
+                dry_run=dry_run,
+                plan_digest=digest,
+                reason="ERR_PLAN_STALE",
+                plan_stale_cause=stale_cause,
+            )
+            raise _plan_stale(
+                "plan_token does not match this request (it may be stale, reused from a "
+                "different preview, or expired). Preview again and submit the plan_token "
+                "that preview returns."
+            )
 
     try:
         report = await restore_archive(
@@ -262,6 +371,7 @@ async def _run_restore(request: Request, *, dry_run: bool) -> dict:
             outcome=AUDIT_OUTCOME_DENIED,
             target="registry",
             dry_run=dry_run,
+            plan_digest=digest,
             reason=type(exc).__name__,
         )
         raise HTTPException(status_code=409, detail=str(exc))
@@ -272,6 +382,7 @@ async def _run_restore(request: Request, *, dry_run: bool) -> dict:
         outcome=AUDIT_OUTCOME_SUCCESS,
         target="registry",
         dry_run=dry_run,
+        plan_digest=digest,
         kind=report["kind"],
         on_conflict=on_conflict,
         # A restore that discarded an archived pin, or that left a device to
@@ -281,6 +392,10 @@ async def _run_restore(request: Request, *, dry_run: bool) -> dict:
         fingerprint_warnings=report.get("fingerprint_warnings", 0),
         **{f"count_{k}": v for k, v in report["counts"].items()},
     )
+
+    report["plan_digest"] = digest
+    if dry_run:
+        report["plan_token"] = mint_plan_token(digest, keys=_plan_token_keys(request.app.state.config))
     return report
 
 
@@ -293,7 +408,8 @@ async def restore_preview(request: Request):
 
     Body: ``{archive, passphrase?, on_conflict?, include_deadletters?}``. Runs the same
     fail-closed preflight and the same per-device gates as an apply, so its report
-    predicts rather than guesses.
+    predicts rather than guesses. The response carries ``plan_digest`` and ``plan_token``
+    — submit ``plan_token`` back to ``/admin/restore/apply`` to apply exactly this plan.
     """
     return await _run_restore(request, dry_run=True)
 
@@ -305,7 +421,8 @@ async def restore_preview(request: Request):
 async def restore_apply(request: Request):
     """Replay an archive into this stack. Destructive: overwrites the registry.
 
-    Body: ``{archive, passphrase?, on_conflict?, include_deadletters?}``. A structurally
-    separate route from the preview, requiring the elevated scope only here.
+    Body: ``{archive, passphrase?, on_conflict?, include_deadletters?, plan_token}``.
+    ``plan_token`` must come from a preceding preview of this exact request — a mismatch,
+    forged, or expired token is refused as ``ERR_PLAN_STALE`` before anything is written.
     """
     return await _run_restore(request, dry_run=False)
