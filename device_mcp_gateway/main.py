@@ -40,6 +40,7 @@ from device_mcp_gateway.api import probes as api_probes
 from device_mcp_gateway.api import sse as api_sse
 from device_mcp_gateway.api import streamable as api_streamable
 from device_mcp_gateway.api import streamable_fleet as api_streamable_fleet
+from device_mcp_gateway.api import write_planned as api_write_planned
 
 # Re-exported for tests and internal callers: these lived here before the router
 # split and their dotted paths are part of the de-facto internal API.
@@ -482,6 +483,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     protected.include_router(api_streamable_fleet.router)
     protected.include_router(api_admin.router)
     protected.include_router(api_backup.router)
+    protected.include_router(api_write_planned.router)
 
     # Version the entire management API under /v1 (e.g. /v1/devices). Probes
     # (/health, /livez, /readyz) and the Prometheus scrape endpoint stay unversioned.
