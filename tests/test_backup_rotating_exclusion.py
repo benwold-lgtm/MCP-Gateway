@@ -115,10 +115,11 @@ def _backup(client):
     return resp.json()
 
 
-def _restore(client, archive, **over):
+def _restore(client, archive, *, dry_run=True, **over):
     body = {"archive": archive}
     body.update(over)
-    resp = client.post("/v1/admin/restore", headers=_auth(), json=body)
+    path = "/v1/admin/restore/preview" if dry_run else "/v1/admin/restore/apply"
+    resp = client.post(path, headers=_auth(), json=body)
     assert resp.status_code == 200, resp.text
     return resp.json()
 

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Ben Wold. All rights reserved.
 # Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
-"""Backup export routes (ADR-0011).
+"""Backup export and restore routes (ADR-0011, restore split per ADR-0018 §6).
 
-Two routes for one operation, and the split is about where a secret is allowed to appear:
+Export is two routes for one operation, and the split is about where a secret is allowed
+to appear:
 
 - ``GET /v1/admin/backup`` — the ciphertext default. Needs no secret in the request at all,
   so a plain GET is safe and stays the easy, scriptable path a scheduled job uses.
@@ -15,6 +16,10 @@ Two routes for one operation, and the split is about where a secret is allowed t
 
 ``backup:export-portable`` is checked inside the handler rather than as a router
 ``Depends``, because whether it is required depends on the request body.
+
+Restore is also two routes, and the split is about scope: ``POST /v1/admin/restore/preview``
+writes nothing and needs only ``backup:read``; ``POST /v1/admin/restore/apply`` is
+destructive and needs ``backup:write``. See the comment above the routes themselves.
 """
 
 from __future__ import annotations
@@ -188,23 +193,36 @@ async def export_backup_with_body(request: Request):
     )
 
 
-@router.post(
-    "/admin/restore",
-    dependencies=[
-        Depends(require_scope(SCOPE_BACKUP_WRITE)),
-        Depends(rate_limit("10/minute", "backup_restore")),
-        Depends(rate_limit_principal("20/minute", "backup_restore")),
-    ],
-)
-async def restore_backup(request: Request):
-    """Replay an archive into this stack.
+# Restore is split into two structurally separate routes (ADR-0018 §6). A preview is
+# read-level work — it parses a caller-supplied archive and simulates it against the live
+# registry, writing nothing and disclosing only registry-existence information that
+# `backup:read` already covers. Only the apply is destructive. Splitting by *scope* means
+# the whole iterative loop (preview, read the report, adjust on_conflict, preview again)
+# runs with no elevation held at all, and `backup:write` is acquired once, for the single
+# call that overwrites the registry.
+#
+# The split is a route-level dependency, not a check inside a shared handler that reads
+# a `dry_run` field after the fact: the destructive direction must never be reachable on
+# read-level authority through a body a caller controls. The apply route below has no
+# `dry_run` parameter to get wrong.
+#
+# Both routes share the same body shape today — ``{archive, passphrase?, on_conflict?,
+# include_deadletters?}`` — and the same parsing/execution/audit path. What ADR-0018 §6
+# adds next (build item 4, slice 3, not yet built here) is a `plan_token` this pair binds
+# together: the preview mints one, the apply must submit it, and a mismatch is refused as
+# stale rather than silently accepted.
 
-    Body: ``{archive, passphrase?, dry_run?, on_conflict?, include_deadletters?}``.
+_RESTORE_PREVIEW_LIMITS = [
+    Depends(rate_limit("10/minute", "backup_restore_preview")),
+    Depends(rate_limit_principal("20/minute", "backup_restore_preview")),
+]
+_RESTORE_APPLY_LIMITS = [
+    Depends(rate_limit("10/minute", "backup_restore_apply")),
+    Depends(rate_limit_principal("20/minute", "backup_restore_apply")),
+]
 
-    ``dry_run`` defaults to **true** — the destructive direction is never the one you get
-    by omission. A dry run runs the same fail-closed preflight and the same per-device
-    gates as a real one, so its report predicts rather than guesses.
-    """
+
+async def _parse_restore_body(request: Request) -> tuple[object, str | None, str, bool]:
     try:
         data = await request.json()
     except Exception:
@@ -216,8 +234,12 @@ async def restore_backup(request: Request):
     if archive is None:
         raise HTTPException(status_code=400, detail="body must contain 'archive' (the exported document)")
 
-    dry_run = bool(data.get("dry_run", True))
     on_conflict = data.get("on_conflict") or ON_CONFLICT_SKIP
+    return archive, data.get("passphrase"), on_conflict, bool(data.get("include_deadletters", False))
+
+
+async def _run_restore(request: Request, *, dry_run: bool) -> dict:
+    archive, passphrase, on_conflict, include_deadletters = await _parse_restore_body(request)
 
     try:
         report = await restore_archive(
@@ -225,15 +247,15 @@ async def restore_backup(request: Request):
             registry=request.app.state.registry,
             codec=request.app.state.codec,
             config=request.app.state.config,
-            passphrase=data.get("passphrase"),
+            passphrase=passphrase,
             dry_run=dry_run,
             on_conflict=on_conflict,
-            include_deadletters=bool(data.get("include_deadletters", False)),
+            include_deadletters=include_deadletters,
         )
     except BackupError as exc:
         # Includes every preflight failure — wrong key, wrong passphrase, missing canary.
         # Audited: a failed restore attempt is as interesting to a responder as one that
-        # worked, and a dry run is the natural reconnaissance step before a real one.
+        # worked, and a preview is the natural reconnaissance step before an apply.
         audit_request(
             request,
             "backup.restore",
@@ -260,3 +282,30 @@ async def restore_backup(request: Request):
         **{f"count_{k}": v for k, v in report["counts"].items()},
     )
     return report
+
+
+@router.post(
+    "/admin/restore/preview",
+    dependencies=[Depends(require_scope(SCOPE_BACKUP_READ))] + _RESTORE_PREVIEW_LIMITS,
+)
+async def restore_preview(request: Request):
+    """Simulate replaying an archive into this stack. Writes nothing.
+
+    Body: ``{archive, passphrase?, on_conflict?, include_deadletters?}``. Runs the same
+    fail-closed preflight and the same per-device gates as an apply, so its report
+    predicts rather than guesses.
+    """
+    return await _run_restore(request, dry_run=True)
+
+
+@router.post(
+    "/admin/restore/apply",
+    dependencies=[Depends(require_scope(SCOPE_BACKUP_WRITE))] + _RESTORE_APPLY_LIMITS,
+)
+async def restore_apply(request: Request):
+    """Replay an archive into this stack. Destructive: overwrites the registry.
+
+    Body: ``{archive, passphrase?, on_conflict?, include_deadletters?}``. A structurally
+    separate route from the preview, requiring the elevated scope only here.
+    """
+    return await _run_restore(request, dry_run=False)

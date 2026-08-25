@@ -14,8 +14,8 @@ for the role/scope model; the *decision* behind it is
 | `devices:write` | Manage the fleet | `POST/PUT/DELETE /v1/devices/{h}`, `POST …/deadletter/replay`, `DELETE …/deadletter` (drain) |
 | `tools:call` | Invoke a device's MCP tools | `GET /v1/devices/{h}/sse`, `POST /v1/devices/{h}/messages` |
 | `metrics:read` | Read operational metrics | `GET /v1/metrics/summary` |
-| `backup:read` | Export an archive of the registry | `GET /v1/admin/backup`, `POST /v1/admin/backup` |
-| `backup:write` | Restore an archive | `POST /v1/admin/restore` |
+| `backup:read` | Export an archive of the registry; preview a restore (writes nothing) | `GET /v1/admin/backup`, `POST /v1/admin/backup`, `POST /v1/admin/restore/preview` |
+| `backup:write` | Apply a restore | `POST /v1/admin/restore/apply` |
 | `backup:export-portable` | **Additionally** export a *portable* archive — credentials re-encrypted to a passphrase instead of the stack key | `POST /v1/admin/backup` with `kind=portable` |
 
 > **`backup:read` is not a read-only grant in the ordinary sense.** An archive contains
