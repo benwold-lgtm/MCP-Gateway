@@ -525,6 +525,33 @@ Two mechanical requirements follow:
   thing the build has to settle. Recorded here rather than left to the implementer for the same
   reason canonicalization was: it is decided once, or decided inconsistently.
 
+  ✅ **Built 2026-08-25 (build item 4, slice 1).** `plan_digest` stays the literal hex SHA-256 —
+  human-legible, and what the audit record carries. A second field, **`plan_token`**, is the
+  HMAC-signed opaque value: the dry-run response returns it, and the apply request submits it
+  back. `device_mcp_gateway/shared/canonical_json.py` implements RFC 8785 plus the two axes
+  above; `device_mcp_gateway/shared/plan_token.py` mints and verifies the token, distinguishing
+  a bad signature (`InvalidPlanToken`) from an expired one (`PlanTokenExpired`) — the same two
+  causes `ERR_PLAN_STALE` names below.
+
+  The signing key is **derived, not newly provisioned**: `derive_plan_token_keys` runs HKDF-SHA256
+  over each configured `MCP_SECRET_KEY` / `gateway.secret_keys` entry with a domain-separation
+  label, rather than using the Fernet key directly. Reusing the raw Fernet key would couple plan-
+  token signing to credential-encryption key rotation — a different key *type* with rotation
+  semantics (`MultiFernet`) designed for the other purpose. HKDF derivation means no new secret
+  to provision, while a plan token and a credential ciphertext still can't be substituted for one
+  another. Every configured key is tried on verification and the first (primary) key signs, the
+  same zero-downtime rotation shape `CredentialCodec` already gives credential ciphertext.
+
+  The validity window is `backup.plan_digest_validity_seconds` (env has no override yet; default
+  `7 * 24 * 60 * 60`, matching the Open-questions resolution below), read via
+  `cfg.plan_digest_validity_seconds()`.
+
+  **Not yet built:** the route split (§ "A dry run does not need `backup:write` at all"), the
+  contract wiring of `plan_digest`/`plan_token` into the actual dry-run response and apply
+  request, both audit records, and `ERR_PLAN_STALE` itself. Slice 1 deliberately stops at a
+  tested, freestanding utility — the mechanism ADR-0022 also needs — before it is wired into the
+  restore routes that are its first caller.
+
 ##### A dry run does not need `backup:write` at all
 
 The section above fixes the *consequence* of the dry run carrying `backup:write` — removing

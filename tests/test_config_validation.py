@@ -8,6 +8,7 @@ import yaml
 from device_mcp_gateway.cfg import (
     _defaults,
     load_config,
+    plan_digest_validity_seconds,
     validate_config,
     warn_unsafe_settings,
 )
@@ -17,6 +18,16 @@ from device_mcp_gateway.cfg import (
 
 def test_defaults_validate_clean():
     assert validate_config(_defaults()) == []
+
+
+def test_plan_digest_validity_seconds_default_is_seven_days():
+    # ADR-0018 §6 Open questions, resolved 2026-08-21.
+    assert plan_digest_validity_seconds({}) == 7 * 24 * 60 * 60
+
+
+def test_plan_digest_validity_seconds_honours_config_override():
+    cfg = {"backup": {"plan_digest_validity_seconds": 3600}}
+    assert plan_digest_validity_seconds(cfg) == 3600
 
 
 def test_shipped_config_yaml_validates_clean():

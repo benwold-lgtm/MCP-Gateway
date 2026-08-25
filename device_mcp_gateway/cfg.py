@@ -167,6 +167,10 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         "argon2_iterations": int,
         "argon2_lanes": int,
         "deadletter_limit": int,
+        # ADR-0018 §6 — how long a plan_token stays valid after the dry run that
+        # minted it. Resolved 2026-08-21: 7 days, a starting default rather than
+        # a fixed value (instrumented and tuned from operating history).
+        "plan_digest_validity_seconds": _NUM,
     },
     "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM, "auth_token": str},
     "tracing": {
@@ -356,6 +360,11 @@ def resolve_bind_host(cfg: dict[str, Any]) -> str:
     return os.getenv("MCP_BIND_HOST") or cfg.get("server", {}).get("host", "0.0.0.0")  # nosec B104 — read, not a bind
 
 
+def plan_digest_validity_seconds(cfg: dict[str, Any]) -> int:
+    """ADR-0018 §6 — seconds a plan_token stays valid after the dry run that minted it."""
+    return int(cfg.get("backup", {}).get("plan_digest_validity_seconds") or 7 * 24 * 60 * 60)
+
+
 def _defaults() -> dict:
     return {
         "gateway": {
@@ -392,6 +401,7 @@ def _defaults() -> dict:
             "argon2_iterations": 3,
             "argon2_lanes": 4,
             "deadletter_limit": 1000,
+            "plan_digest_validity_seconds": 7 * 24 * 60 * 60,  # 7 days (ADR-0018 §6)
         },
         "metrics": {"enabled": True, "port": 9100, "gauge_refresh_interval": 15},
         "logging": {"level": "INFO", "audit_retention": "90 days", "audit_enabled": True},
