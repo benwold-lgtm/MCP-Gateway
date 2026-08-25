@@ -61,6 +61,16 @@ ALL_SCOPES: frozenset[str] = frozenset(
     }
 )
 
+# ADR-0022. Deliberately standalone, not folded into ALL_SCOPES above: ALL_SCOPES is not a
+# registry of every scope string in the system, it is admin's (and ANONYMOUS's) literal
+# standing bundle — `"admin": ALL_SCOPES` below is an alias, not a copy. Adding this scope
+# there would silently hand it to every admin principal as permanent, held authority, which
+# is exactly the "must not appear in ROLE_SCOPES" rule the ADR states explicitly. This grant
+# is minted per-plan at Review (`write_planned.WritePlannedGrantStore.issue`) and checked at
+# Apply via `write_planned.check_and_consume`, never via `require_scope`/`principal.scopes` —
+# no principal ever holds it as a bundle member, admin included.
+SCOPE_DEVICES_WRITE_PLANNED = "devices:write-planned"
+
 # Roles are just named bundles of scopes. New roles = new entries here; routes never
 # reference roles, only scopes, so adding one never touches a call site. The full matrix
 # (and the IdP group → role mapping) lives in docs/rbac-roles.md; ADR-0007 is the why.
