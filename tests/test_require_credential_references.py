@@ -243,7 +243,11 @@ def test_a_restore_cannot_reinstate_what_registration_would_refuse(monkeypatch, 
     assert preview["devices"][0]["outcome"] == "failed"
     assert "by reference" in preview["devices"][0]["reason"]
 
-    applied = target.post("/v1/admin/restore/apply", headers=_auth(), json={"archive": archive}).json()
+    applied = target.post(
+        "/v1/admin/restore/apply",
+        headers=_auth(),
+        json={"archive": archive, "plan_token": preview["plan_token"]},
+    ).json()
     assert applied["devices"][0]["outcome"] == "failed", "the apply must agree with the preview"
 
 

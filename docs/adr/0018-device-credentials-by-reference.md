@@ -546,11 +546,39 @@ Two mechanical requirements follow:
   `7 * 24 * 60 * 60`, matching the Open-questions resolution below), read via
   `cfg.plan_digest_validity_seconds()`.
 
-  **Not yet built:** the route split (§ "A dry run does not need `backup:write` at all"), the
-  contract wiring of `plan_digest`/`plan_token` into the actual dry-run response and apply
-  request, both audit records, and `ERR_PLAN_STALE` itself. Slice 1 deliberately stops at a
-  tested, freestanding utility — the mechanism ADR-0022 also needs — before it is wired into the
-  restore routes that are its first caller.
+  ✅ **Slices 2 and 3 built 2026-08-25.** The route split (below) and the contract wiring are
+  both in `device_mcp_gateway/api/backup.py`: `POST /admin/restore/preview` computes `plan_digest`
+  over its own parsed inputs and returns it with a `plan_token`; `POST /admin/restore/apply`
+  requires `plan_token`, recomputes the digest of *its own* inputs, and refuses
+  (`ERR_PLAN_STALE`, 409) unless the token verifies and its digest matches — checked before
+  `restore_archive` is ever called, so nothing runs on a stale or forged apply. A missing
+  `plan_token` on apply is a plain 400, not `ERR_PLAN_STALE` — there is no legitimate way to
+  hold a token for a plan that was never previewed, so it is a different kind of caller error.
+  Both audit records carry `plan_digest`, plus an audit-only `plan_stale_cause`
+  (`digest_mismatch` | `expired` | `invalid_signature`) distinguishing legitimate drift from a
+  replayed/forged token — ADR-0018 §6's two causes, kept out of the HTTP response.
+
+  **"Names which fields diverged" resolved as the *field space*, not a diff.** The gateway
+  persists no plan, so at apply time there is nothing stored to diff the submission against —
+  only a digest, which is one-way. `ERR_PLAN_STALE`'s response therefore names the fixed set of
+  fields the digest covers (`archive`, `passphrase`, `on_conflict`, `include_deadletters`),
+  not which one actually changed. That is everything "never returns the previewed value, nor
+  the previewed digest's inputs" leaves room to say without a stored plan to diff against.
+
+  **One exclusion, with its reason:** `plan_token` itself is not among the digested fields.
+  Whole-request binding is the rule (§ "The digest commits to the whole request, by
+  construction"), and this is the one structural exception — a token cannot be part of what it
+  authenticates, or it would need to predict its own value before it exists.
+
+  **The keyless-deployment gap, closed:** distributed/production mode always has
+  `MCP_SECRET_KEY` (refused to start otherwise), but embedded/dev mode may run with none at
+  all. `derive_plan_token_keys([])` would leave preview unable to mint a token in that mode. A
+  process-local, randomly generated fallback key covers it — a token minted under it just
+  doesn't survive a restart (preview again), the same cost a keyless deployment already accepts
+  for credential storage, never a new regression.
+
+  **Not yet built:** the BFF/web removal of `provider:credentials` and single-use (slice 4,
+  the UI repository).
 
 ##### A dry run does not need `backup:write` at all
 

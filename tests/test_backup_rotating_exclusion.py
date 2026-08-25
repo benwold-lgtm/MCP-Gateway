@@ -116,10 +116,18 @@ def _backup(client):
 
 
 def _restore(client, archive, *, dry_run=True, **over):
+    """Preview, or preview-then-apply with the plan_token the preview minted (ADR-0018 §6)."""
     body = {"archive": archive}
     body.update(over)
-    path = "/v1/admin/restore/preview" if dry_run else "/v1/admin/restore/apply"
-    resp = client.post(path, headers=_auth(), json=body)
+    if dry_run:
+        resp = client.post("/v1/admin/restore/preview", headers=_auth(), json=body)
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    preview = client.post("/v1/admin/restore/preview", headers=_auth(), json=body)
+    assert preview.status_code == 200, preview.text
+    token = preview.json()["plan_token"]
+    resp = client.post("/v1/admin/restore/apply", headers=_auth(), json={**body, "plan_token": token})
     assert resp.status_code == 200, resp.text
     return resp.json()
 
