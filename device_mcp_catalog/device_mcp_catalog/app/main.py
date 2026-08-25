@@ -3,9 +3,9 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """The catalog service (ADR-0020): provider-plane device-type curation and assignment.
 
-Process + database lifecycle (`/healthz` liveness, `/readyz` readiness — see below) plus,
-from slice 1, device-type curation (`.device_types`). Assignment (slice 2) mounts here the
-same way.
+Process + database lifecycle (`/healthz` liveness, `/readyz` readiness — see below) plus
+device-type curation (`.device_types`, slice 1) and per-tenant assignment (`.assignments`,
+slice 2).
 
 `/readyz` reporting the database down is a **named condition**, not a crash and not an empty
 result indistinguishable from "nothing curated yet" — the same discipline ADR-0018 §7 already
@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from . import device_types
+from . import assignments, device_types
 from .config import load_settings
 from .db import Database
 
@@ -67,6 +67,7 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=200, content={"status": "ok"})
 
     app.include_router(device_types.router)
+    app.include_router(assignments.router)
     return app
 
 

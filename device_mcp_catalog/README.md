@@ -36,3 +36,17 @@ than a scope model with no second caller yet to justify it.
 A device type is a **template only**: no host, no credential, no tenant. `spec_path` (openapi
 devices only) is relative to whatever `base_url` a tenant supplies at claim time — the type
 names the appliance model, never an instance's address.
+
+## API (assignment, ADR-0020 §2)
+
+Assignment is an offer, written here only — it never reaches a tenant's registry. Same
+bearer-token gate as curation.
+
+- `POST /device-types/{id}/assign` (`{tenant_id, assigned_by}`) — offer a type to a tenant.
+  Idempotent: assigning an already-active pair returns the existing assignment rather than
+  erroring or minting a second one.
+- `DELETE /device-types/{id}/assign/{tenant_id}` — revoke. `404` if nothing is actively
+  assigned. A later re-assign of the same pair inserts a new row rather than reviving the
+  old one, so the full assign/revoke history is retained (ADR-0025), not overwritten.
+- `GET /tenants/{tenant_id}/assignments` — the device types currently (not historically)
+  assigned to a tenant. This is what the tenant's claim view (slice 4) reads.

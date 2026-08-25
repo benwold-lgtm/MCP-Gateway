@@ -14,7 +14,14 @@ from typing import Optional
 import asyncpg
 
 from .db import Database
-from .schemas import CreateDeviceType, DeviceType, DeviceTypeDetail, DeviceTypeVersion, VersionFields
+from .schemas import (
+    Assignment,
+    CreateDeviceType,
+    DeviceType,
+    DeviceTypeDetail,
+    DeviceTypeVersion,
+    VersionFields,
+)
 
 
 class SlugAlreadyExists(Exception):
@@ -22,6 +29,13 @@ class SlugAlreadyExists(Exception):
 
 
 class DeviceTypeNotFound(Exception):
+    pass
+
+
+class AssignmentNotFound(Exception):
+    """Raised on a revoke with nothing active to revoke — either it was never assigned, or
+    it already was."""
+
     pass
 
 
@@ -133,3 +147,68 @@ class DeviceTypeRepo:
             fields.fingerprint_policy,
             fields.changelog,
         )
+
+
+class AssignmentRepo:
+    """ADR-0020 §2: assignment is an offer, written to provider-plane storage only. It never
+    reaches a tenant's own registry — that's the claim flow (slice 4), and it lives entirely
+    outside this service."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def assign(self, device_type_id: uuid.UUID, tenant_id: str, assigned_by: str) -> Assignment:
+        assignment_id = uuid.uuid4()
+        try:
+            row = await self._db.pool.fetchrow(
+                """
+                INSERT INTO assignments (id, device_type_id, tenant_id, assigned_by)
+                VALUES ($1, $2, $3, $4)
+                RETURNING *
+                """,
+                assignment_id,
+                device_type_id,
+                tenant_id,
+                assigned_by,
+            )
+        except asyncpg.ForeignKeyViolationError as exc:
+            raise DeviceTypeNotFound(device_type_id) from exc
+        except asyncpg.UniqueViolationError:
+            # Already actively assigned (the partial unique index caught it) — idempotent:
+            # re-assigning something already offered is not an error a caller should have
+            # to special-case, it just isn't a NEW assignment.
+            row = await self._db.pool.fetchrow(
+                "SELECT * FROM assignments WHERE device_type_id = $1 AND tenant_id = $2 AND revoked_at IS NULL",
+                device_type_id,
+                tenant_id,
+            )
+        return Assignment(**dict(row))
+
+    async def revoke(self, device_type_id: uuid.UUID, tenant_id: str) -> None:
+        row = await self._db.pool.fetchrow(
+            """
+            UPDATE assignments SET revoked_at = now()
+            WHERE device_type_id = $1 AND tenant_id = $2 AND revoked_at IS NULL
+            RETURNING id
+            """,
+            device_type_id,
+            tenant_id,
+        )
+        if row is None:
+            raise AssignmentNotFound((device_type_id, tenant_id))
+
+    async def list_for_tenant(self, tenant_id: str) -> list[DeviceType]:
+        rows = await self._db.pool.fetch(
+            """
+            SELECT t.id, t.slug, t.name, t.description, t.created_at,
+                   COALESCE(MAX(v.version), 0) AS latest_version
+            FROM assignments a
+            JOIN device_types t ON t.id = a.device_type_id
+            LEFT JOIN device_type_versions v ON v.device_type_id = t.id
+            WHERE a.tenant_id = $1 AND a.revoked_at IS NULL
+            GROUP BY t.id
+            ORDER BY t.created_at
+            """,
+            tenant_id,
+        )
+        return [DeviceType(**dict(row)) for row in rows]
