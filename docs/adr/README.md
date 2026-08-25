@@ -51,7 +51,7 @@ Re-ranked 2026-08-20, once every open question in the set was closed. The origin
 0019 → 0018 → 0020 → 0017 → 0021 — assumed all five records were unbuilt. Two are now wholly or
 partly shipped, and 0022/0023 have since joined, so the live order is:
 
-**Items 1, 2, and 4 are complete** (2026-08-24/25); **item 5 is in progress**. Numbering of the
+**Items 1, 2, 4, and 5 are complete** (2026-08-24/25). Numbering of the
 remainder is left as it was so that references elsewhere to "item 4, the plan digest" keep
 pointing at the same work. Item 3 (retiring the portable archive) is not a code item right now —
 its prerequisites are built and it waits on a breaking release, not on more implementation.
