@@ -306,3 +306,67 @@ spec:
       ports:
         - port: 6379
           protocol: TCP
+
+---
+# ── 8. Catalog service ─────────────────────────────────────────────────────────────
+# The ONE cross-namespace path a device-mcp-catalog pod accepts, and it is deliberately
+# narrow: the console BFF's namespace, not the gateway or worker (ADR-0020 §7 — this
+# store is not reached through the BFF's process boundary in the sense of being the
+# BFF's own storage, but the BFF is exactly the caller the design gives it; the gateway
+# and worker have no reason to reach it at all, and none is granted here).
+#
+# ⚠️ Set the namespace name to wherever your console BFF runs — `mcp-gateway-ui` is
+# this project's own UI repo's namespace (`deploy/kubernetes/namespace.yaml` there), not
+# a Kubernetes default like `allow-monitoring-scrape`'s `monitoring` guess above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: device-mcp-catalog
+  labels:
+    app.kubernetes.io/name: device-mcp-catalog
+spec:
+  podSelector:
+    matchLabels:
+      app: device-mcp-catalog
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-gateway-ui
+      ports:
+        - port: 8100
+          protocol: TCP
+
+---
+# ── 9. Catalog Postgres ────────────────────────────────────────────────────────────
+# Same reasoning, and the same caveat, as policy 7 (Redis): this is narrower than
+# policy 3 and is the statement that matters, not an enforcement change — per this
+# file's own top-of-file warning, NetworkPolicy is purely additive-allow, so policy 3's
+# blanket `allow-intra-namespace` already permits any pod in this namespace to reach
+# Postgres regardless of this policy's presence. What this adds is an explicit, auditable
+# declaration that the one store holding every device type and assignment record in the
+# estate is meant to be reached by the catalog service alone — true isolation from other
+# in-namespace pods would mean tightening or removing policy 3's blanket allow, which
+# affects every other intra-namespace path too and is out of scope for this addition.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: catalog-postgres
+  labels:
+    app.kubernetes.io/name: catalog-postgres
+spec:
+  podSelector:
+    matchLabels:
+      app: catalog-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: device-mcp-catalog
+      ports:
+        - port: 5432
+          protocol: TCP

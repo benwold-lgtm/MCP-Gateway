@@ -30,6 +30,13 @@ resources:
   - ingress.yaml
   - pdb.yaml
   - hpa.yaml
+  # ADR-0020: the provider-plane device catalog. A separate component (its own image,
+  # its own database) bundled into this stack's namespace for deployment convenience —
+  # see device_mcp_catalog/README.md and docs/adr/0020-the-device-catalog.md §7 for why
+  # it is still architecturally separate despite living in the same kustomization.
+  - postgres.yaml
+  - catalog-deployment.yaml
+  - catalog-service.yaml
 
 # Single place to retarget the image for BOTH the gateway and the worker — they must
 # stay in lockstep (they share the Redis data model, so a version skew across a schema

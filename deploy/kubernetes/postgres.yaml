@@ -1,0 +1,88 @@
+---
+# PostgreSQL StatefulSet + Service for the catalog service (ADR-0020 §7, ADR-0025).
+#
+# ⚠️  SINGLE POINT OF FAILURE, same caveat as redis.yaml. This single replica is a
+# getting-started convenience, NOT the production data plane for ADR-0020 20.1's resolution
+# ("PostgreSQL... a managed cloud instance where one is available, self-hosted HA on-prem as
+# the default otherwise"). Production: point CATALOG_DATABASE_URL at a managed Postgres
+# (RDS/Cloud SQL/Azure Database for PostgreSQL) or a self-hosted HA topology (Patroni +
+# repmgr, or a managed operator), and layer WAL archiving + periodic base backups on top per
+# ADR-0025 §5 — HA solves availability, not recovery from a bad migration or an accidental
+# DROP, so both are needed regardless of which HA topology is chosen.
+#
+# Nothing here holds a tenant credential or a claim (ADR-0020 §5) — the durable content is
+# exactly type definitions, their version history, and assignment records, so this store's
+# blast radius is materially smaller than the gateway's own Redis, even though it is a new
+# operational dependency.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: catalog-postgres
+spec:
+  serviceName: catalog-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: catalog-postgres
+  template:
+    metadata:
+      labels:
+        app: catalog-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_DB
+              value: catalog
+            - name: POSTGRES_USER
+              value: catalog
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-secrets
+                  key: postgres-password
+          ports:
+            - name: postgres
+              containerPort: 5432
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: catalog-postgres-data
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "catalog"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "catalog"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: catalog-postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-postgres
+spec:
+  selector:
+    app: catalog-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  clusterIP: None  # headless service for StatefulSet DNS

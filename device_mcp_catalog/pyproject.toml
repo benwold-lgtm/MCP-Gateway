@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel>=0.38.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "device-mcp-catalog"
+version = "0.1.0"
+description = "Provider-plane device catalog (ADR-0020): device-type curation and per-tenant assignment. A standalone service, deliberately not reached through the console BFF's process boundary (ADR-0020 §7) and holding no tenant credentials or claims (ADR-0020 §5, ADR-0025)."
+readme = "README.md"
+license = {text = "PolyForm-Noncommercial-1.0.0"}
+authors = [
+    {name = "Ben Wold", email = "benwold@gmail.com"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.104.1,<0.138",
+    "starlette>=1.2,<1.4",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.2,<3.0.0",
+    "asyncpg>=0.29,<0.31",
+    "loguru>=0.7.2",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.3,<10.0.0",
+    "pytest-asyncio>=0.21.1,<2.0.0",
+    "pytest-cov>=4.1.0,<8.0.0",
+    "black>=23.12.1,<27.0.0",
+    "flake8>=6.1.0,<8.0.0",
+    "mypy>=1.8.0,<3.0.0",
+    "httpx>=0.25.2",
+]
+
+[project.scripts]
+device-mcp-catalog = "device_mcp_catalog.app.main:run"
+
+[tool.setuptools.packages.find]
+include = ["device_mcp_catalog*"]
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+markers = [
+    "integration: tests that require a real Postgres (skipped if unreachable)",
+]

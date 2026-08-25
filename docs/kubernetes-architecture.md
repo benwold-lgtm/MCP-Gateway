@@ -388,6 +388,49 @@ softened. Acceptable only where that downtime is genuinely tolerable.
 
 ---
 
+## Catalog service (ADR-0020)
+
+> **Status: slice 0 of the ADR-0020 build.** The service exists (`device_mcp_catalog/`),
+> deployed (`deploy/kubernetes/catalog-deployment.yaml`, `catalog-service.yaml`,
+> `postgres.yaml`), and holds a real PostgreSQL connection with named-unavailable readiness
+> (`/readyz`) — but curates nothing yet. Device-type curation, per-tenant assignment, the
+> claim flow, and version/upgrade offers are later slices of the same build; this section
+> describes the deployment shape those slices land on top of, not a finished feature.
+
+The provider's device catalog is a **separate process with its own PostgreSQL database**,
+not a client library bolted onto the gateway the way Redis is (ADR-0020 §7: "a separate
+component with its own failure domain... not reached through the [console] BFF's process
+boundary"). It is bundled into this stack's `kustomization.yaml` for deployment convenience —
+one `kubectl apply -k` brings up gateway, worker, Redis, *and* the catalog together — but
+architecturally it is closer to a fourth first-class component than to an add-on: its own
+image, its own database, its own NetworkPolicy, its own CI job
+(`.github/workflows/ci.yml`'s `catalog` job).
+
+**It holds no tenant credential, no claim, and no device instance** (ADR-0020 §5). Its durable
+content is exactly device-type definitions (with full version history) and per-tenant
+assignment records — a materially smaller and less sensitive store than the gateway's own
+Redis or SQLite, even though it is new operational surface. See
+[ADR-0025](adr/0025-the-catalog-has-its-own-durability-story.md) for its backup/HA/restore
+story (standard PostgreSQL WAL archiving + periodic base backups, kept separate from
+whatever HA topology is chosen — HA solves availability, not recovery from a bad migration
+or an accidental `DROP`).
+
+**Reachability is deliberately narrow.** `deploy/kubernetes/networkpolicy.yaml` policy 8
+accepts ingress on the catalog's port only from the console BFF's namespace
+(`mcp-gateway-ui` by default — set this to wherever your BFF actually runs); the gateway and
+worker have no reason to reach it and none is granted. Policy 9 restricts Postgres to the
+catalog pod alone, with the same caveat policy 7 (Redis) already carries: NetworkPolicy is
+purely additive-allow, so this is the intended-reachability *statement*, not additional
+enforcement beyond policy 3's blanket intra-namespace allow.
+
+**Production**: the bundled `postgres.yaml` StatefulSet is a single-replica getting-started
+convenience, the same caveat `redis.yaml` carries. Point `CATALOG_DATABASE_URL` at a managed
+Postgres (RDS / Cloud SQL / Azure Database for PostgreSQL) or a self-hosted HA topology
+(Patroni + repmgr, or a managed operator) in production, and layer ADR-0025's WAL/PITR backup
+story on top regardless of which HA topology is chosen.
+
+---
+
 ## Observability
 
 Each gateway and worker pod exposes Prometheus metrics on a dedicated port (`:9100`, separate from the `:8000` API). The UI/BFF and operators should treat **Prometheus and the read APIs as the observability surface — not pod log files** (see "UI/BFF sourcing" below).
