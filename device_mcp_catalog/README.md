@@ -21,3 +21,18 @@ CATALOG_DATABASE_URL=postgresql://postgres:test@localhost:5432/catalog_dev pytes
 Tests that need a real Postgres are marked `integration` and skip (not fail) when
 `CATALOG_TEST_DATABASE_URL` (default `postgresql://postgres:test@localhost:55432/catalog_test`)
 is unreachable — there is no fake/in-memory double for this store.
+
+## API (device-type curation, ADR-0020 §1)
+
+Every route below requires `Authorization: Bearer $CATALOG_API_TOKEN` — this service has
+exactly one caller in phase 1 (the console BFF), so a shared token gates all of it rather
+than a scope model with no second caller yet to justify it.
+
+- `POST /device-types` — create a device type and its version 1.
+- `POST /device-types/{id}/versions` — add the next version (monotonic, immutable once created).
+- `GET /device-types` — list types with each one's latest version number.
+- `GET /device-types/{id}` — one type's full version history.
+
+A device type is a **template only**: no host, no credential, no tenant. `spec_path` (openapi
+devices only) is relative to whatever `base_url` a tenant supplies at claim time — the type
+names the appliance model, never an instance's address.
