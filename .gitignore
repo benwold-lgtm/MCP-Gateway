@@ -1,4 +1,7 @@
 /.venv/
+# Unanchored (unlike the root entry above) so it also covers device_mcp_catalog/.venv/ and
+# any other subproject's own venv.
+.venv/
 /logs/
 /.pytest_cache/
 /.context/

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: device-mcp-catalog
+  labels:
+    app.kubernetes.io/name: device-mcp-catalog
+spec:
+  selector:
+    app: device-mcp-catalog
+  ports:
+    - name: http
+      port: 8100
+      targetPort: 8100

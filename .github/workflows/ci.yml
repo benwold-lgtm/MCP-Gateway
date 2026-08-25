@@ -60,6 +60,68 @@ jobs:
       - name: Build Docker image
         run: docker build -t device-mcp-gateway:ci .
 
+  catalog:
+    runs-on: ubuntu-latest
+
+    # ADR-0020: the catalog service is a separate component (own package, own database)
+    # bundled in this repo — see device_mcp_catalog/README.md. Its own job, its own
+    # Postgres service container, so a change here can't silently break (or be masked by)
+    # the gateway's own `test` job above.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: catalog_test
+          POSTGRES_PASSWORD: test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      CATALOG_TEST_DATABASE_URL: postgresql://postgres:test@localhost:55432/catalog_test
+
+    defaults:
+      run:
+        working-directory: device_mcp_catalog
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: device_mcp_catalog/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Check formatting (black)
+        run: black --check .
+
+      - name: Lint (flake8)
+        run: flake8 device_mcp_catalog/ tests/ --max-line-length=120
+
+      - name: Type check (mypy)
+        run: mypy device_mcp_catalog/ --ignore-missing-imports
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+      - name: Install security scanners
+        run: pip install bandit
+
+      - name: Static security scan (bandit)
+        run: bandit -r device_mcp_catalog -ll
+
+      - name: Build Docker image
+        run: docker build -t device-mcp-catalog:ci .
+
   security:
     runs-on: ubuntu-latest
 
