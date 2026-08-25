@@ -94,10 +94,11 @@ def _register(client, hostname, *, base_url="http://127.0.0.1:9", secret=None):
     return resp
 
 
-def _restore(client, archive, **over):
+def _restore(client, archive, *, dry_run=True, **over):
     body = {"archive": archive}
     body.update(over)
-    return client.post("/v1/admin/restore", headers=_auth(), json=body)
+    path = "/v1/admin/restore/preview" if dry_run else "/v1/admin/restore/apply"
+    return client.post(path, headers=_auth(), json=body)
 
 
 def _hostnames(client):
@@ -158,14 +159,18 @@ def test_a_dry_run_predicts_the_real_run_and_writes_nothing(monkeypatch, tmp_pat
     assert [d["hostname"] for d in dry["devices"]] == [d["hostname"] for d in wet["devices"]]
 
 
-def test_dry_run_is_the_default_when_the_body_omits_it(monkeypatch, tmp_path):
-    """The destructive direction is never the one you get by omission."""
+def test_the_preview_route_never_writes(monkeypatch, tmp_path):
+    """The destructive direction is not reachable through the preview route at all.
+
+    ADR-0018 §6 made this structural rather than a body default: there is no `dry_run`
+    field left to omit or flip. `POST /admin/restore/preview` always simulates.
+    """
     client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     _register(client, "alpha")
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
     client.delete("/v1/devices/alpha", headers=_auth())
 
-    resp = client.post("/v1/admin/restore", headers=_auth(), json={"archive": archive})
+    resp = client.post("/v1/admin/restore/preview", headers=_auth(), json={"archive": archive})
     assert resp.json()["dry_run"] is True
     assert _hostnames(client) == set()
 
@@ -392,7 +397,10 @@ def test_a_portable_archive_without_the_passphrase_is_refused(monkeypatch, tmp_p
 # --- Authorization ----------------------------------------------------------
 
 
-def test_restore_requires_backup_write_and_read_alone_is_not_enough(monkeypatch, tmp_path):
+def test_preview_needs_only_backup_read(monkeypatch, tmp_path):
+    """ADR-0018 §6: a preview is read-level work. A `backup:read`-only holder must not be
+    turned away from the very loop (preview, adjust, preview again) the split exists to
+    let run with no elevation held at all."""
     client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
     archive = client.get("/v1/admin/backup", headers=_auth()).json()
 
@@ -400,14 +408,31 @@ def test_restore_requires_backup_write_and_read_alone_is_not_enough(monkeypatch,
 
     reader = Principal(subject="key:ro", scopes=frozenset({SCOPE_BACKUP_READ}), auth_method="api_key")
     client.app.state.authenticator._keys["r" * 40] = reader
-    resp = client.post("/v1/admin/restore", headers={"Authorization": f"Bearer {'r' * 40}"}, json={"archive": archive})
+    resp = client.post(
+        "/v1/admin/restore/preview", headers={"Authorization": f"Bearer {'r' * 40}"}, json={"archive": archive}
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_apply_requires_backup_write_and_read_alone_is_not_enough(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
+    archive = client.get("/v1/admin/backup", headers=_auth()).json()
+
+    from device_mcp_gateway.rbac import Principal, SCOPE_BACKUP_READ
+
+    reader = Principal(subject="key:ro", scopes=frozenset({SCOPE_BACKUP_READ}), auth_method="api_key")
+    client.app.state.authenticator._keys["r" * 40] = reader
+    resp = client.post(
+        "/v1/admin/restore/apply", headers={"Authorization": f"Bearer {'r' * 40}"}, json={"archive": archive}
+    )
     assert resp.status_code == 403
 
 
 def test_a_body_without_an_archive_is_a_400_not_a_500(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path, secret_key=Fernet.generate_key().decode())
-    assert client.post("/v1/admin/restore", headers=_auth(), json={}).status_code == 400
-    assert client.post("/v1/admin/restore", headers=_auth(), json={"archive": "nonsense"}).status_code == 409
+    for path in ("/v1/admin/restore/preview", "/v1/admin/restore/apply"):
+        assert client.post(path, headers=_auth(), json={}).status_code == 400
+        assert client.post(path, headers=_auth(), json={"archive": "nonsense"}).status_code == 409
 
 
 # --- Dead letters -----------------------------------------------------------

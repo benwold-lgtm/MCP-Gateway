@@ -396,19 +396,22 @@ unaffected and restore seamlessly.)
 
 ### Restore from a backup
 
-**Preview first — that is the default.** `dry_run` is `true` unless you say otherwise, and
-a dry run performs the same fail-closed preflight and the same per-device gates as the real
-thing, so its report is a prediction rather than a parse.
+**Preview first — the two calls are structurally separate routes** (ADR-0018 §6), not one
+endpoint with a flag: `POST /admin/restore/preview` needs only `backup:read` and writes
+nothing, `POST /admin/restore/apply` needs `backup:write` and is the destructive one.
+Preview performs the same fail-closed preflight and the same per-device gates as apply, so
+its report is a prediction rather than a parse — and because it costs no elevation, run it
+as many times as you need while adjusting `on_conflict`.
 
 ```bash
 # 1. Preview. Reports per device: would_restore | skipped | failed.
 curl -s -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d "{\"archive\": $(cat fleet-2026-08-11.json)}" "$GW/v1/admin/restore" | jq '.counts, .devices'
+  -d "{\"archive\": $(cat fleet-2026-08-11.json)}" "$GW/v1/admin/restore/preview" | jq '.counts, .devices'
 
 # 2. Apply.
 curl -s -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d "{\"archive\": $(cat fleet-2026-08-11.json), \"dry_run\": false, \"on_conflict\": \"skip\"}" \
-  "$GW/v1/admin/restore" | jq '.counts'
+  -d "{\"archive\": $(cat fleet-2026-08-11.json), \"on_conflict\": \"skip\"}" \
+  "$GW/v1/admin/restore/apply" | jq '.counts'
 ```
 
 A portable archive additionally needs `"passphrase": "..."`. `on_conflict` is
@@ -429,7 +432,7 @@ refresh token was excluded from the archive and that token *was* its credential.
 predicts this, so the count is knowable before you commit:
 
 ```bash
-… "$GW/v1/admin/restore" | jq '.needs_reconnect, [.devices[] | select(.outcome | test("needs_reconnect"))]'
+… "$GW/v1/admin/restore/preview" | jq '.needs_reconnect, [.devices[] | select(.outcome | test("needs_reconnect"))]'
 ```
 
 Each such device stays flagged afterwards as `credential_state: "needs_reconnect"`, on both
@@ -469,7 +472,7 @@ generations. The message names which:
 archived `credential_ref` before writing anything, so the dry run already knows:
 
 ```bash
-… "$GW/v1/admin/restore" | jq '.credential_store_error, .credential_warnings,
+… "$GW/v1/admin/restore/preview" | jq '.credential_store_error, .credential_warnings,
      [.devices[] | select(.credential_warning) | {hostname, credential_warning}]'
 ```
 
@@ -494,7 +497,7 @@ each one also carries a `fingerprint_warning` naming why. It is reported at the 
 precisely because three warnings inside a 500-device list is what gets missed mid-incident:
 
 ```bash
-… "$GW/v1/admin/restore" | jq '.counts, .fingerprint_warnings, [.devices[] | select(.fingerprint_warning)]'
+… "$GW/v1/admin/restore/preview" | jq '.counts, .fingerprint_warnings, [.devices[] | select(.fingerprint_warning)]'
 ```
 
 Two causes, and they want different responses. **The archive and the live device disagree

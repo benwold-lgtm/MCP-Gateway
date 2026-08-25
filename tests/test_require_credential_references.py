@@ -237,13 +237,13 @@ def test_a_restore_cannot_reinstate_what_registration_would_refuse(monkeypatch, 
     archive = source.get("/v1/admin/backup", headers=_auth()).json()
 
     target = _client(monkeypatch, tmp_path, require=True, secret_key=key)
-    resp = target.post("/v1/admin/restore", headers=_auth(), json={"archive": archive})
+    resp = target.post("/v1/admin/restore/preview", headers=_auth(), json={"archive": archive})
     assert resp.status_code == 200, resp.text
     preview = resp.json()
     assert preview["devices"][0]["outcome"] == "failed"
     assert "by reference" in preview["devices"][0]["reason"]
 
-    applied = target.post("/v1/admin/restore", headers=_auth(), json={"archive": archive, "dry_run": False}).json()
+    applied = target.post("/v1/admin/restore/apply", headers=_auth(), json={"archive": archive}).json()
     assert applied["devices"][0]["outcome"] == "failed", "the apply must agree with the preview"
 
 
