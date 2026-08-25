@@ -13,7 +13,7 @@ shape `sqlite_store.py`'s `_MIGRATIONS` uses — `CREATE TABLE IF NOT EXISTS` pl
 supports `IF NOT EXISTS` on `ADD COLUMN` directly (SQLite does not, which is why the gateway's
 own version wraps each statement in a swallowed exception instead) — so this runner does not
 need that try/except dance, but keeps the same "additive, never destructive, safe to re-run"
-contract. Slice 2 appends `assignments` here.
+contract.
 
 IDs are generated in Python (`uuid.uuid4()`), not by a Postgres default, so this module needs
 no `pgcrypto`/`uuid-ossp` extension — one less thing a deployment has to enable.
@@ -62,6 +62,34 @@ _MIGRATIONS: tuple[str, ...] = (
         created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
         UNIQUE (device_type_id, version)
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS assignments (
+        id              UUID PRIMARY KEY,
+        device_type_id  UUID NOT NULL REFERENCES device_types(id),
+        -- ADR-0019 opaque tenant identifier — never a customer name, so a compromised
+        -- catalog leaks "which appliance models are assigned to which opaque tenant",
+        -- not a customer roster.
+        tenant_id       TEXT NOT NULL,
+        assigned_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        -- Attested by the caller (the console BFF passes through the acting provider
+        -- subject), not derived here — this service has one shared token, not a
+        -- per-caller identity, so it trusts the caller's own attestation of who acted.
+        assigned_by     TEXT NOT NULL,
+        -- NULL = currently assigned. Revoking sets this rather than deleting the row
+        -- (ADR-0025 needs the history retained, not just the current state) — a fresh
+        -- assign after a revoke inserts a NEW row rather than clearing this, so each
+        -- assign/revoke cycle is its own auditable record.
+        revoked_at      TIMESTAMPTZ
+    )
+    """,
+    # At most one ACTIVE assignment per (type, tenant) — a partial index, not a plain
+    # UNIQUE constraint, because a plain one would also block a legitimate re-assignment
+    # after a revoke (two rows sharing the pair, one revoked, is exactly the allowed case).
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS assignments_active_unique
+        ON assignments (device_type_id, tenant_id)
+        WHERE revoked_at IS NULL
     """,
 )
 

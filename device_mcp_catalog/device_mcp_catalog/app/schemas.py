@@ -69,3 +69,30 @@ class DeviceTypeDetail(DeviceType):
 
 class DeviceTypeListResponse(BaseModel):
     device_types: list[DeviceType]
+
+
+class AssignRequest(BaseModel):
+    """ADR-0020 §2: assignment is an offer, written to provider-plane storage only — it
+    never reaches the tenant's own registry. `tenant_id` is the ADR-0019 opaque identifier,
+    not a customer name. `assigned_by` is attested by the caller (the console BFF passes
+    through its own session's provider subject) rather than derived here — see the
+    `assignments` table comment in `db.py` for why."""
+
+    tenant_id: str = Field(min_length=1, max_length=200)
+    assigned_by: str = Field(min_length=1, max_length=200)
+
+
+class Assignment(BaseModel):
+    id: uuid.UUID
+    device_type_id: uuid.UUID
+    tenant_id: str
+    assigned_at: datetime.datetime
+    assigned_by: str
+    revoked_at: Optional[datetime.datetime] = None
+
+
+class TenantAssignmentsResponse(BaseModel):
+    #: What a tenant's claim view (slice 4) reads — the device types currently (not
+    #: historically) assigned to this tenant. A revoked assignment is simply absent here,
+    #: not a device type with some "revoked" flag on it.
+    device_types: list[DeviceType]
