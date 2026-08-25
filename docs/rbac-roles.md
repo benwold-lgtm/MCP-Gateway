@@ -17,6 +17,7 @@ for the role/scope model; the *decision* behind it is
 | `backup:read` | Export an archive of the registry; preview a restore (writes nothing) | `GET /v1/admin/backup`, `POST /v1/admin/backup`, `POST /v1/admin/restore/preview` |
 | `backup:write` | Apply a restore | `POST /v1/admin/restore/apply` |
 | `backup:export-portable` | **Additionally** export a *portable* archive — credentials re-encrypted to a passphrase instead of the stack key | `POST /v1/admin/backup` with `kind=portable` |
+| `devices:write-planned` | Apply **exactly one** reviewed, digest-bound device-write plan (ADR-0022) | `POST /v1/devices/plans/apply` |
 
 > **`backup:read` is not a read-only grant in the ordinary sense.** An archive contains
 > every device's `base_url`, spec URL and configuration, plus its credentials as
@@ -29,6 +30,17 @@ for the role/scope model; the *decision* behind it is
 > hold standing permission for. It is checked *inside* the handler, because whether it is
 > required depends on the requested `kind`.
 
+> **`devices:write-planned` never appears in any role's bundle, `admin` included, and never
+> will by design.** Every other scope in this table is standing: hold the role, hold the
+> scope, for as long as the credential is valid. This one is minted per-plan, at Review, by
+> `write_planned.WritePlannedGrantStore.issue` — scoped to one caller and one exact plan
+> digest — and redeemed once (or, if the reviewer explicitly marked it repeatable, on exact
+> byte-identical reapplication only) via `write_planned.check_and_consume`, never via
+> `require_scope`. `caller`'s baseline stays `devices:read` + `tools:call` permanently; an
+> agent that needs to register or reconfigure a device proposes a plan, a human with
+> `devices:write` reviews and approves it, and only *that* digest becomes appliable. See
+> [ADR-0022](adr/0022-agent-initiated-device-writes-are-plan-bound.md).
+>
 > `/health`, `/livez`, `/readyz` and the Prometheus scrape port are unauthenticated infra
 > contracts and are not scope-gated.
 >
@@ -54,7 +66,8 @@ invoking tools over SSE). One scope model serves both.
 All seven roles are defined in [`ROLE_SCOPES`](../device_mcp_gateway/rbac.py) today
 (`operator`/`auditor`/`caller` were added with the OIDC work, ADR-0007; `backup` with
 ADR-0011; `console` with ADR-0023 slice 4). Add a role by adding one entry to `ROLE_SCOPES`
-— no route changes.
+— no route changes. `devices:write-planned` has no column here, deliberately: it is not a
+bundle member of any role, so the omission is not a gap to fill in later.
 
 > **`console` exists because nothing else fitted, and that gap had a cost.** A password
 > session reaches device CRUD and diagnostics, `/metrics/summary`, and the MCP invocation

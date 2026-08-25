@@ -21,6 +21,7 @@ from device_mcp_gateway.rbac import (
     ROLE_SCOPES,
     SCOPE_DEVICES_READ,
     SCOPE_DEVICES_WRITE,
+    SCOPE_DEVICES_WRITE_PLANNED,
     Authenticator,
     Principal,
     authenticate_request,
@@ -62,6 +63,19 @@ def test_role_scope_bundles():
 def test_unknown_role_raises():
     with pytest.raises(ValueError):
         scopes_for_role("superuser")
+
+
+def test_devices_write_planned_is_never_held_as_a_standing_scope():
+    """ADR-0022: this scope is minted per-plan at Review, scoped to one caller and one exact
+    digest, and checked via the write_planned grant store — never via `require_scope`. If it
+    ever appeared in `ALL_SCOPES` (which is literally `admin`'s bundle, not a registry of
+    known scope strings — see `ROLE_SCOPES["admin"] = ALL_SCOPES`) or in any other role's
+    bundle, every principal holding that role would carry it permanently, which is the exact
+    standing-access regression the ADR exists to prevent."""
+    assert SCOPE_DEVICES_WRITE_PLANNED not in ALL_SCOPES
+    for role, scopes in ROLE_SCOPES.items():
+        assert SCOPE_DEVICES_WRITE_PLANNED not in scopes, f"role {role!r} must never hold this scope"
+    assert SCOPE_DEVICES_WRITE_PLANNED not in ANONYMOUS.scopes
 
 
 def test_principal_has():
