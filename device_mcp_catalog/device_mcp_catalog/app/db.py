@@ -13,8 +13,10 @@ shape `sqlite_store.py`'s `_MIGRATIONS` uses — `CREATE TABLE IF NOT EXISTS` pl
 supports `IF NOT EXISTS` on `ADD COLUMN` directly (SQLite does not, which is why the gateway's
 own version wraps each statement in a swallowed exception instead) — so this runner does not
 need that try/except dance, but keeps the same "additive, never destructive, safe to re-run"
-contract. Slice 1 appends `device_types`/`device_type_versions` here; slice 2 appends
-`assignments`. No table exists yet in slice 0 — this module is connection + health only.
+contract. Slice 2 appends `assignments` here.
+
+IDs are generated in Python (`uuid.uuid4()`), not by a Postgres default, so this module needs
+no `pgcrypto`/`uuid-ossp` extension — one less thing a deployment has to enable.
 """
 
 from __future__ import annotations
@@ -24,10 +26,44 @@ from typing import Optional
 import asyncpg
 from loguru import logger
 
-#: Slice 0 has no schema of its own yet. Appended to (never rewritten) as later slices add
-#: tables — see the module docstring for why this list is safe to replay against a database
-#: that already has some or all of it applied.
-_MIGRATIONS: tuple[str, ...] = ()
+#: Appended to (never rewritten) as later slices add tables — see the module docstring for
+#: why this list is safe to replay against a database that already has some or all of it
+#: applied.
+_MIGRATIONS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS device_types (
+        id          UUID PRIMARY KEY,
+        slug        TEXT NOT NULL UNIQUE,
+        name        TEXT NOT NULL,
+        description TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS device_type_versions (
+        id                  UUID PRIMARY KEY,
+        device_type_id      UUID NOT NULL REFERENCES device_types(id),
+        version             INTEGER NOT NULL,
+        transport           TEXT NOT NULL DEFAULT 'sse',
+        upstream_kind       TEXT NOT NULL DEFAULT 'openapi'
+                                CHECK (upstream_kind IN ('openapi', 'mcp')),
+        upstream_transport  TEXT NOT NULL DEFAULT 'http'
+                                CHECK (upstream_transport IN ('http', 'sse')),
+        -- Relative to the tenant-supplied base_url at claim time (openapi only — an mcp
+        -- device has no spec_url at all, matching the gateway's own
+        -- registry/validation.py `_validate_upstream` rule). Never an absolute URL: the
+        -- device type is the appliance MODEL, and the host is the tenant's to supply.
+        spec_path           TEXT,
+        auth_kind           TEXT NOT NULL DEFAULT 'none'
+                                CHECK (auth_kind IN ('none', 'api_key', 'oauth2')),
+        fingerprint_policy  TEXT
+                                CHECK (fingerprint_policy IN ('warn', 'enforce')),
+        changelog           TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (device_type_id, version)
+    )
+    """,
+)
 
 
 class Database:
