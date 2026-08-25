@@ -62,6 +62,12 @@ from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import MemoryRegistryBackend, RedisRegistryBackend
 from device_mcp_gateway.shared.session_owners import ExpiringOwners
+from device_mcp_gateway.write_planned import (
+    InMemoryPendingProposalStore,
+    InMemoryWritePlannedGrantStore,
+    RedisPendingProposalStore,
+    RedisWritePlannedGrantStore,
+)
 
 
 class _BodyTooLarge(Exception):
@@ -306,6 +312,13 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # limiter this one never refuses anything — it raises a review flag and nothing else.
     _app.state.break_glass_activity = InMemoryBreakGlassActivity()
 
+    # --- Device write-planned proposals/grants (ADR-0022) ---
+    # Same in-memory-then-Redis shape as the two trackers above. Two stores, not one: a
+    # PendingProposal is short-lived and read once by the reviewer; a Grant is scoped to a
+    # plan digest and may outlive many proposals when a reviewer marks it repeatable (§4).
+    _app.state.write_planned_proposals = InMemoryPendingProposalStore()
+    _app.state.write_planned_grants = InMemoryWritePlannedGrantStore()
+
     # --- CORS (opt-in; configure cors.allowed_origins in config.yaml) ---
     _allowed_origins = cfg.get("cors", {}).get("allowed_origins", [])
     if _allowed_origins:
@@ -379,6 +392,8 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             app.state.rate_limiter = RedisRateLimiter(redis_client)
             logger.info("Rate limiter using shared Redis storage")
             app.state.break_glass_activity = RedisBreakGlassActivity(redis_client)
+            app.state.write_planned_proposals = RedisPendingProposalStore(redis_client)
+            app.state.write_planned_grants = RedisWritePlannedGrantStore(redis_client)
         else:
             await app.state.store.initialize()
             registry = app.state.registry

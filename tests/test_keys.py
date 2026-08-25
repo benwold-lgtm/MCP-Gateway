@@ -69,6 +69,12 @@ _PARITY = [
     # quietly, which is why they belong in this table.
     (K.break_glass_session("key:alice"), "breakglass:key:alice:session"),
     (K.break_glass_window("key:alice"), "breakglass:key:alice:window"),
+    # New in ADR-0022. Same reason as the pair above: renaming either silently orphans a
+    # pending proposal a human is mid-review of, or a live grant an agent is about to
+    # redeem — both fail by becoming invisible rather than loudly, which is exactly what
+    # this table exists to catch before a rename ships.
+    (K.write_planned_proposal("p1"), "write_planned:proposal:p1"),
+    (K.write_planned_grant("d1"), "write_planned:grant:d1"),
 ]
 
 
@@ -109,6 +115,8 @@ def test_parity_table_covers_every_key_building_member():
         "ratelimit",
         "break_glass_session",
         "break_glass_window",
+        "write_planned_proposal",
+        "write_planned_grant",
     }
     assert members == covered, f"parity table out of sync with KeyBuilder: {members ^ covered}"
 
@@ -178,6 +186,8 @@ def _key_samples(kb: KeyBuilder) -> list[tuple[str, str]]:
         ("exec_marker", kb.exec_marker("r1")),
         ("result_marker", kb.result_marker("r1")),
         ("ratelimit", kb.ratelimit("messages:1.2.3.4")),
+        ("write_planned_proposal", kb.write_planned_proposal("p1")),
+        ("write_planned_grant", kb.write_planned_grant("d1")),
     ]
 
 
@@ -201,6 +211,7 @@ _KEY_PREFIXES = (
     "rl:",
     "reconciler:leader",
     "gateway:gauge-leader",
+    "write_planned:",
 )
 
 # (file, exact string) pairs that look like keys but are not. Each needs a reason.

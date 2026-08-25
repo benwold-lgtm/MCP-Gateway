@@ -180,6 +180,16 @@ class KeyBuilder:
         """
         return self._k(f"breakglass:{subject}:window")
 
+    # --- device write-planned proposals and grants (ADR-0022) ----------------
+
+    def write_planned_proposal(self, proposal_id: str) -> str:
+        """Hash holding a pending device-write proposal awaiting human review."""
+        return self._k(f"write_planned:proposal:{proposal_id}")
+
+    def write_planned_grant(self, digest: str) -> str:
+        """Hash holding a `devices:write-planned` grant, scoped to one plan digest."""
+        return self._k(f"write_planned:grant:{digest}")
+
     # --- rate limiting -------------------------------------------------------
 
     def ratelimit(self, key: str) -> str:

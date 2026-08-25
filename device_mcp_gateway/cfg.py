@@ -172,6 +172,25 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         # a fixed value (instrumented and tuned from operating history).
         "plan_digest_validity_seconds": _NUM,
     },
+    # ADR-0022 — Propose/Review/Apply for agent-initiated device writes. A separate block
+    # from `backup`, even though `plan_digest_validity_seconds` there is the closest sibling:
+    # these three govern a different mechanism (a `devices:write-planned` grant, not a
+    # restore's HMAC token) with its own three lifetimes, not variations on backup's one.
+    "write_planned": {
+        # How long an unreviewed proposal survives before a reviewer must re-propose. A
+        # proposal is meant to be reviewed promptly; longer is a stale-queue problem, not a
+        # security one — the digest it would produce, once approved, is bounded separately.
+        "proposal_ttl_seconds": _NUM,
+        # Validity window for a single-use grant between Review and Apply. Generous enough
+        # for an agent to act asynchronously, bounded enough to never be standing access.
+        "grant_ttl_seconds": _NUM,
+        # Max lifetime of a *repeatable* grant (§4). The ADR explicitly leaves this
+        # undecided ("a follow-up, not decided here") — ships as an instrumented starting
+        # default, the same treatment already given to `backup.plan_digest_validity_seconds`
+        # (7 days) and the break-glass credential (90 days), tuned from real usage rather
+        # than fixed permanently here.
+        "repeatable_grant_max_seconds": _NUM,
+    },
     "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM, "auth_token": str},
     "tracing": {
         "enabled": bool,
@@ -365,6 +384,22 @@ def plan_digest_validity_seconds(cfg: dict[str, Any]) -> int:
     return int(cfg.get("backup", {}).get("plan_digest_validity_seconds") or 7 * 24 * 60 * 60)
 
 
+def write_planned_proposal_ttl_seconds(cfg: dict[str, Any]) -> int:
+    """ADR-0022 — seconds an unreviewed proposal survives before a reviewer must re-propose."""
+    return int(cfg.get("write_planned", {}).get("proposal_ttl_seconds") or 3600)
+
+
+def write_planned_grant_ttl_seconds(cfg: dict[str, Any]) -> int:
+    """ADR-0022 — seconds a single-use `devices:write-planned` grant stays valid before Apply."""
+    return int(cfg.get("write_planned", {}).get("grant_ttl_seconds") or 24 * 60 * 60)
+
+
+def write_planned_repeatable_max_seconds(cfg: dict[str, Any]) -> int:
+    """ADR-0022 §4 — max lifetime of a *repeatable* grant. Not fixed by the ADR; see the
+    schema comment on `write_planned.repeatable_grant_max_seconds` for why 30 days."""
+    return int(cfg.get("write_planned", {}).get("repeatable_grant_max_seconds") or 30 * 24 * 60 * 60)
+
+
 def _defaults() -> dict:
     return {
         "gateway": {
@@ -402,6 +437,11 @@ def _defaults() -> dict:
             "argon2_lanes": 4,
             "deadletter_limit": 1000,
             "plan_digest_validity_seconds": 7 * 24 * 60 * 60,  # 7 days (ADR-0018 §6)
+        },
+        "write_planned": {
+            "proposal_ttl_seconds": 3600,  # 1 hour (ADR-0022)
+            "grant_ttl_seconds": 24 * 60 * 60,  # 1 day (ADR-0022)
+            "repeatable_grant_max_seconds": 30 * 24 * 60 * 60,  # 30 days, a starting default (ADR-0022 §4)
         },
         "metrics": {"enabled": True, "port": 9100, "gauge_refresh_interval": 15},
         "logging": {"level": "INFO", "audit_retention": "90 days", "audit_enabled": True},
