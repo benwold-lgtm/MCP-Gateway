@@ -80,6 +80,32 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Added
 
+- **An agent can propose a device registration or reconfiguration for a human to review,
+  without ever holding standing `devices:write`**
+  ([ADR-0022](docs/adr/0022-agent-initiated-device-writes-are-plan-bound.md)). Three new
+  routes: `POST /v1/devices/plans` (Propose, needs only `devices:read`, writes nothing and
+  never reaches the candidate target — deliberately, so it cannot become an unprivileged SSRF
+  probe dressed up as "building a plan"), `GET /v1/devices/plans/{id}` + `POST
+  /v1/devices/plans/{id}/approve` (Review, needs `devices:write` — approving a device-registry
+  change is squarely inside what that scope already means), and `POST
+  /v1/devices/plans/apply` (Apply, redeems the grant Review minted).
+
+  Approval mints a `devices:write-planned` grant scoped to one caller and one exact plan
+  digest — bound to the *proposer's* subject, never the reviewer's, so an admin approving an
+  agent's plan cannot redeem it themselves. The scope is never in `ROLE_SCOPES`, `admin`
+  included: it is checked by an atomic store lookup at Apply, not by `require_scope`, and by
+  design cannot become standing access no matter who holds it. Apply recomputes the digest
+  from the resubmitted plan and only then runs `register_device`/`update_device`'s full
+  validation — the SSRF guard included — via the same internal functions those routes call
+  directly, so a valid grant is never a rubber stamp past them. A single-use grant (the
+  default) is spent by redemption itself, even if the write it gates then fails validation; a
+  reviewer can mark one repeatable instead, which is never consumed and tolerates both a
+  byte-identical reapplication and a retry after a failed one — bounded by a configurable
+  ceiling the reviewer can shorten but never lengthen.
+
+  Reuses ADR-0018 §6's canonicalization/digest utility as-is — no new digest mechanism, no
+  new canonicalization rules.
+
 - **A deployment can refuse inline device credentials** —
   `gateway.credentials.require_references` (or `MCP_REQUIRE_CREDENTIAL_REFS`), **off by
   default** ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md) §1). With it on, a

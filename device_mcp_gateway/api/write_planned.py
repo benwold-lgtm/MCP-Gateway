@@ -52,7 +52,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_request
+from device_mcp_gateway.api.devices import _apply_register, _apply_update
+from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, AUDIT_OUTCOME_SUCCESS, audit_request
 from device_mcp_gateway.cfg import (
     write_planned_grant_ttl_seconds,
     write_planned_proposal_ttl_seconds,
@@ -223,3 +224,97 @@ async def approve_device_plan(proposal_id: str, request: Request):
         grant_ttl_seconds=ttl,
     )
     return {"plan_digest": grant.digest, "repeatable": grant.repeatable, "expires_at": grant.expires_at}
+
+
+# Apply reaches the registry, same as a direct register_device/update_device call, so it
+# gets that route's own budget rather than riding on devices:read's implicit "free" reads.
+_APPLY_LIMITS = [
+    Depends(rate_limit("60/minute", "write_planned_apply")),
+    Depends(rate_limit_principal("120/minute", "write_planned_apply")),
+]
+
+
+@router.post(
+    "/devices/plans/apply",
+    dependencies=[Depends(require_scope(SCOPE_DEVICES_READ))] + _APPLY_LIMITS,
+)
+async def apply_device_plan(request: Request):
+    """Redeem a `devices:write-planned` grant and perform exactly the write it names.
+
+    Body: the full plan exactly as proposed — the gateway persists no plan content between
+    Propose and Apply (the same property restore's own apply already holds), so Apply
+    resubmits it whole. The digest is recomputed from this body and checked against a live
+    grant for the caller's own subject *before* anything else runs: a missing, expired,
+    already-consumed, or wrong-subject grant is refused (`403 ERR_PLAN_STALE`), and so is a
+    body that no longer digests to what was reviewed — a plan edited after Review is a new
+    plan, not the one the grant covers.
+
+    Only once redemption succeeds does `register_device`/`update_device`'s own validation
+    run — SSRF guard included — via the identical internal functions those routes call, so
+    a valid grant is never a rubber stamp past those gates.
+
+    A single-use grant is consumed by redemption itself, not by a successful write: this is
+    what closes the check/write race (two concurrent Applies must not both see an
+    unconsumed grant), the same way restore's own apply closes its. The cost is that a
+    single-use grant spent on a plan that then fails validation is gone — Propose and Review
+    again, don't retry the same Apply. A **repeatable** grant has no such cost: it is never
+    consumed, so a validation failure changes nothing and the identical Apply can simply be
+    retried once the plan is fixed.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    intent = data.get("intent")
+    if intent not in _INTENTS:
+        raise HTTPException(status_code=400, detail=f"'intent' must be one of: {', '.join(_INTENTS)}")
+    hostname = data.get("hostname")
+    if not hostname:
+        raise HTTPException(status_code=400, detail="'hostname' is required")
+
+    digest = compute_digest(data)
+    principal = request.state.principal
+    grants = write_planned_grant_store(request.app.state)
+    result = await grants.check_and_consume(digest=digest, subject=principal.subject)
+    if not result.ok:
+        audit_request(
+            request,
+            "device.write_planned.apply",
+            outcome=AUDIT_OUTCOME_DENIED,
+            target=hostname,
+            plan_digest=digest,
+            reason=result.reason,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error_code": "ERR_PLAN_STALE",
+                "message": (
+                    "No live devices:write-planned grant matches this exact plan for your "
+                    "identity (it may be missing, expired, already used, reviewed for a "
+                    "different plan, or reviewed for a different caller). Propose again and "
+                    "have it reviewed."
+                ),
+                "reason": result.reason,
+            },
+        )
+
+    grant = result.grant
+    if intent == INTENT_REGISTER:
+        outcome = await _apply_register(data, request)
+    else:
+        outcome = await _apply_update(hostname, data, request)
+
+    audit_request(
+        request,
+        "device.write_planned.apply",
+        outcome=AUDIT_OUTCOME_SUCCESS,
+        target=hostname,
+        plan_digest=digest,
+        reviewer_subject=grant.reviewer_subject if grant is not None else None,
+        repeatable=grant.repeatable if grant is not None else None,
+    )
+    return outcome
