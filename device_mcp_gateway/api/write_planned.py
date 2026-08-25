@@ -3,10 +3,27 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
 """Propose/Review/Apply for agent-initiated device writes (ADR-0022).
 
-This slice is Propose only. `caller`'s baseline (`devices:read` + `tools:call`) never
-gains `devices:write` — instead an agent proposes a plan here, a human reviews and
-approves it (a later slice), and the agent applies by redeeming the grant that approval
-mints (another later slice).
+This slice adds Review to Propose. `caller`'s baseline (`devices:read` + `tools:call`)
+never gains `devices:write` — instead an agent proposes a plan (above), a human reviews
+and approves it (below), and the agent applies by redeeming the grant that approval mints
+(a later slice).
+
+**Review is gated by `devices:write`, not a new scope.** `operator` already holds it, and
+approving a device-registry change is squarely inside what that scope already means — the
+same reasoning `backup:export-portable` uses to justify *not* inventing a scope where an
+existing one already covers the authority. `devices:write-planned` itself is minted here,
+never checked here: Review is the one place that scope's whole meaning comes from.
+
+**The grant is bound to the *proposer's* subject, never the reviewer's.** `approve_device_plan`
+reads `proposal.subject` (whoever called Propose) and issues the grant to that identity —
+this is ADR-0017 §7's "session-bound delivery" property, reduced to what it actually needs
+here: Apply must be the same caller who proposed, not whoever happens to review. A reviewer
+approving their own proposal (self-service) is not prevented by this route — that is a
+policy question for how `devices:write` is provisioned, not a mechanism this ADR changes.
+
+**A proposal is one-shot.** Approve deletes it immediately after issuing the grant, so it
+cannot be approved a second time — a stale double-click, or a reviewer plus an automation
+racing the same proposal, produces exactly one grant, never two.
 
 **Propose is purely local — no live outbound call to the candidate target, ever, and no
 call into `validate_device_registration`/`_check_target_url` (the SSRF guard) either.**
@@ -36,11 +53,15 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_request
-from device_mcp_gateway.cfg import write_planned_proposal_ttl_seconds
+from device_mcp_gateway.cfg import (
+    write_planned_grant_ttl_seconds,
+    write_planned_proposal_ttl_seconds,
+    write_planned_repeatable_max_seconds,
+)
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
-from device_mcp_gateway.rbac import SCOPE_DEVICES_READ, require_scope
+from device_mcp_gateway.rbac import SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, require_scope
 from device_mcp_gateway.shared.canonical_json import compute_digest
-from device_mcp_gateway.write_planned import pending_proposal_store
+from device_mcp_gateway.write_planned import pending_proposal_store, write_planned_grant_store
 
 router = APIRouter()
 
@@ -114,3 +135,91 @@ async def propose_device_plan(request: Request):
         "plan_digest": digest,
         "expires_at": proposal.expires_at if proposal is not None else None,
     }
+
+
+@router.get(
+    "/devices/plans/{proposal_id}",
+    dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))],
+)
+async def get_device_plan(proposal_id: str, request: Request):
+    """What a reviewer reads before deciding. Writes nothing."""
+    store = pending_proposal_store(request.app.state)
+    proposal = await store.get(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="No such proposal, or it has expired; propose again")
+    return {
+        "proposal_id": proposal_id,
+        "plan": proposal.plan,
+        "plan_digest": proposal.digest,
+        "expires_at": proposal.expires_at,
+    }
+
+
+def _approval_ttl(config: dict, *, repeatable: bool, requested: object) -> int:
+    """The grant's lifetime: the deployment's configured ceiling for this grant kind,
+    shortened if the reviewer asked for less, never lengthened beyond it.
+
+    A repeatable grant's ceiling is `write_planned_repeatable_max_seconds` — deliberately
+    the same cap regardless of what the reviewer requests, since ADR-0022 §4 requires a
+    repeatable grant to have *some* bounded maximum and leaves the exact value to
+    operating history, not to a per-approval choice that could quietly grow unbounded.
+    """
+    ceiling = write_planned_repeatable_max_seconds(config) if repeatable else write_planned_grant_ttl_seconds(config)
+    if requested is None:
+        return ceiling
+    if isinstance(requested, bool) or not isinstance(requested, (int, float)) or requested <= 0:
+        raise HTTPException(status_code=400, detail="'ttl_seconds' must be a positive number")
+    return int(min(float(requested), ceiling))
+
+
+@router.post(
+    "/devices/plans/{proposal_id}/approve",
+    dependencies=[Depends(require_scope(SCOPE_DEVICES_WRITE))],
+)
+async def approve_device_plan(proposal_id: str, request: Request):
+    """Mint a `devices:write-planned` grant for the proposal's own proposer, scoped to its
+    digest. One-shot: the proposal is consumed here whether or not it is ever applied.
+
+    Body (all optional): ``{"repeatable": bool, "ttl_seconds": number}``. `repeatable`
+    (default `false`) is the reviewer's *explicit* choice per ADR-0022 §4 — never inferred
+    from `ttl_seconds` or anything else. `ttl_seconds`, if given, shortens the grant below
+    the deployment's configured ceiling for its kind; it can never lengthen it.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    repeatable = bool(body.get("repeatable", False))
+    ttl = _approval_ttl(request.app.state.config, repeatable=repeatable, requested=body.get("ttl_seconds"))
+
+    proposals = pending_proposal_store(request.app.state)
+    proposal = await proposals.get(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="No such proposal, or it has expired; propose again")
+
+    grants = write_planned_grant_store(request.app.state)
+    reviewer = request.state.principal.subject
+    grant = await grants.issue(
+        digest=proposal.digest,
+        subject=proposal.subject,
+        reviewer_subject=reviewer,
+        repeatable=repeatable,
+        ttl_seconds=ttl,
+    )
+    # One-shot, regardless of what happens next: a proposal cannot be approved twice, and a
+    # digest that already has a live grant behind it gains nothing from a second approval.
+    await proposals.delete(proposal_id)
+
+    audit_request(
+        request,
+        "device.write_planned.approve",
+        outcome=AUDIT_OUTCOME_SUCCESS,
+        target=proposal.plan.get("hostname"),
+        plan_digest=proposal.digest,
+        proposer_subject=proposal.subject,
+        repeatable=repeatable,
+        grant_ttl_seconds=ttl,
+    )
+    return {"plan_digest": grant.digest, "repeatable": grant.repeatable, "expires_at": grant.expires_at}
