@@ -61,6 +61,19 @@ for the role/scope model; the *decision* behind it is
 > than the last one this grant accepted (no nonce cache; see that module's docstring for
 > why a monotonic timestamp closes replay without one).
 >
+> **Revoking a support grant interrupts a call already in flight under it, not only future
+> calls (§8)** — but only on the gateway process that is actually running that call.
+> `rbac.track_support_grant_inflight` (a dependency ordered right after `authenticate_request`)
+> registers the current task in a per-process `support_grant_inflight.InFlightSupportGrantCalls`
+> registry while a support-grant-authenticated request executes; `DELETE
+> /v1/support-grants/{id}` calls `cancel_all` on it after a successful revoke. This is
+> deliberately not cross-replica: in distributed mode the gateway API tier itself is
+> horizontally scaled, and a revoke landing on a different replica than the one running the
+> call can't reach it directly. That call still stops — refused on its very next request
+> (`check`/`check_proof` are live per-request already), or via the existing F6 timeout
+> watcher — just not the instant the revoke lands elsewhere. See `support_grant_inflight.py`'s
+> module docstring and `docs/adr/README.md` item 7 for the full reasoning.
+>
 > `/health`, `/livez`, `/readyz` and the Prometheus scrape port are unauthenticated infra
 > contracts and are not scope-gated.
 >
