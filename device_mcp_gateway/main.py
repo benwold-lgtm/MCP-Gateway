@@ -59,7 +59,12 @@ from device_mcp_gateway.lifecycle import (  # noqa: F401  (re-exported, see abov
 from device_mcp_gateway.logging_setup import setup_logging
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.ratelimit import InMemoryRateLimiter, RedisRateLimiter, client_ip_key_func
-from device_mcp_gateway.rbac import authenticate_request, build_authenticator, weak_static_keys
+from device_mcp_gateway.rbac import (
+    authenticate_request,
+    build_authenticator,
+    track_support_grant_inflight,
+    weak_static_keys,
+)
 from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import MemoryRegistryBackend, RedisRegistryBackend
@@ -494,7 +499,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
 
     # Router-level: authenticate every protected request to a Principal. Each route
     # module then authorizes on specific scopes via require_scope(...).
-    protected = APIRouter(dependencies=[Depends(authenticate_request)])
+    protected = APIRouter(dependencies=[Depends(authenticate_request), Depends(track_support_grant_inflight)])
     protected.include_router(api_devices.router)
     protected.include_router(api_deadletter.router)
     protected.include_router(api_sse.router)

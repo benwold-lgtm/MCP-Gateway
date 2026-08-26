@@ -33,6 +33,7 @@ from device_mcp_gateway.cfg import (
 )
 from device_mcp_gateway.rbac import ALL_SCOPES, SCOPE_DEVICES_WRITE_PLANNED, SCOPE_SUPPORT_ADMINISTER, require_scope
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
+from device_mcp_gateway.support_grant_inflight import support_grant_inflight_registry
 from device_mcp_gateway.support_grant_pop import InvalidPublicKey, parse_public_key
 from device_mcp_gateway.support_grants import (
     pending_support_request_store,
@@ -356,10 +357,17 @@ async def revoke_support_grant(request: Request, grant_id: str):
     # revoke transition gets its own audit record — an idempotent no-op has no new fact to
     # record, the same reasoning `GET .../plans/{id}`'s plain 404 gets no bespoke audit event.
     if result.ok:
+        # ADR-0017 §8: reach for anything still running under this grant on THIS process
+        # (see support_grant_inflight.py — a call on a different replica still stops, just
+        # via its own existing timeout rather than immediately). Recorded on the audit event
+        # rather than in the response body so this route's 204-no-content contract is
+        # unchanged; the count is what "the console must say so" resolves to for now.
+        interrupted = support_grant_inflight_registry(request.app.state).cancel_all(grant_id)
         audit_request(
             request,
             "support_grant.revoke",
             outcome=AUDIT_OUTCOME_SUCCESS,
             target=result.grant.provider_subject if result.grant is not None else grant_id,
             grant_id=grant_id,
+            interrupted_calls=interrupted,
         )

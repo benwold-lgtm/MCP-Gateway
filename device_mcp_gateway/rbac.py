@@ -22,14 +22,14 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, AsyncIterator, Optional, Union
 
 from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 
 from device_mcp_gateway import metrics
-from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, audit_event
+from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, AUDIT_OUTCOME_ERROR, audit_event
 
 if TYPE_CHECKING:
     from device_mcp_gateway.oidc import MultiIssuerValidator
@@ -922,6 +922,43 @@ async def authenticate_request(
                 reason="invalid_or_missing_token",
             )
         raise
+
+
+async def track_support_grant_inflight(request: Request) -> AsyncIterator[None]:
+    """Router-level dependency, ordered after `authenticate_request` (ADR-0017 §8).
+
+    While a support-grant-authenticated request is executing, its task is registered so a
+    concurrent revoke landing on THIS gateway process can cancel it immediately rather than
+    let it run to completion. A no-op for every other credential kind. See
+    `support_grant_inflight.py`'s module docstring for why this is deliberately scoped to one
+    process rather than reaching across replicas."""
+    principal: Optional[Principal] = getattr(request.state, "principal", None)
+    if principal is None or principal.support_grant_id is None:
+        yield
+        return
+    grant_id = principal.support_grant_id
+
+    from device_mcp_gateway.support_grant_inflight import support_grant_inflight_registry
+
+    registry = support_grant_inflight_registry(request.app.state)
+    task = asyncio.current_task()
+    assert task is not None
+    registry.register(grant_id, task)
+    try:
+        yield
+    except asyncio.CancelledError:
+        audit_event(
+            "support_grant.call_interrupted",
+            subject=principal.subject,
+            outcome=AUDIT_OUTCOME_ERROR,
+            rid=_audit_rid(request),
+            target=_audit_target(request),
+            grant_id=grant_id,
+            reason="revoked_mid_flight",
+        )
+        raise
+    finally:
+        registry.unregister(grant_id, task)
 
 
 def require_scope(scope: str):
