@@ -62,3 +62,20 @@ slice 5's upgrade-offer diff has a baseline.
   curated version it was registered from. `404` if that `(id, version)` pair was never
   curated. Re-claiming the same `(tenant_id, hostname)` (a delete + re-register) replaces the
   pin rather than accumulating a second row for it.
+
+## API (upgrade offers, ADR-0020 §4, slice 5)
+
+Never blocking, never scheduled, never forced. A version's `tool_set` — an optional list of
+`{"name", "method", "schema"}` dicts, DECLARED by the curator at `POST /device-types` /
+`POST /device-types/{id}/versions` time — is diffed against a claimed device's pinned
+version using a small pure classifier (`tool_diff.py`, a deliberate duplicate of
+`device_mcp_gateway.core.manifest_diff`'s `diff_tools`, kept separate so this service isn't
+pulled into the gateway package's dependency tree — see that module's docstring). Nothing
+here is a live measurement: the catalog has no tenant `base_url` to fetch a real spec with,
+so `tool_set` is exactly as trustworthy as the curator who entered it.
+
+- `GET /tenants/{tenant_id}/upgrades` — one entry per claimed device whose pinned version
+  differs from the type's current curated version. `diff` is `null` when either version has
+  no declared `tool_set` — a distinct condition from an empty (diffed, no changes) result.
+  Accepting an offer is just re-calling `POST /device-types/{id}/claims` with the new
+  version; there is no separate "apply" route.

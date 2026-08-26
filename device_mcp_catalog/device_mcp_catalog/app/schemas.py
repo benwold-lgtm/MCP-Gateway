@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import datetime
 import uuid
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -37,6 +37,15 @@ class VersionFields(BaseModel):
     #: Free-text note on what changed in this version — surfaced to a reviewer/tenant
     #: deciding whether to accept an upgrade offer (slice 5), not machine-parsed.
     changelog: Optional[str] = None
+    #: What this version's shape is DECLARED to imply — hand-entered by the curator as a
+    #: list of `{"name", "method", "schema"}` dicts (the same shape
+    #: `device_mcp_gateway.core.manifest_diff`'s tool-diff classifier reads). Never
+    #: independently verified: the catalog has no tenant base_url to fetch a live spec
+    #: against, matching `DeviceConfig.declared_name`'s "self-reported, never measured"
+    #: framing on the gateway side. `None` when the curator hasn't supplied one — the
+    #: upgrade-offer diff (slice 5) treats that as "no data to diff", a distinct condition
+    #: from "diffed and found no changes".
+    tool_set: Optional[list[dict[str, Any]]] = None
 
 
 class CreateDeviceType(VersionFields):
@@ -117,3 +126,35 @@ class Claim(BaseModel):
     tenant_id: str
     hostname: str
     claimed_at: datetime.datetime
+
+
+class ToolSetDiff(BaseModel):
+    """Mirrors `device_mcp_gateway.core.manifest_diff.ToolSetDiff` field-for-field — the
+    shape a caller displaying an upgrade offer already knows how to render. See
+    `tool_diff.py` for why this is a deliberate duplicate, not an import, of that module's
+    classifier."""
+
+    added: list[str] = []
+    removed: list[str] = []
+    changed: list[str] = []
+    breaking: bool = False
+    breaking_reasons: list[str] = []
+
+
+class UpgradeOffer(BaseModel):
+    hostname: str
+    device_type_id: uuid.UUID
+    slug: str
+    claimed_version: int
+    current_version: int
+    #: `None` when either the claimed or the current version has no declared `tool_set` to
+    #: diff — a distinct condition from an empty `ToolSetDiff` (diffed, found no changes).
+    diff: Optional[ToolSetDiff] = None
+
+
+class UpgradeOffersResponse(BaseModel):
+    #: Only claims whose current curated version differs from the one they're pinned to.
+    #: A device already on the latest curated version is absent here, same as a revoked
+    #: assignment is absent from `TenantAssignmentsResponse` — "nothing to offer" reads as
+    #: an empty list because it genuinely is one, not because a read failed silently.
+    offers: list[UpgradeOffer]

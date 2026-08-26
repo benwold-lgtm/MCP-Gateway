@@ -13,6 +13,7 @@ from typing import Optional
 
 import asyncpg
 
+from . import tool_diff
 from .db import Database
 from .schemas import (
     Assignment,
@@ -21,6 +22,8 @@ from .schemas import (
     DeviceType,
     DeviceTypeDetail,
     DeviceTypeVersion,
+    ToolSetDiff,
+    UpgradeOffer,
     VersionFields,
 )
 
@@ -141,8 +144,8 @@ class DeviceTypeRepo:
             """
             INSERT INTO device_type_versions
                 (id, device_type_id, version, transport, upstream_kind, upstream_transport,
-                 spec_path, auth_kind, fingerprint_policy, changelog)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 spec_path, auth_kind, fingerprint_policy, changelog, tool_set)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
             """,
             version_id,
@@ -155,6 +158,7 @@ class DeviceTypeRepo:
             fields.auth_kind,
             fields.fingerprint_policy,
             fields.changelog,
+            fields.tool_set,
         )
 
 
@@ -255,3 +259,52 @@ class ClaimRepo:
         except asyncpg.ForeignKeyViolationError as exc:
             raise DeviceTypeVersionNotFound((device_type_id, version)) from exc
         return Claim(**dict(row))
+
+    async def list_upgrade_offers(self, tenant_id: str) -> list[UpgradeOffer]:
+        """Slice 5: for each of this tenant's claims, compare the `tool_set` DECLARED on
+        the version it's pinned to against the one declared on the type's current
+        (highest-numbered) version. Never touches the gateway or any live device — this is
+        entirely a diff between two rows of curator-entered data."""
+        rows = await self._db.pool.fetch(
+            """
+            SELECT c.hostname, c.device_type_id, t.slug,
+                   c.version AS claimed_version, cv.tool_set AS claimed_tool_set,
+                   latest.version AS current_version, latest.tool_set AS current_tool_set
+            FROM claims c
+            JOIN device_types t ON t.id = c.device_type_id
+            JOIN device_type_versions cv
+                ON cv.device_type_id = c.device_type_id AND cv.version = c.version
+            JOIN LATERAL (
+                SELECT version, tool_set FROM device_type_versions
+                WHERE device_type_id = c.device_type_id
+                ORDER BY version DESC LIMIT 1
+            ) latest ON true
+            WHERE c.tenant_id = $1
+            """,
+            tenant_id,
+        )
+        offers: list[UpgradeOffer] = []
+        for row in rows:
+            if row["current_version"] == row["claimed_version"]:
+                continue  # already on the current curated version — nothing to offer
+            diff: Optional[ToolSetDiff] = None
+            if row["claimed_tool_set"] is not None and row["current_tool_set"] is not None:
+                d = tool_diff.diff_tools(row["claimed_tool_set"], row["current_tool_set"])
+                diff = ToolSetDiff(
+                    added=d.added,
+                    removed=d.removed,
+                    changed=d.changed,
+                    breaking=d.breaking,
+                    breaking_reasons=d.breaking_reasons,
+                )
+            offers.append(
+                UpgradeOffer(
+                    hostname=row["hostname"],
+                    device_type_id=row["device_type_id"],
+                    slug=row["slug"],
+                    claimed_version=row["claimed_version"],
+                    current_version=row["current_version"],
+                    diff=diff,
+                )
+            )
+        return offers
