@@ -35,10 +35,13 @@ from device_mcp_gateway.cfg import (
 from device_mcp_gateway.shared.keys import KEYS
 from device_mcp_gateway.support_grants import (
     InMemoryPendingSupportRequestStore,
+    InMemoryStandingConsentStore,
     InMemorySupportGrantStore,
     RedisPendingSupportRequestStore,
+    RedisStandingConsentStore,
     RedisSupportGrantStore,
     pending_support_request_store,
+    standing_consent_store,
     support_grant_store,
 )
 
@@ -290,6 +293,88 @@ async def test_self_issued_and_step_up_flags_round_trip():
     assert result.grant.self_issued is True
 
 
+# --- list_active: "who can reach my stack right now" ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_active_shows_a_freshly_issued_grant():
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60)
+
+    listed = await store.list_active()
+
+    assert [g.id for g in listed] == [grant.id]
+
+
+@pytest.mark.asyncio
+async def test_list_active_excludes_a_revoked_grant():
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60)
+    await store.revoke(grant.id)
+
+    assert await store.list_active() == []
+
+
+@pytest.mark.asyncio
+async def test_list_active_excludes_an_expired_grant():
+    store = InMemorySupportGrantStore()
+    await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=-1)
+    assert await store.list_active() == []
+
+
+# --- standing consent: in-memory ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enabling_standing_consent_round_trips():
+    store = InMemoryStandingConsentStore()
+    await store.enable(scopes=SCOPES, enabled_by="admin1", ttl_seconds=60)
+
+    consent = await store.get()
+
+    assert consent is not None
+    assert consent.scopes == SCOPES
+    assert consent.enabled_by == "admin1"
+    assert consent.degraded is False
+
+
+@pytest.mark.asyncio
+async def test_no_standing_consent_ever_enabled_is_none():
+    store = InMemoryStandingConsentStore()
+    assert await store.get() is None
+
+
+@pytest.mark.asyncio
+async def test_a_lapsed_standing_consent_reads_as_none():
+    store = InMemoryStandingConsentStore()
+    await store.enable(scopes=SCOPES, enabled_by="admin1", ttl_seconds=-1)
+    assert await store.get() is None
+
+
+@pytest.mark.asyncio
+async def test_disabling_standing_consent_reports_whether_anything_was_on():
+    store = InMemoryStandingConsentStore()
+    await store.enable(scopes=SCOPES, enabled_by="admin1", ttl_seconds=60)
+
+    first = await store.disable()
+    second = await store.disable()
+
+    assert (first, second) == (True, False)
+    assert await store.get() is None
+
+
+@pytest.mark.asyncio
+async def test_re_enabling_replaces_the_prior_setting():
+    store = InMemoryStandingConsentStore()
+    await store.enable(scopes=frozenset({"devices:read"}), enabled_by="admin1", ttl_seconds=60)
+    await store.enable(scopes=frozenset({"tools:call"}), enabled_by="admin2", ttl_seconds=60)
+
+    consent = await store.get()
+
+    assert consent.scopes == frozenset({"tools:call"})
+    assert consent.enabled_by == "admin2"
+
+
 # --- the Redis stores, against real Redis -------------------------------------------------
 #
 # Same reasoning as test_write_planned.py's own Redis section: the atomicity claim rests on a
@@ -415,6 +500,78 @@ async def test_redis_grant_ttl_really_expires(real_redis):
     assert result.reason in ("expired", "not_found"), "Redis may have already reaped the key via its own TTL"
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redis_list_active_shows_a_freshly_issued_grant(real_redis):
+    store = RedisSupportGrantStore(real_redis)
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60)
+
+    listed = await store.list_active()
+
+    assert [g.id for g in listed] == [grant.id]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redis_list_active_excludes_a_revoked_grant(real_redis):
+    store = RedisSupportGrantStore(real_redis)
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60)
+    await store.revoke(grant.id)
+
+    assert await store.list_active() == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redis_list_active_self_heals_a_naturally_expired_member(real_redis):
+    store = RedisSupportGrantStore(real_redis)
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=1)
+    await asyncio.sleep(1.3)
+
+    listed = await store.list_active()
+
+    assert listed == []
+    assert not await real_redis.sismember(KEYS.support_active_grants_index, grant.id)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redis_standing_consent_round_trips(real_redis):
+    store = RedisStandingConsentStore(real_redis)
+    await store.enable(scopes=SCOPES, enabled_by="admin1", ttl_seconds=60)
+
+    consent = await store.get()
+
+    assert consent is not None
+    assert consent.scopes == SCOPES
+    assert consent.enabled_by == "admin1"
+    assert consent.degraded is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redis_standing_consent_ttl_really_expires(real_redis):
+    store = RedisStandingConsentStore(real_redis)
+    await store.enable(scopes=SCOPES, enabled_by="admin1", ttl_seconds=1)
+    assert await store.get() is not None
+
+    await asyncio.sleep(1.3)
+
+    assert await store.get() is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redis_disabling_standing_consent_reports_whether_anything_was_on(real_redis):
+    store = RedisStandingConsentStore(real_redis)
+    await store.enable(scopes=SCOPES, enabled_by="admin1", ttl_seconds=60)
+
+    first = await store.disable()
+    second = await store.disable()
+
+    assert (first, second) == (True, False)
+
+
 # --- the Redis stores degrade rather than fail the caller -----------------------------------
 
 
@@ -478,6 +635,28 @@ async def test_a_dead_redis_degrades_the_grant_store_rather_than_raising():
 
 
 @pytest.mark.asyncio
+async def test_a_dead_redis_degrades_list_active_rather_than_raising():
+    store = RedisSupportGrantStore(_DeadRedis())
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60)
+
+    listed = await store.list_active()
+
+    assert [g.id for g in listed] == [grant.id]
+    assert listed[0].degraded is True
+
+
+@pytest.mark.asyncio
+async def test_a_dead_redis_degrades_standing_consent_rather_than_raising():
+    store = RedisStandingConsentStore(_DeadRedis())
+    await store.enable(scopes=SCOPES, enabled_by="admin1", ttl_seconds=60)
+
+    consent = await store.get()
+
+    assert consent is not None
+    assert consent.degraded is True
+
+
+@pytest.mark.asyncio
 async def test_degraded_poll_still_delivers_exactly_once_within_the_process():
     """The fallback's guarantee is process-local, not cluster-wide — but within the one
     process that is degraded, one-shot delivery must still mean one-shot."""
@@ -511,6 +690,15 @@ def test_support_grant_store_creates_and_keeps_one_when_nothing_was_wired():
     store = support_grant_store(state)
     assert isinstance(store, InMemorySupportGrantStore)
     assert support_grant_store(state) is store, "created once, reused after"
+
+
+def test_standing_consent_store_creates_and_keeps_one_when_nothing_was_wired():
+    from types import SimpleNamespace
+
+    state = SimpleNamespace()
+    store = standing_consent_store(state)
+    assert isinstance(store, InMemoryStandingConsentStore)
+    assert standing_consent_store(state) is store, "created once, reused after"
 
 
 def test_lazy_getters_survive_a_state_object_that_refuses_new_attributes():

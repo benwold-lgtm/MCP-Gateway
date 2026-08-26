@@ -32,10 +32,18 @@ it. Request ids are `secrets.token_urlsafe(24)` — the same CSPRNG-with-no-stru
 identifier: "a capability... generated from a CSPRNG... not a sequence, timestamp, counter, or
 operator-derived value."
 
-This module knows nothing about tokens, HTTP, or how a credential is verified — it persists
-pending requests and grants, and a caller (the API layer, and later the credential-minting/
-verification code) decides what to do with them. That split mirrors `write_planned.py`'s own
-separation from `api/write_planned.py`.
+This module knows nothing about HTTP — it persists pending requests, grants, and the
+standing-consent setting, and a caller (`api/support_requests.py`) decides what to do with
+them. That split mirrors `write_planned.py`'s own separation from `api/write_planned.py`.
+
+**The bearer credential IS the grant's own `id`, not a separately signed token.** The original
+plan called for a `plan_token.py`-style HMAC-signed token, on the reasoning that a self-
+verifying token needs no store round-trip to check. That reasoning does not survive contact
+with §8: revocation must be checked *live*, so a store lookup happens on every authenticated
+request regardless of what the bearer looks like — a signature buys nothing once that lookup
+is mandatory. `id` is already `secrets.token_urlsafe(24)` (192 bits), exactly the entropy a
+bearer token needs, and `SupportGrantStore.check` is already the live lookup a signed token
+would still require. One mechanism, not two.
 """
 
 from __future__ import annotations
@@ -171,8 +179,9 @@ class SupportGrantStore(Protocol):
         step_up_verified: bool = False,
         self_issued: bool = False,
     ) -> SupportGrant:
-        """Mint a live grant. Returns it with a fresh, unguessable `id` — the id a Tier-0
-        bearer's payload carries and this store is later keyed on."""
+        """Mint a live grant. Returns it with a fresh, unguessable `id` — the value IS the
+        Tier-0 bearer credential (see the module docstring for why no separate signed token
+        is needed)."""
         ...
 
     async def check(self, grant_id: str) -> GrantCheckResult:
@@ -180,10 +189,53 @@ class SupportGrantStore(Protocol):
         not once at redemption. Never mutates anything; only `revoke` does."""
         ...
 
+    async def list_active(self) -> list[SupportGrant]:
+        """Every grant that is currently live (not expired, not revoked) — what the tenant
+        console reads to show "who can reach my stack right now" and offer a revoke button
+        (ADR-0017 §2's own framing of the control this whole ADR exists to give the tenant)."""
+        ...
+
     async def revoke(self, grant_id: str) -> GrantCheckResult:
         """End a live grant early (ADR-0017 §8). Idempotent: revoking an already-revoked or
         already-expired grant is reported via `reason`, not an exception — a tenant admin
         clicking revoke twice must never see an error for the second click."""
+        ...
+
+
+@dataclass(frozen=True)
+class StandingConsent:
+    """ADR-0017 §3: a tenant-wide setting, not a different mechanism from an approved grant —
+    only a different trigger. While enabled, a raised request whose scopes are a subset of
+    `scopes` is self-issued immediately, skipping the pending-request/approval step entirely;
+    every other property (absolute expiry, revocability, audit visibility) is identical to an
+    approved grant.
+
+    This record's own `expires_at` is the SETTING's term (§3's resolved open question: a
+    months-scale ceiling, tenant-configurable within `support_standing_consent_max_seconds`),
+    not any individual grant's window — a self-issued grant still gets the same
+    `support_grant_ttl_seconds` window an approved one would."""
+
+    scopes: frozenset[str]
+    enabled_by: str
+    enabled_at: float
+    expires_at: float
+    degraded: bool = False
+
+
+class StandingConsentStore(Protocol):
+    async def get(self) -> Optional[StandingConsent]:
+        """The current setting, or None if never enabled or its own term has lapsed."""
+        ...
+
+    async def enable(self, *, scopes: frozenset[str], enabled_by: str, ttl_seconds: int) -> StandingConsent:
+        """Turn standing consent on (or replace whatever was set), for `ttl_seconds` — the
+        SETTING's own term, capped by the deployment's configured ceiling by the caller, not
+        by this store."""
+        ...
+
+    async def disable(self) -> bool:
+        """Turn standing consent off. False if it was already off — a tenant admin disabling
+        an already-disabled setting must never see an error."""
         ...
 
 
@@ -305,6 +357,12 @@ class InMemorySupportGrantStore:
             return GrantCheckResult(ok=False, reason="expired")
         return GrantCheckResult(ok=True, grant=grant)
 
+    async def list_active(self) -> list[SupportGrant]:
+        now = time.time()
+        for grant_id in [gid for gid, g in self._by_id.items() if now >= g.expires_at]:
+            del self._by_id[grant_id]
+        return [g for g in self._by_id.values() if g.revoked_at is None]
+
     async def revoke(self, grant_id: str) -> GrantCheckResult:
         grant = self._by_id.get(grant_id)
         if grant is None:
@@ -317,6 +375,33 @@ class InMemorySupportGrantStore:
         revoked = replace(grant, revoked_at=time.time())
         self._by_id[grant_id] = revoked
         return GrantCheckResult(ok=True, grant=revoked)
+
+
+class InMemoryStandingConsentStore:
+    """Per-process store for embedded mode, tests, and the Redis fallback."""
+
+    def __init__(self) -> None:
+        self._consent: Optional[StandingConsent] = None
+
+    async def get(self) -> Optional[StandingConsent]:
+        if self._consent is None:
+            return None
+        if time.time() >= self._consent.expires_at:
+            self._consent = None
+            return None
+        return self._consent
+
+    async def enable(self, *, scopes: frozenset[str], enabled_by: str, ttl_seconds: int) -> StandingConsent:
+        now = time.time()
+        self._consent = StandingConsent(
+            scopes=scopes, enabled_by=enabled_by, enabled_at=now, expires_at=now + ttl_seconds
+        )
+        return self._consent
+
+    async def disable(self) -> bool:
+        was_set = self._consent is not None
+        self._consent = None
+        return was_set
 
 
 class RedisPendingSupportRequestStore:
@@ -558,6 +643,7 @@ class RedisSupportGrantStore:
             },
         )
         pipe.expire(key, ttl_seconds)
+        pipe.sadd(KEYS.support_active_grants_index, grant_id)
         await pipe.execute()
         return SupportGrant(
             id=grant_id,
@@ -588,6 +674,32 @@ class RedisSupportGrantStore:
             return GrantCheckResult(ok=False, reason="expired")
         return GrantCheckResult(ok=True, grant=grant)
 
+    async def list_active(self) -> list[SupportGrant]:
+        try:
+            return await self._list_active()
+        except Exception as exc:  # noqa: BLE001 — see class docstring
+            logger.warning(f"support grant store fell back to process-local state: {exc}")
+            return [replace(g, degraded=True) for g in await self._fallback.list_active()]
+
+    async def _list_active(self) -> list[SupportGrant]:
+        index_key = KEYS.support_active_grants_index
+        member_bytes = await self._r.smembers(index_key)
+        members = [m.decode() if isinstance(m, bytes) else m for m in member_bytes]
+        out = []
+        stale = []
+        for grant_id in members:
+            result = await self._check(grant_id)
+            if result.ok and result.grant is not None:
+                out.append(result.grant)
+            else:
+                # Expired (TTL already reaped it) or revoked — either way it no longer
+                # belongs in "currently active"; self-heal the index rather than carry a
+                # growing set of dead members forward.
+                stale.append(grant_id)
+        if stale:
+            await self._r.srem(index_key, *stale)
+        return out
+
     async def revoke(self, grant_id: str) -> GrantCheckResult:
         try:
             return await self._revoke(grant_id)
@@ -608,7 +720,72 @@ class RedisSupportGrantStore:
             return GrantCheckResult(ok=False, reason="expired")
         now = time.time()
         await self._r.hset(key, "revoked_at", str(now))
+        await self._r.srem(KEYS.support_active_grants_index, grant_id)
         return GrantCheckResult(ok=True, grant=replace(grant, revoked_at=now))
+
+
+class RedisStandingConsentStore:
+    """Store shared across gateway replicas. Falls back to an in-process store on any Redis
+    error — same trade every other store in this module already makes."""
+
+    def __init__(self, redis_client: Any) -> None:
+        self._r = redis_client
+        self._fallback = InMemoryStandingConsentStore()
+
+    async def get(self) -> Optional[StandingConsent]:
+        try:
+            return await self._get()
+        except Exception as exc:  # noqa: BLE001 — see class docstring
+            logger.warning(f"standing consent store fell back to process-local state: {exc}")
+            consent = await self._fallback.get()
+            return replace(consent, degraded=True) if consent is not None else None
+
+    async def _get(self) -> Optional[StandingConsent]:
+        raw = _decode(await self._r.hgetall(KEYS.support_standing_consent))
+        if not raw:
+            return None
+        expires_at = float(raw["expires_at"])
+        if time.time() >= expires_at:
+            return None
+        return StandingConsent(
+            scopes=frozenset(s for s in raw["scopes"].split(",") if s),
+            enabled_by=raw["enabled_by"],
+            enabled_at=float(raw["enabled_at"]),
+            expires_at=expires_at,
+        )
+
+    async def enable(self, *, scopes: frozenset[str], enabled_by: str, ttl_seconds: int) -> StandingConsent:
+        try:
+            return await self._enable(scopes=scopes, enabled_by=enabled_by, ttl_seconds=ttl_seconds)
+        except Exception as exc:  # noqa: BLE001 — see class docstring
+            logger.warning(f"standing consent store fell back to process-local state: {exc}")
+            consent = await self._fallback.enable(scopes=scopes, enabled_by=enabled_by, ttl_seconds=ttl_seconds)
+            return replace(consent, degraded=True)
+
+    async def _enable(self, *, scopes: frozenset[str], enabled_by: str, ttl_seconds: int) -> StandingConsent:
+        now = time.time()
+        key = KEYS.support_standing_consent
+        pipe = self._r.pipeline(transaction=True)
+        pipe.hset(
+            key,
+            mapping={
+                "scopes": ",".join(sorted(scopes)),
+                "enabled_by": enabled_by,
+                "enabled_at": str(now),
+                "expires_at": str(now + ttl_seconds),
+            },
+        )
+        pipe.expire(key, ttl_seconds)
+        await pipe.execute()
+        return StandingConsent(scopes=scopes, enabled_by=enabled_by, enabled_at=now, expires_at=now + ttl_seconds)
+
+    async def disable(self) -> bool:
+        try:
+            deleted = await self._r.delete(KEYS.support_standing_consent)
+            return bool(deleted)
+        except Exception as exc:  # noqa: BLE001 — see class docstring
+            logger.warning(f"standing consent store fell back to process-local state: {exc}")
+            return await self._fallback.disable()
 
 
 def _request_from_row(request_id: str, row: dict[str, Any]) -> PendingSupportRequest:
@@ -665,6 +842,18 @@ def support_grant_store(app_state: Any) -> SupportGrantStore:
         store = InMemorySupportGrantStore()
         try:
             app_state.support_grants = store
+        except Exception:  # noqa: BLE001 — a read-only fake state object is not a failure
+            pass
+    return store
+
+
+def standing_consent_store(app_state: Any) -> StandingConsentStore:
+    """The app's standing-consent store, creating a process-local one if nothing was wired."""
+    store = getattr(app_state, "support_standing_consent", None)
+    if store is None:
+        store = InMemoryStandingConsentStore()
+        try:
+            app_state.support_standing_consent = store
         except Exception:  # noqa: BLE001 — a read-only fake state object is not a failure
             pass
     return store

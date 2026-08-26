@@ -120,6 +120,8 @@ def test_parity_table_covers_every_key_building_member():
         "support_request",
         "support_grant",
         "support_pending_index",
+        "support_active_grants_index",
+        "support_standing_consent",
     }
     assert members == covered, f"parity table out of sync with KeyBuilder: {members ^ covered}"
 
@@ -194,6 +196,8 @@ def _key_samples(kb: KeyBuilder) -> list[tuple[str, str]]:
         ("support_request", kb.support_request("r1")),
         ("support_grant", kb.support_grant("g1")),
         ("support_pending_index", kb.support_pending_index),
+        ("support_active_grants_index", kb.support_active_grants_index),
+        ("support_standing_consent", kb.support_standing_consent),
     ]
 
 
