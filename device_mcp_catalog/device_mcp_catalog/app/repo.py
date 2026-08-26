@@ -16,6 +16,7 @@ import asyncpg
 from .db import Database
 from .schemas import (
     Assignment,
+    Claim,
     CreateDeviceType,
     DeviceType,
     DeviceTypeDetail,
@@ -35,6 +36,14 @@ class DeviceTypeNotFound(Exception):
 class AssignmentNotFound(Exception):
     """Raised on a revoke with nothing active to revoke — either it was never assigned, or
     it already was."""
+
+    pass
+
+
+class DeviceTypeVersionNotFound(Exception):
+    """Raised recording a claim against a (device_type_id, version) pair that was never
+    curated — the FK catches it; this just gives the route a named condition to answer
+    with instead of a raw constraint-violation 500."""
 
     pass
 
@@ -212,3 +221,37 @@ class AssignmentRepo:
             tenant_id,
         )
         return [DeviceType(**dict(row)) for row in rows]
+
+
+class ClaimRepo:
+    """ADR-0020 §4: records which device-type version a tenant's claimed device came from —
+    the baseline slice 5's upgrade-offer diff reads. Deliberately NOT the same table as
+    `assignments`: an assignment is an offer that can be revoked with nothing ever claimed
+    against it, and a claim can outlive the assignment that produced it (revoking an offer
+    does not un-register the tenant's already-claimed device, ADR-0020 §2)."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def record_claim(self, device_type_id: uuid.UUID, version: int, tenant_id: str, hostname: str) -> Claim:
+        claim_id = uuid.uuid4()
+        try:
+            row = await self._db.pool.fetchrow(
+                """
+                INSERT INTO claims (id, device_type_id, version, tenant_id, hostname)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (tenant_id, hostname) DO UPDATE
+                    SET device_type_id = EXCLUDED.device_type_id,
+                        version = EXCLUDED.version,
+                        claimed_at = now()
+                RETURNING *
+                """,
+                claim_id,
+                device_type_id,
+                version,
+                tenant_id,
+                hostname,
+            )
+        except asyncpg.ForeignKeyViolationError as exc:
+            raise DeviceTypeVersionNotFound((device_type_id, version)) from exc
+        return Claim(**dict(row))

@@ -50,3 +50,15 @@ bearer-token gate as curation.
   old one, so the full assign/revoke history is retained (ADR-0025), not overwritten.
 - `GET /tenants/{tenant_id}/assignments` — the device types currently (not historically)
   assigned to a tenant. This is what the tenant's claim view (slice 4) reads.
+
+## API (claim recording, ADR-0020 §4)
+
+The claim itself happens entirely in the console BFF, against the gateway's own
+`POST /devices` — this service is never in that call path and never sees a tenant credential.
+The one thing recorded here is which curated version a now-registered device came from, so
+slice 5's upgrade-offer diff has a baseline.
+
+- `POST /device-types/{id}/claims` (`{tenant_id, hostname, version}`) — pin a device to the
+  curated version it was registered from. `404` if that `(id, version)` pair was never
+  curated. Re-claiming the same `(tenant_id, hostname)` (a delete + re-register) replaces the
+  pin rather than accumulating a second row for it.
