@@ -46,6 +46,7 @@ from loguru import logger
 from device_mcp_gateway import metrics
 from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_event
 from device_mcp_gateway.shared.keys import KEYS
+from device_mcp_gateway.tenant_notifications import tenant_notification_store
 
 #: Starting defaults from ADR-0023 §3 — instrumented from day one so the real values come
 #: from observed usage rather than from a guess frozen into code. All three are overridable
@@ -280,6 +281,23 @@ async def note_break_glass_use(app_state: Any, principal: Any, *, rid: str = "-"
             window_days=window_days,
             flagged=flagged,
             attributable=getattr(principal, "attributable", True),
+        )
+        # ADR-0017 slice 5, closing the confirmed ADR-0023 gap: until now an activation only
+        # ever reached an audit event, a metric and a log line — nothing a tenant admin who
+        # isn't watching Prometheus would see. This is the durable, tenant-facing surface.
+        await tenant_notification_store(app_state).create(
+            kind="break_glass.activated",
+            subject=subject,
+            message=(
+                f"Break-glass credential {subject} was activated "
+                f"({activity.activations} activation(s) in the last {window_days} day(s))."
+                + (
+                    " This credential has no configured name — this record cannot say who used it."
+                    if not getattr(principal, "attributable", True)
+                    else ""
+                )
+            ),
+            severity="critical" if flagged else "warning",
         )
     except Exception as exc:  # noqa: BLE001 — see the docstring
         logger.warning(f"Break-glass event emission failed for {subject!r}: {exc}. Access itself is unaffected.")

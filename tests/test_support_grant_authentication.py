@@ -16,6 +16,7 @@ import itertools
 
 import pytest
 from fastapi.testclient import TestClient
+from loguru import logger
 
 from device_mcp_gateway.rbac import Principal, scopes_for_role
 
@@ -144,3 +145,56 @@ def test_scopes_for_role_admin_is_unaffected():
     role/scope machinery this module already depends on."""
     p = Principal(subject="key:admin", scopes=scopes_for_role("admin"), auth_method="api_key")
     assert p.support_grant_id is None
+
+
+# --- slice 5: routine per-use attribution -------------------------------------------------
+#
+# Not a pytest fixture: `create_app()` (called from `_client`) runs `setup_logging`, which
+# calls `logger.remove()` and would silently tear down a sink added beforehand — so the sink
+# is added only after the app (and its logging) already exists.
+
+
+class _audit_log:
+    def __enter__(self):
+        self.records: list[dict] = []
+
+        def _sink(message):
+            rec = message.record
+            if rec["extra"].get("event") == "audit":
+                self.records.append(rec["extra"])
+
+        self._sink_id = logger.add(_sink, level="INFO")
+        return self.records
+
+    def __exit__(self, *exc):
+        logger.remove(self._sink_id)
+
+
+def _of(records, action):
+    return [r for r in records if r.get("action") == action]
+
+
+def test_every_use_emits_a_support_grant_use_event(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    credential = _grant_a_support_credential(client, scopes=["devices:read"])
+
+    with _audit_log() as audit_log:
+        client.get("/v1/devices", headers={"Authorization": f"Bearer {credential}"})
+        client.get("/v1/devices", headers={"Authorization": f"Bearer {credential}"})
+
+    uses = _of(audit_log, "support_grant.use")
+    assert len(uses) == 2
+    assert uses[0]["subject"] == "oidc:provider-idp#op1"
+    assert uses[0]["tier"] == "tier0"
+
+
+def test_a_refused_call_never_emits_a_use_event(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    credential = _grant_a_support_credential(client, scopes=["devices:read"])
+    grants = client.get("/v1/support-grants", headers=_admin()).json()["grants"]
+    client.delete(f"/v1/support-grants/{grants[0]['id']}", headers=_admin())
+
+    with _audit_log() as audit_log:
+        client.get("/v1/devices", headers={"Authorization": f"Bearer {credential}"})  # now 401s
+
+    assert _of(audit_log, "support_grant.use") == []

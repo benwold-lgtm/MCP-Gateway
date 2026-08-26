@@ -36,6 +36,7 @@ from device_mcp_gateway.rbac import (
     SCOPE_DEVICES_READ,
     SCOPE_DEVICES_WRITE,
     SCOPE_METRICS_READ,
+    SCOPE_NOTIFICATIONS_READ,
     SCOPE_SUPPORT_ADMINISTER,
     SCOPE_TOOLS_CALL,
     RbacConfigError,
@@ -169,11 +170,19 @@ def test_a_world_readable_secret_is_refused(store):
 def test_console_is_exactly_what_a_password_session_reaches():
     """Mapped from the BFF's relayed routes, not guessed: device CRUD and diagnostics
     (`devices:read`/`devices:write`), `/metrics/summary` (`metrics:read`), the MCP
-    invocation path (`tools:call`), and administering support access (`support:administer`,
+    invocation path (`tools:call`), administering support access (`support:administer`,
     ADR-0017 — the same BFF process mediates both the provider-plane raise and the
-    tenant-plane decide/list/revoke today, pre-ADR-0021)."""
+    tenant-plane decide/list/revoke today, pre-ADR-0021), and reading the tenant-notification
+    surface (`notifications:read`, ADR-0017 slice 5)."""
     assert scopes_for_role("console") == frozenset(
-        {SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_METRICS_READ, SCOPE_TOOLS_CALL, SCOPE_SUPPORT_ADMINISTER}
+        {
+            SCOPE_DEVICES_READ,
+            SCOPE_DEVICES_WRITE,
+            SCOPE_METRICS_READ,
+            SCOPE_TOOLS_CALL,
+            SCOPE_SUPPORT_ADMINISTER,
+            SCOPE_NOTIFICATIONS_READ,
+        }
     )
 
 

@@ -172,6 +172,34 @@ async def test_the_activation_event_carries_the_history_that_makes_it_actionable
     assert event["severity"] == "critical"
 
 
+@pytest.mark.asyncio
+async def test_an_activation_writes_a_durable_tenant_notification():
+    """ADR-0017 slice 5, closing the confirmed ADR-0023 gap: until now an activation only ever
+    reached an audit event, a metric and a log line — nothing a tenant admin who isn't watching
+    Prometheus would see."""
+    state = _state(config={"gateway": {"break_glass_session_gap_minutes": 0}})
+
+    await note_break_glass_use(state, BREAK_GLASS)
+
+    notifications = await state.tenant_notifications.list_recent()
+    [only] = notifications
+    assert only.kind == "break_glass.activated"
+    assert only.subject == "key:alice"
+    assert "key:alice" in only.message
+
+
+@pytest.mark.asyncio
+async def test_a_routine_use_within_a_session_writes_no_second_notification():
+    """Same reasoning as the audit split: one incident is one notification, however many
+    calls it takes — not one per request."""
+    state = _state(config={"gateway": {"break_glass_session_gap_minutes": 60}})
+
+    await note_break_glass_use(state, BREAK_GLASS)
+    await note_break_glass_use(state, BREAK_GLASS)  # inside the same session — routine, not an activation
+
+    assert len(await state.tenant_notifications.list_recent()) == 1
+
+
 # ── §3: flag, never hard-block ───────────────────────────────────────────────────────────
 
 

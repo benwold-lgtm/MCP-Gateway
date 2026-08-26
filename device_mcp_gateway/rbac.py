@@ -29,7 +29,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 
 from device_mcp_gateway import metrics
-from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, AUDIT_OUTCOME_ERROR, audit_event
+from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, AUDIT_OUTCOME_ERROR, AUDIT_OUTCOME_SUCCESS, audit_event
 
 if TYPE_CHECKING:
     from device_mcp_gateway.oidc import MultiIssuerValidator
@@ -54,6 +54,11 @@ SCOPE_BACKUP_EXPORT_PORTABLE = "backup:export-portable"
 # is ordinary fleet-governance authority (who may touch my fleet), not a per-instance
 # elevation, so there is no reason to keep it out of a role's held scopes.
 SCOPE_SUPPORT_ADMINISTER = "support:administer"
+# ADR-0017 slice 5: reading the durable, tenant-facing notification surface (a break-glass
+# activation, a frequently self-issued support grant — things that must not only be logged).
+# A standing bundle member for the same reason as `support:administer` above: this is
+# passive visibility into the tenant's own fleet, not a per-instance elevation.
+SCOPE_NOTIFICATIONS_READ = "notifications:read"
 
 ALL_SCOPES: frozenset[str] = frozenset(
     {
@@ -65,6 +70,7 @@ ALL_SCOPES: frozenset[str] = frozenset(
         SCOPE_BACKUP_WRITE,
         SCOPE_BACKUP_EXPORT_PORTABLE,
         SCOPE_SUPPORT_ADMINISTER,
+        SCOPE_NOTIFICATIONS_READ,
     }
 )
 
@@ -84,7 +90,15 @@ SCOPE_DEVICES_WRITE_PLANNED = "devices:write-planned"
 ROLE_SCOPES: dict[str, frozenset[str]] = {
     "admin": ALL_SCOPES,
     # Manage the fleet (onboard/edit/remove devices, DLQ recovery) but not invoke tools.
-    "operator": frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_METRICS_READ, SCOPE_SUPPORT_ADMINISTER}),
+    "operator": frozenset(
+        {
+            SCOPE_DEVICES_READ,
+            SCOPE_DEVICES_WRITE,
+            SCOPE_METRICS_READ,
+            SCOPE_SUPPORT_ADMINISTER,
+            SCOPE_NOTIFICATIONS_READ,
+        }
+    ),
     "viewer": frozenset({SCOPE_DEVICES_READ, SCOPE_METRICS_READ}),
     # Observability / compliance only — no device access.
     "auditor": frozenset({SCOPE_METRICS_READ}),
@@ -863,6 +877,22 @@ async def _support_grant_principal(request: Request, token: str) -> Optional[Pri
         proof = await store.check_proof(token, timestamp=timestamp, window_seconds=window)
         if not proof.ok:
             return None
+
+    # Slice 5: routine per-use attribution, distinct from the lifecycle events
+    # (raise/approve/revoke) — those record the grant's history, this records that it was
+    # actually exercised, against what, and when. Mirrors `auth.break_glass`'s own per-use
+    # record; unlike break-glass there is no escalation tier here, since every support grant
+    # already passed through an explicit human approval or an operator-configured standing
+    # consent — the thing break-glass's activation split exists to flag doesn't apply.
+    audit_event(
+        "support_grant.use",
+        subject=grant.provider_subject,
+        outcome=AUDIT_OUTCOME_SUCCESS,
+        rid=_audit_rid(request),
+        target=_audit_target(request),
+        grant_id=grant.id,
+        tier="tier1" if grant.bound_public_key is not None else "tier0",
+    )
 
     return Principal(
         subject=grant.provider_subject,

@@ -970,3 +970,87 @@ def standing_consent_store(app_state: Any) -> StandingConsentStore:
         except Exception:  # noqa: BLE001 — a read-only fake state object is not a failure
             pass
     return store
+
+
+# --- self-issue frequency (ADR-0017 slice 5) ---------------------------------------------
+#
+# A standing-consent self-issued grant has no per-instance human approval — the raise route
+# auto-approves it the moment it matches the tenant's own standing setting. That is exactly
+# the situation `breakglass.py`'s reactivation-frequency signal exists for: a path that is
+# silent by construction becomes worth a second look once it fires often. Same shape (a
+# sliding trailing-window counter, refreshed on every count rather than gap-gated — there is
+# no "session" concept for a self-issue the way there is for a break-glass credential still
+# being actively used), deliberately a separate small tracker rather than a reused
+# `BreakGlassActivity`: the two answer genuinely different questions, and this one's Redis
+# key must not share a namespace with a real break-glass credential's subject.
+
+
+@dataclass(frozen=True)
+class SelfIssueActivity:
+    count_in_window: int
+    #: True when the tracker could not reach shared state and answered from process-local
+    #: memory instead — the signal is then per-replica and best-effort, same posture as
+    #: every other degrade-capable store in this module.
+    degraded: bool = False
+
+
+class SelfIssueActivityTracker(Protocol):
+    async def record(self, subject: str, *, window_seconds: int) -> SelfIssueActivity:
+        """Record one standing-consent self-issue by ``subject`` and return the count within
+        the trailing ``window_seconds``. The caller (not the tracker) decides whether that
+        count is worth flagging — same split as `breakglass.py`'s `_settings()`/threshold."""
+        ...
+
+
+class InMemorySelfIssueActivityTracker:
+    def __init__(self) -> None:
+        # subject -> (count, window_expires_epoch)
+        self._seen: dict[str, tuple[int, float]] = {}
+
+    async def record(self, subject: str, *, window_seconds: int) -> SelfIssueActivity:
+        now = time.time()
+        count, window_expires = self._seen.get(subject, (0, 0.0))
+        if now >= window_expires:
+            count = 0
+        count += 1
+        self._seen[subject] = (count, now + window_seconds)
+        return SelfIssueActivity(count_in_window=count)
+
+
+class RedisSelfIssueActivityTracker:
+    """Tracker shared across gateway replicas, so the count is not undercounted per-replica.
+    Falls back to an in-process tracker on any Redis error rather than losing the signal."""
+
+    def __init__(self, redis_client: Any) -> None:
+        self._r = redis_client
+        self._fallback = InMemorySelfIssueActivityTracker()
+
+    async def record(self, subject: str, *, window_seconds: int) -> SelfIssueActivity:
+        try:
+            return await self._record(subject, window_seconds=window_seconds)
+        except Exception as exc:  # noqa: BLE001 — see class docstring
+            logger.warning(f"self-issue activity tracking fell back to process-local state for {subject!r}: {exc}")
+            activity = await self._fallback.record(subject, window_seconds=window_seconds)
+            return replace(activity, degraded=True)
+
+    async def _record(self, subject: str, *, window_seconds: int) -> SelfIssueActivity:
+        key = KEYS.support_self_issue_window(subject)
+        pipe = self._r.pipeline(transaction=True)
+        pipe.hincrby(key, "count", 1)
+        # Slides from the last self-issue, same reasoning as `break_glass_window`: a subject
+        # quiet for a full window starts clean, which is the reason this expires at all.
+        pipe.expire(key, window_seconds)
+        count, _ = await pipe.execute()
+        return SelfIssueActivity(count_in_window=int(count))
+
+
+def self_issue_activity_tracker(app_state: Any) -> SelfIssueActivityTracker:
+    """The app's self-issue tracker, creating a process-local one if nothing was wired."""
+    tracker = getattr(app_state, "support_self_issue_activity", None)
+    if tracker is None:
+        tracker = InMemorySelfIssueActivityTracker()
+        try:
+            app_state.support_self_issue_activity = tracker
+        except Exception:  # noqa: BLE001 — a read-only fake state object is not a failure
+            pass
+    return tracker

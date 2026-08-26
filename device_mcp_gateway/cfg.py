@@ -217,6 +217,21 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         # it. Unrelated to the three lifetimes above: those bound a grant's own existence,
         # this bounds one proof's freshness.
         "proof_window_seconds": _NUM,
+        # Slice 5 (§4's own reasoning, extended to standing consent): a standing-consent
+        # self-issued grant has no per-instance human approval, so a subject self-issuing
+        # very often within this trailing window is flagged — the same "an emergency path
+        # used this routinely has become unreviewed access" signal ADR-0023 §3 already
+        # tracks for break-glass, applied here to the one support-grant path that is
+        # equally silent by construction.
+        "self_issue_review_window_days": _NUM,
+        "self_issue_review_threshold": _NUM,
+    },
+    # Slice 5 / the confirmed ADR-0023 gap: a durable, tenant-facing surface for signals
+    # that must not only be logged (a break-glass activation, a frequently self-issued
+    # support grant) — what a future tenant console polls, not an email/webhook channel.
+    "tenant_notifications": {
+        # Capped by LTRIM, not TTL'd — a fixed-size recent list, not an expiring one.
+        "max_retained": _NUM,
     },
     "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM, "auth_token": str},
     "tracing": {
@@ -449,6 +464,23 @@ def support_proof_window_seconds(cfg: dict[str, Any]) -> float:
     return float(cfg.get("support_requests", {}).get("proof_window_seconds") or 30)
 
 
+def support_self_issue_review_window_days(cfg: dict[str, Any]) -> int:
+    """ADR-0017 slice 5 — trailing window a subject's standing-consent self-issues are
+    counted over. Same 30-day default as break-glass's own review window."""
+    return int(cfg.get("support_requests", {}).get("self_issue_review_window_days") or 30)
+
+
+def support_self_issue_review_threshold(cfg: dict[str, Any]) -> int:
+    """ADR-0017 slice 5 — self-issues within the window above this many flags for review.
+    Same default as break-glass's own threshold — both signals answer the same question."""
+    return int(cfg.get("support_requests", {}).get("self_issue_review_threshold") or 3)
+
+
+def tenant_notifications_max_retained(cfg: dict[str, Any]) -> int:
+    """ADR-0017 slice 5 — how many recent tenant-facing notifications are retained."""
+    return int(cfg.get("tenant_notifications", {}).get("max_retained") or 200)
+
+
 def _defaults() -> dict:
     return {
         "gateway": {
@@ -497,7 +529,10 @@ def _defaults() -> dict:
             "grant_ttl_seconds": 60 * 60,  # 1 hour ceiling on an individual grant (ADR-0017 §2)
             "standing_consent_max_seconds": 90 * 24 * 60 * 60,  # 90 days, a starting default (ADR-0017 §3)
             "proof_window_seconds": 30,  # Tier 1 signature freshness window (ADR-0017 §7)
+            "self_issue_review_window_days": 30,  # slice 5, same shape as break-glass §3
+            "self_issue_review_threshold": 3,
         },
+        "tenant_notifications": {"max_retained": 200},  # slice 5
         "metrics": {"enabled": True, "port": 9100, "gauge_refresh_interval": 15},
         "logging": {"level": "INFO", "audit_retention": "90 days", "audit_enabled": True},
     }
