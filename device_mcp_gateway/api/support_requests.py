@@ -33,6 +33,7 @@ from device_mcp_gateway.cfg import (
 )
 from device_mcp_gateway.rbac import ALL_SCOPES, SCOPE_DEVICES_WRITE_PLANNED, SCOPE_SUPPORT_ADMINISTER, require_scope
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
+from device_mcp_gateway.support_grant_pop import InvalidPublicKey, parse_public_key
 from device_mcp_gateway.support_grants import (
     pending_support_request_store,
     standing_consent_store,
@@ -80,7 +81,12 @@ def _validate_scopes(requested: object) -> frozenset[str]:
 async def raise_support_request(request: Request):
     """A provider operator raises a request. `provider_subject` is attribution only — it is
     recorded, and it is the only identity the poll below will ever deliver a decision to; it
-    authorizes nothing by itself (ADR-0017 §2)."""
+    authorizes nothing by itself (ADR-0017 §2).
+
+    An optional `public_key` (base64 Ed25519) is the operator's opt-in to Tier 1 (§7):
+    submitting one asks that the resulting grant be sender-constrained — every subsequent
+    request must also carry a valid, fresh signature over itself. Omitting it requests the
+    Tier 0 floor, a plain bearer."""
     try:
         body = await request.json()
     except Exception:
@@ -97,11 +103,23 @@ async def raise_support_request(request: Request):
     if len(justification) > _MAX_JUSTIFICATION:
         raise HTTPException(status_code=400, detail=f"'justification' must be at most {_MAX_JUSTIFICATION} chars")
     scopes = _validate_scopes(body.get("requested_scopes"))
+    public_key = body.get("public_key")
+    if public_key is not None:
+        if not isinstance(public_key, str):
+            raise HTTPException(status_code=400, detail="'public_key' must be a string")
+        try:
+            parse_public_key(public_key)
+        except InvalidPublicKey as exc:
+            raise HTTPException(status_code=400, detail=f"'public_key' is invalid: {exc}") from exc
 
     request_store = pending_support_request_store(request.app.state)
     ttl = support_request_ttl_seconds(request.app.state.config)
     request_id = await request_store.create(
-        provider_subject=provider_subject, requested_scopes=scopes, justification=justification, ttl_seconds=ttl
+        provider_subject=provider_subject,
+        requested_scopes=scopes,
+        justification=justification,
+        ttl_seconds=ttl,
+        public_key=public_key,
     )
     # Captured now, while the request is still "pending" — `get()` deliberately only ever
     # sees a pending request (its own contract, matching the reviewer-facing routes below),
@@ -119,6 +137,7 @@ async def raise_support_request(request: Request):
             scopes=scopes,
             ttl_seconds=support_grant_ttl_seconds(request.app.state.config),
             self_issued=True,
+            bound_public_key=public_key,
         )
         await request_store.mark_approved(request_id, grant_id=grant.id, credential=grant.id)
 
@@ -266,6 +285,7 @@ async def approve_support_request(request: Request, request_id: str):
         scopes=pending.requested_scopes,
         ttl_seconds=ttl,
         step_up_verified=bool(body.get("step_up_verified", False)),
+        bound_public_key=pending.public_key,
     )
     delivered = await request_store.mark_approved(request_id, grant_id=grant.id, credential=grant.id)
     if not delivered:

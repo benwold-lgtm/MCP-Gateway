@@ -22,6 +22,7 @@ No route calls any of this yet. What has to be right here, before anything is wi
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -308,6 +309,92 @@ async def test_self_issued_and_step_up_flags_round_trip():
     assert result.grant.self_issued is True
 
 
+@pytest.mark.asyncio
+async def test_bound_public_key_round_trips():
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pubkey123")
+    result = await store.check(grant.id)
+    assert result.grant.bound_public_key == "pubkey123"
+
+
+# --- check_proof: Tier 1 replay defense ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_first_proof_check_succeeds_with_no_prior_high_water_mark():
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+    result = await store.check_proof(grant.id, timestamp=time.time(), window_seconds=30)
+    assert result.ok is True
+    assert result.grant.last_proof_at is not None
+
+
+@pytest.mark.asyncio
+async def test_a_later_timestamp_succeeds_and_becomes_the_new_high_water_mark():
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+    now = time.time()
+    first = await store.check_proof(grant.id, timestamp=now, window_seconds=30)
+    second = await store.check_proof(grant.id, timestamp=now + 1, window_seconds=30)
+    assert (first.ok, second.ok) == (True, True)
+
+
+@pytest.mark.asyncio
+async def test_replaying_the_same_timestamp_is_refused():
+    """The whole point: a captured signature cannot be resubmitted."""
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+    now = time.time()
+    first = await store.check_proof(grant.id, timestamp=now, window_seconds=30)
+    replay = await store.check_proof(grant.id, timestamp=now, window_seconds=30)
+    assert first.ok is True
+    assert (replay.ok, replay.reason) == (False, "stale_proof")
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_timestamp_than_the_high_water_mark_is_refused():
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+    now = time.time()
+    await store.check_proof(grant.id, timestamp=now, window_seconds=30)
+    older = await store.check_proof(grant.id, timestamp=now - 1, window_seconds=30)
+    assert (older.ok, older.reason) == (False, "stale_proof")
+
+
+@pytest.mark.asyncio
+async def test_a_timestamp_outside_the_window_is_refused():
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+    stale = await store.check_proof(grant.id, timestamp=time.time() - 120, window_seconds=30)
+    assert (stale.ok, stale.reason) == (False, "stale_proof")
+
+
+@pytest.mark.asyncio
+async def test_a_future_timestamp_outside_the_window_is_refused():
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+    future = await store.check_proof(grant.id, timestamp=time.time() + 120, window_seconds=30)
+    assert (future.ok, future.reason) == (False, "stale_proof")
+
+
+@pytest.mark.asyncio
+async def test_check_proof_on_a_revoked_grant_is_refused_as_revoked_not_stale_proof():
+    """The liveness check takes priority — a revoked grant is refused for being revoked, a
+    more specific and more useful reason than a generic proof failure."""
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+    await store.revoke(grant.id)
+    result = await store.check_proof(grant.id, timestamp=time.time(), window_seconds=30)
+    assert (result.ok, result.reason) == (False, "revoked")
+
+
+@pytest.mark.asyncio
+async def test_check_proof_on_an_unknown_grant_is_not_found():
+    store = InMemorySupportGrantStore()
+    result = await store.check_proof("never-issued", timestamp=time.time(), window_seconds=30)
+    assert (result.ok, result.reason) == (False, "not_found")
+
+
 # --- list_active: "who can reach my stack right now" ------------------------------------------
 
 
@@ -517,6 +604,40 @@ async def test_redis_grant_ttl_really_expires(real_redis):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_redis_check_proof_accepts_a_fresh_later_timestamp_and_refuses_replay(real_redis):
+    store = RedisSupportGrantStore(real_redis)
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+    now = time.time()
+
+    first = await store.check_proof(grant.id, timestamp=now, window_seconds=30)
+    replay = await store.check_proof(grant.id, timestamp=now, window_seconds=30)
+    later = await store.check_proof(grant.id, timestamp=now + 1, window_seconds=30)
+
+    assert first.ok is True
+    assert (replay.ok, replay.reason) == (False, "stale_proof")
+    assert later.ok is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redis_check_proof_concurrent_replay_has_at_most_one_winner_per_timestamp(real_redis):
+    """Not an atomicity proof like the HSETNX-based stores — `check_proof` is a plain
+    read-modify-write, deliberately (see the module docstring: a narrow race between two
+    *fresh* concurrent requests is not the threat this defends against, only a captured old
+    signature is). This just proves the same exact timestamp can't be accepted twice even
+    under concurrent submission."""
+    store = RedisSupportGrantStore(real_redis)
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+    now = time.time()
+    await store.check_proof(grant.id, timestamp=now, window_seconds=30)
+
+    results = await asyncio.gather(*[store.check_proof(grant.id, timestamp=now, window_seconds=30) for _ in range(10)])
+
+    assert all(not r.ok and r.reason == "stale_proof" for r in results)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_redis_list_active_shows_a_freshly_issued_grant(real_redis):
     store = RedisSupportGrantStore(real_redis)
     grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60)
@@ -644,6 +765,17 @@ async def test_a_dead_redis_degrades_the_grant_store_rather_than_raising():
     assert grant.degraded is True
 
     result = await store.check(grant.id)
+
+    assert result.ok is True
+    assert result.degraded is True
+
+
+@pytest.mark.asyncio
+async def test_a_dead_redis_degrades_check_proof_rather_than_raising():
+    store = RedisSupportGrantStore(_DeadRedis())
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60, bound_public_key="pk")
+
+    result = await store.check_proof(grant.id, timestamp=time.time(), window_seconds=30)
 
     assert result.ok is True
     assert result.degraded is True

@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -822,21 +822,48 @@ def _audit_rid(request: Request) -> str:
     return getattr(getattr(request, "state", None), "request_id", "-")
 
 
-async def _support_grant_principal(app_state: Any, token: str) -> Optional[Principal]:
-    """ADR-0017 §7, Tier 0: resolve a support-grant bearer to a Principal.
+async def _support_grant_principal(request: Request, token: str) -> Optional[Principal]:
+    """ADR-0017 §7: resolve a support-grant bearer to a Principal.
 
     The bearer IS the grant's own id (see `support_grants.py`'s module docstring for why no
     separate signed token exists) — `check` is the live lookup that also enforces revocation
-    on every single request, not once at some earlier redemption. Any non-`ok` result
-    (`not_found`/`expired`/`revoked`) returns `None` here rather than distinguishing why, the
-    same posture an invalid static key or JWT already gets — no verbose failure reason is
-    disclosed for a bad credential of any kind."""
+    on every single request, not once at some earlier redemption.
+
+    A grant with no `bound_public_key` is Tier 0 — the check above is the whole story. A
+    grant WITH one is Tier 1: the caller must additionally present a fresh, valid signature
+    over this exact request (`X-Support-Timestamp` + `X-Support-Signature`), verified here
+    and then checked for liveness-and-replay via `check_proof`. Any failure — missing
+    headers, a bad signature, a stale/replayed timestamp, or the ordinary `check` failing in
+    the first place — returns `None` without distinguishing why, the same posture an invalid
+    static key or JWT already gets."""
+    from device_mcp_gateway.cfg import support_proof_window_seconds
+    from device_mcp_gateway.support_grant_pop import signing_message, verify_signature
     from device_mcp_gateway.support_grants import support_grant_store
 
-    result = await support_grant_store(app_state).check(token)
+    store = support_grant_store(request.app.state)
+    result = await store.check(token)
     if not result.ok or result.grant is None:
         return None
     grant = result.grant
+
+    if grant.bound_public_key is not None:
+        timestamp_header = request.headers.get("x-support-timestamp")
+        signature_header = request.headers.get("x-support-signature")
+        if not timestamp_header or not signature_header:
+            return None
+        try:
+            timestamp = float(timestamp_header)
+        except ValueError:
+            return None
+        path_and_query = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+        message = signing_message(method=request.method, path_and_query=path_and_query, timestamp=timestamp_header)
+        if not verify_signature(public_key_b64=grant.bound_public_key, message=message, signature_b64=signature_header):
+            return None
+        window = support_proof_window_seconds(request.app.state.config)
+        proof = await store.check_proof(token, timestamp=timestamp, window_seconds=window)
+        if not proof.ok:
+            return None
+
     return Principal(
         subject=grant.provider_subject,
         scopes=grant.scopes,
@@ -869,7 +896,7 @@ async def authenticate_request(
             token = credentials.credentials
             if not is_support_grant_token(token):
                 raise
-            resolved = await _support_grant_principal(request.app.state, token)
+            resolved = await _support_grant_principal(request, token)
             if resolved is None:
                 raise
             principal = resolved

@@ -72,7 +72,7 @@ def is_support_grant_token(token: str) -> bool:
 #: infer from a bare `None` — the same discipline `write_planned.GrantCheckReason` already
 #: established for this codebase's other grant store.
 RequestPollReason = Literal["not_found", "pending", "rejected"]
-GrantCheckReason = Literal["not_found", "expired", "revoked"]
+GrantCheckReason = Literal["not_found", "expired", "revoked", "stale_proof"]
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,11 @@ class PendingSupportRequest:
     `provider_subject` is attribution only (ADR-0017 §2: "the provider operator's identity,
     for attribution only — it authorizes nothing") and is also the ONLY subject the poll below
     will ever deliver a decision to — a mismatch reads as not-found, never "found but not
-    yours" (§7's resolved polling question)."""
+    yours" (§7's resolved polling question).
+
+    `public_key` (base64 Ed25519, `support_grant_pop.py`) is the operator's opt-in into Tier 1
+    (§7): submitting one asks that the resulting grant be sender-constrained. `None` requests
+    the Tier 0 floor — a plain bearer, nothing more."""
 
     request_id: str
     provider_subject: str
@@ -90,6 +94,7 @@ class PendingSupportRequest:
     justification: str
     created_at: float
     expires_at: float
+    public_key: Optional[str] = None
     #: True when a Redis-backed store could not reach shared state and answered from
     #: process-local memory instead (same meaning as `write_planned.PendingProposal.degraded`).
     degraded: bool = False
@@ -118,7 +123,14 @@ class SupportGrant:
     records whether the tenant administrator who approved it (or, for a self-issued grant, the
     operator's own session) was in a step-up-verified session — recorded, never required,
     per §7: a tenant whose IdP cannot express `acr` still gets an honest record instead of a
-    silent gap."""
+    silent gap.
+
+    `bound_public_key` set (base64 Ed25519, `support_grant_pop.py`) makes this a Tier 1 grant:
+    every request must also carry a fresh, valid signature over itself, verified against this
+    key, in addition to presenting `id` as the bearer — `None` means Tier 0, a plain bearer.
+    `last_proof_at` is the high-water mark a strictly-newer signed timestamp must clear on
+    every subsequent call — the replay defense, needing no separate nonce cache (see the
+    module docstring of `support_grant_pop.py`)."""
 
     id: str
     provider_subject: str
@@ -128,6 +140,8 @@ class SupportGrant:
     step_up_verified: bool = False
     self_issued: bool = False
     revoked_at: Optional[float] = None
+    bound_public_key: Optional[str] = None
+    last_proof_at: Optional[float] = None
     degraded: bool = False
 
 
@@ -141,7 +155,13 @@ class GrantCheckResult:
 
 class PendingSupportRequestStore(Protocol):
     async def create(
-        self, *, provider_subject: str, requested_scopes: frozenset[str], justification: str, ttl_seconds: int
+        self,
+        *,
+        provider_subject: str,
+        requested_scopes: frozenset[str],
+        justification: str,
+        ttl_seconds: int,
+        public_key: Optional[str] = None,
     ) -> str:
         """Persist a request awaiting a tenant admin's decision. Returns its opaque id."""
         ...
@@ -189,15 +209,27 @@ class SupportGrantStore(Protocol):
         ttl_seconds: int,
         step_up_verified: bool = False,
         self_issued: bool = False,
+        bound_public_key: Optional[str] = None,
     ) -> SupportGrant:
         """Mint a live grant. Returns it with a fresh, unguessable `id` — the value IS the
         Tier-0 bearer credential (see the module docstring for why no separate signed token
-        is needed)."""
+        is needed). `bound_public_key` set makes it Tier 1 instead (§7)."""
         ...
 
     async def check(self, grant_id: str) -> GrantCheckResult:
         """Live validity check — called on every request a Tier-0/Tier-1 bearer authenticates,
-        not once at redemption. Never mutates anything; only `revoke` does."""
+        not once at redemption. Never mutates anything; only `revoke`/`check_proof` do."""
+        ...
+
+    async def check_proof(self, grant_id: str, *, timestamp: float, window_seconds: float) -> GrantCheckResult:
+        """Tier 1's addition to the ordinary liveness check (§7): the grant must be live
+        (not expired/revoked, same as `check`), AND `timestamp` must be within
+        `window_seconds` of the gateway's own clock, AND strictly newer than the highest
+        timestamp this grant has ever presented — the replay defense, with no nonce cache to
+        size or sweep. On success, this timestamp becomes the new high-water mark; unlike
+        `check`, this DOES mutate the grant. Signature verification itself is the caller's
+        job (`support_grant_pop.py`, pure, no store access) — this only enforces liveness and
+        freshness once a signature has already been confirmed valid."""
         ...
 
     async def list_active(self) -> list[SupportGrant]:
@@ -257,7 +289,13 @@ class InMemoryPendingSupportRequestStore:
         self._by_id: dict[str, dict[str, Any]] = {}
 
     async def create(
-        self, *, provider_subject: str, requested_scopes: frozenset[str], justification: str, ttl_seconds: int
+        self,
+        *,
+        provider_subject: str,
+        requested_scopes: frozenset[str],
+        justification: str,
+        ttl_seconds: int,
+        public_key: Optional[str] = None,
     ) -> str:
         now = time.time()
         request_id = secrets.token_urlsafe(24)
@@ -270,6 +308,7 @@ class InMemoryPendingSupportRequestStore:
             "status": "pending",
             "grant_id": None,
             "credential": None,
+            "public_key": public_key,
         }
         return request_id
 
@@ -343,6 +382,7 @@ class InMemorySupportGrantStore:
         ttl_seconds: int,
         step_up_verified: bool = False,
         self_issued: bool = False,
+        bound_public_key: Optional[str] = None,
     ) -> SupportGrant:
         now = time.time()
         grant = SupportGrant(
@@ -353,6 +393,7 @@ class InMemorySupportGrantStore:
             expires_at=now + ttl_seconds,
             step_up_verified=step_up_verified,
             self_issued=self_issued,
+            bound_public_key=bound_public_key,
         )
         self._by_id[grant.id] = grant
         return grant
@@ -367,6 +408,20 @@ class InMemorySupportGrantStore:
             del self._by_id[grant_id]
             return GrantCheckResult(ok=False, reason="expired")
         return GrantCheckResult(ok=True, grant=grant)
+
+    async def check_proof(self, grant_id: str, *, timestamp: float, window_seconds: float) -> GrantCheckResult:
+        live = await self.check(grant_id)
+        if not live.ok or live.grant is None:
+            return live
+        grant = live.grant
+        now = time.time()
+        if timestamp > now + window_seconds or timestamp < now - window_seconds:
+            return GrantCheckResult(ok=False, reason="stale_proof", grant=grant)
+        if grant.last_proof_at is not None and timestamp <= grant.last_proof_at:
+            return GrantCheckResult(ok=False, reason="stale_proof", grant=grant)
+        updated = replace(grant, last_proof_at=timestamp)
+        self._by_id[grant_id] = updated
+        return GrantCheckResult(ok=True, grant=updated)
 
     async def list_active(self) -> list[SupportGrant]:
         now = time.time()
@@ -430,7 +485,13 @@ class RedisPendingSupportRequestStore:
         self._fallback = InMemoryPendingSupportRequestStore()
 
     async def create(
-        self, *, provider_subject: str, requested_scopes: frozenset[str], justification: str, ttl_seconds: int
+        self,
+        *,
+        provider_subject: str,
+        requested_scopes: frozenset[str],
+        justification: str,
+        ttl_seconds: int,
+        public_key: Optional[str] = None,
     ) -> str:
         try:
             return await self._create(
@@ -438,6 +499,7 @@ class RedisPendingSupportRequestStore:
                 requested_scopes=requested_scopes,
                 justification=justification,
                 ttl_seconds=ttl_seconds,
+                public_key=public_key,
             )
         except Exception as exc:  # noqa: BLE001 — see class docstring
             logger.warning(f"support request store fell back to process-local state: {exc}")
@@ -446,10 +508,17 @@ class RedisPendingSupportRequestStore:
                 requested_scopes=requested_scopes,
                 justification=justification,
                 ttl_seconds=ttl_seconds,
+                public_key=public_key,
             )
 
     async def _create(
-        self, *, provider_subject: str, requested_scopes: frozenset[str], justification: str, ttl_seconds: int
+        self,
+        *,
+        provider_subject: str,
+        requested_scopes: frozenset[str],
+        justification: str,
+        ttl_seconds: int,
+        public_key: Optional[str],
     ) -> str:
         now = time.time()
         request_id = secrets.token_urlsafe(24)
@@ -466,6 +535,7 @@ class RedisPendingSupportRequestStore:
                 "status": "pending",
                 "grant_id": "",
                 "credential": "",
+                "public_key": public_key or "",
             },
         )
         pipe.expire(key, ttl_seconds)
@@ -498,6 +568,7 @@ class RedisPendingSupportRequestStore:
             justification=raw["justification"],
             created_at=float(raw["created_at"]),
             expires_at=expires_at,
+            public_key=raw.get("public_key") or None,
         )
 
     async def list_pending(self) -> list[PendingSupportRequest]:
@@ -608,6 +679,7 @@ class RedisSupportGrantStore:
         ttl_seconds: int,
         step_up_verified: bool = False,
         self_issued: bool = False,
+        bound_public_key: Optional[str] = None,
     ) -> SupportGrant:
         try:
             return await self._issue(
@@ -616,6 +688,7 @@ class RedisSupportGrantStore:
                 ttl_seconds=ttl_seconds,
                 step_up_verified=step_up_verified,
                 self_issued=self_issued,
+                bound_public_key=bound_public_key,
             )
         except Exception as exc:  # noqa: BLE001 — see class docstring
             logger.warning(f"support grant store fell back to process-local state: {exc}")
@@ -625,6 +698,7 @@ class RedisSupportGrantStore:
                 ttl_seconds=ttl_seconds,
                 step_up_verified=step_up_verified,
                 self_issued=self_issued,
+                bound_public_key=bound_public_key,
             )
             return replace(grant, degraded=True)
 
@@ -636,6 +710,7 @@ class RedisSupportGrantStore:
         ttl_seconds: int,
         step_up_verified: bool,
         self_issued: bool,
+        bound_public_key: Optional[str],
     ) -> SupportGrant:
         now = time.time()
         grant_id = SUPPORT_GRANT_TOKEN_PREFIX + secrets.token_urlsafe(24)
@@ -651,6 +726,8 @@ class RedisSupportGrantStore:
                 "step_up_verified": "1" if step_up_verified else "0",
                 "self_issued": "1" if self_issued else "0",
                 "revoked_at": "",
+                "bound_public_key": bound_public_key or "",
+                "last_proof_at": "",
             },
         )
         pipe.expire(key, ttl_seconds)
@@ -664,6 +741,7 @@ class RedisSupportGrantStore:
             expires_at=now + ttl_seconds,
             step_up_verified=step_up_verified,
             self_issued=self_issued,
+            bound_public_key=bound_public_key,
         )
 
     async def check(self, grant_id: str) -> GrantCheckResult:
@@ -684,6 +762,27 @@ class RedisSupportGrantStore:
         if time.time() >= grant.expires_at:
             return GrantCheckResult(ok=False, reason="expired")
         return GrantCheckResult(ok=True, grant=grant)
+
+    async def check_proof(self, grant_id: str, *, timestamp: float, window_seconds: float) -> GrantCheckResult:
+        try:
+            return await self._check_proof(grant_id, timestamp=timestamp, window_seconds=window_seconds)
+        except Exception as exc:  # noqa: BLE001 — see class docstring
+            logger.warning(f"support grant store fell back to process-local state: {exc}")
+            result = await self._fallback.check_proof(grant_id, timestamp=timestamp, window_seconds=window_seconds)
+            return replace(result, degraded=True)
+
+    async def _check_proof(self, grant_id: str, *, timestamp: float, window_seconds: float) -> GrantCheckResult:
+        live = await self._check(grant_id)
+        if not live.ok or live.grant is None:
+            return live
+        grant = live.grant
+        now = time.time()
+        if timestamp > now + window_seconds or timestamp < now - window_seconds:
+            return GrantCheckResult(ok=False, reason="stale_proof", grant=grant)
+        if grant.last_proof_at is not None and timestamp <= grant.last_proof_at:
+            return GrantCheckResult(ok=False, reason="stale_proof", grant=grant)
+        await self._r.hset(KEYS.support_grant(grant_id), "last_proof_at", str(timestamp))
+        return GrantCheckResult(ok=True, grant=replace(grant, last_proof_at=timestamp))
 
     async def list_active(self) -> list[SupportGrant]:
         try:
@@ -807,6 +906,7 @@ def _request_from_row(request_id: str, row: dict[str, Any]) -> PendingSupportReq
         justification=row["justification"],
         created_at=row["created_at"],
         expires_at=row["expires_at"],
+        public_key=row.get("public_key"),
     )
 
 
@@ -820,6 +920,8 @@ def _grant_from_raw(grant_id: str, raw: dict[str, str]) -> SupportGrant:
         step_up_verified=raw.get("step_up_verified") == "1",
         self_issued=raw.get("self_issued") == "1",
         revoked_at=float(raw["revoked_at"]) if raw.get("revoked_at") else None,
+        bound_public_key=raw.get("bound_public_key") or None,
+        last_proof_at=float(raw["last_proof_at"]) if raw.get("last_proof_at") else None,
     )
 
 
