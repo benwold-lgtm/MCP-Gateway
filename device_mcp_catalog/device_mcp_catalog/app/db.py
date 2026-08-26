@@ -21,10 +21,19 @@ no `pgcrypto`/`uuid-ossp` extension — one less thing a deployment has to enabl
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import asyncpg
 from loguru import logger
+
+
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Registers a codec so `jsonb` round-trips as Python lists/dicts through asyncpg,
+    which otherwise hands back (and expects) raw JSON text for that type. Needed the
+    moment `tool_set` (slice 5) became this service's first JSONB column."""
+    await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
+
 
 #: Appended to (never rewritten) as later slices add tables — see the module docstring for
 #: why this list is safe to replay against a database that already has some or all of it
@@ -114,6 +123,16 @@ _MIGRATIONS: tuple[str, ...] = (
     CREATE UNIQUE INDEX IF NOT EXISTS claims_tenant_hostname_unique
         ON claims (tenant_id, hostname)
     """,
+    # ADR-0020 §4, slice 5: the tool set a version's shape is DECLARED to imply — hand-
+    # entered by the curator at add_version time (the gateway's own `declared_*` fields on
+    # DeviceConfig are the precedent for this word: self-reported, never independently
+    # measured here, since the catalog never fetches a live spec). Nullable: a version
+    # curated before this column existed, or one the curator never filled in, has nothing
+    # to diff — a distinct condition from "diffed and found no changes" (repo.py's
+    # UpgradeOffer keeps that distinction, never collapsing "no data" into "no changes").
+    """
+    ALTER TABLE device_type_versions ADD COLUMN IF NOT EXISTS tool_set JSONB
+    """,
 )
 
 
@@ -127,7 +146,7 @@ class Database:
         self._pool: Optional[asyncpg.Pool] = None
 
     async def connect(self) -> None:
-        self._pool = await asyncpg.create_pool(self._database_url, min_size=1, max_size=10)
+        self._pool = await asyncpg.create_pool(self._database_url, min_size=1, max_size=10, init=_init_connection)
         async with self._pool.acquire() as conn:
             for stmt in _MIGRATIONS:
                 await conn.execute(stmt)
