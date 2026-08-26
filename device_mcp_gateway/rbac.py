@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -139,6 +139,12 @@ class Principal:
     #: a value that is only valid under a condition is one a later call site reads without
     #: checking the condition.
     attributable: bool = True
+    #: Set only for a principal authenticated via a support-grant bearer (ADR-0017 §7,
+    #: Tier 0). Lets a call site — revocation-interrupt tracking (§8, a later slice) and the
+    #: audit trail — reference exactly which grant authorized this one request, without
+    #: re-deriving it from `subject` (which is the provider operator's own identity, not the
+    #: grant id, and a provider operator may hold more than one grant at a time).
+    support_grant_id: Optional[str] = None
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -816,6 +822,29 @@ def _audit_rid(request: Request) -> str:
     return getattr(getattr(request, "state", None), "request_id", "-")
 
 
+async def _support_grant_principal(app_state: Any, token: str) -> Optional[Principal]:
+    """ADR-0017 §7, Tier 0: resolve a support-grant bearer to a Principal.
+
+    The bearer IS the grant's own id (see `support_grants.py`'s module docstring for why no
+    separate signed token exists) — `check` is the live lookup that also enforces revocation
+    on every single request, not once at some earlier redemption. Any non-`ok` result
+    (`not_found`/`expired`/`revoked`) returns `None` here rather than distinguishing why, the
+    same posture an invalid static key or JWT already gets — no verbose failure reason is
+    disclosed for a bad credential of any kind."""
+    from device_mcp_gateway.support_grants import support_grant_store
+
+    result = await support_grant_store(app_state).check(token)
+    if not result.ok or result.grant is None:
+        return None
+    grant = result.grant
+    return Principal(
+        subject=grant.provider_subject,
+        scopes=grant.scopes,
+        auth_method="support_grant",
+        support_grant_id=grant.id,
+    )
+
+
 async def authenticate_request(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
@@ -827,7 +856,23 @@ async def authenticate_request(
     """
     authenticator = request.app.state.authenticator
     try:
-        principal = await authenticator.authenticate_async(credentials)
+        try:
+            principal = await authenticator.authenticate_async(credentials)
+        except HTTPException as exc:
+            # A support-grant bearer is neither JWT-shaped nor a configured static key, so it
+            # always reaches here first — this is a fallback, tried only once the ordinary
+            # path already refused it, never a shortcut ahead of it.
+            if exc.status_code != 401 or credentials is None:
+                raise
+            from device_mcp_gateway.support_grants import is_support_grant_token
+
+            token = credentials.credentials
+            if not is_support_grant_token(token):
+                raise
+            resolved = await _support_grant_principal(request.app.state, token)
+            if resolved is None:
+                raise
+            principal = resolved
         request.state.principal = principal
         if principal.break_glass:
             # ADR-0023 §2/§3. Hung off the resolved Principal rather than off the
