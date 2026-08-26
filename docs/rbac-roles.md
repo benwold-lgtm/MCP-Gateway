@@ -18,6 +18,7 @@ for the role/scope model; the *decision* behind it is
 | `backup:write` | Apply a restore | `POST /v1/admin/restore/apply` |
 | `backup:export-portable` | **Additionally** export a *portable* archive — credentials re-encrypted to a passphrase instead of the stack key | `POST /v1/admin/backup` with `kind=portable` |
 | `devices:write-planned` | Apply **exactly one** reviewed, digest-bound device-write plan (ADR-0022) | `POST /v1/devices/plans/apply` |
+| `support:administer` | Raise, decide, list and revoke support requests/grants; the standing-consent setting (ADR-0017) | `POST /v1/support-requests`, `GET /v1/support-requests`, `GET/POST .../{id}`, `DELETE /v1/support-grants/{id}` |
 
 > **`backup:read` is not a read-only grant in the ordinary sense.** An archive contains
 > every device's `base_url`, spec URL and configuration, plus its credentials as
@@ -41,6 +42,15 @@ for the role/scope model; the *decision* behind it is
 > `devices:write` reviews and approves it, and only *that* digest becomes appliable. See
 > [ADR-0022](adr/0022-agent-initiated-device-writes-are-plan-bound.md).
 >
+> **`support:administer` is a standing bundle member, unlike `devices:write-planned` above —
+> deliberately.** It gates *who may administer the support mechanism itself* (raise/decide/
+> list/revoke), not the support grant it produces. The grant it produces is what carries the
+> tenant-vocabulary scopes a provider operator actually gets (`devices:read`, `tools:call`,
+> ...) and is checked live via `support_grants.SupportGrantStore.check`, entirely separate
+> from `require_scope`/`ROLE_SCOPES` — a support grant's own subject never becomes a
+> `Principal` with a standing bundle. See
+> [ADR-0017](adr/0017-provider-authority-is-delegated.md).
+>
 > `/health`, `/livez`, `/readyz` and the Prometheus scrape port are unauthenticated infra
 > contracts and are not scope-gated.
 >
@@ -53,15 +63,15 @@ for the role/scope model; the *decision* behind it is
 Two kinds of principal: **humans** operating the UI, and **machines** (an MCP client/agent
 invoking tools over SSE). One scope model serves both.
 
-| Role | `devices:read` | `devices:write` | `tools:call` | `metrics:read` | `backup:read` | `backup:write` | `backup:export-portable` | For |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|-----|
-| **admin** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Full control (human) |
-| **operator** | ✅ | ✅ | — | ✅ | — | — | — | Onboard / edit / remove devices, manage the dead-letter queue — but not invoke tools (human) |
-| **viewer** | ✅ | — | — | ✅ | — | — | — | Read-only (human) — *current `viewer`* |
-| **auditor** | — | — | — | ✅ | — | — | — | Observability / compliance, no device access (human). Widens to `audit:read` when that scope exists |
-| **caller** (agent) | ✅ | — | ✅ | — | — | — | — | An MCP client/agent that discovers and invokes tools — **machine identity**, not a UI role |
-| **backup** (agent) | — | — | — | — | ✅ | ✅ | — | A scheduled backup/restore job — **machine identity**. Deliberately not `admin`: a nightly cron entry should not also be able to invoke tools or edit the fleet, and the portable archive stays an explicit operator action rather than a standing grant |
-| **console** (agent) | ✅ | ✅ | ✅ | ✅ | — | — | — | The console's BFF relaying a **password** session, which has no per-user token to pass through — **machine identity**. `operator` ∪ `caller`, and deliberately no `backup:*` (below) |
+| Role | `devices:read` | `devices:write` | `tools:call` | `metrics:read` | `backup:read` | `backup:write` | `backup:export-portable` | `support:administer` | For |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|-----|
+| **admin** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Full control (human) |
+| **operator** | ✅ | ✅ | — | ✅ | — | — | — | ✅ | Onboard / edit / remove devices, manage the dead-letter queue, administer support access — but not invoke tools (human) |
+| **viewer** | ✅ | — | — | ✅ | — | — | — | — | Read-only (human) — *current `viewer`* |
+| **auditor** | — | — | — | ✅ | — | — | — | — | Observability / compliance, no device access (human). Widens to `audit:read` when that scope exists |
+| **caller** (agent) | ✅ | — | ✅ | — | — | — | — | — | An MCP client/agent that discovers and invokes tools — **machine identity**, not a UI role |
+| **backup** (agent) | — | — | — | — | ✅ | ✅ | — | — | A scheduled backup/restore job — **machine identity**. Deliberately not `admin`: a nightly cron entry should not also be able to invoke tools or edit the fleet, and the portable archive stays an explicit operator action rather than a standing grant |
+| **console** (agent) | ✅ | ✅ | ✅ | ✅ | — | — | — | ✅ | The console's BFF relaying a **password** session, which has no per-user token to pass through — **machine identity**. `operator` ∪ `caller` (both provider- and tenant-plane views live in this one process today, ADR-0017/pre-ADR-0021), and deliberately no `backup:*` (below) |
 
 All seven roles are defined in [`ROLE_SCOPES`](../device_mcp_gateway/rbac.py) today
 (`operator`/`auditor`/`caller` were added with the OIDC work, ADR-0007; `backup` with

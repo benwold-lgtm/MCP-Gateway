@@ -117,6 +117,9 @@ def test_parity_table_covers_every_key_building_member():
         "break_glass_window",
         "write_planned_proposal",
         "write_planned_grant",
+        "support_request",
+        "support_grant",
+        "support_pending_index",
     }
     assert members == covered, f"parity table out of sync with KeyBuilder: {members ^ covered}"
 
@@ -188,6 +191,9 @@ def _key_samples(kb: KeyBuilder) -> list[tuple[str, str]]:
         ("ratelimit", kb.ratelimit("messages:1.2.3.4")),
         ("write_planned_proposal", kb.write_planned_proposal("p1")),
         ("write_planned_grant", kb.write_planned_grant("d1")),
+        ("support_request", kb.support_request("r1")),
+        ("support_grant", kb.support_grant("g1")),
+        ("support_pending_index", kb.support_pending_index),
     ]
 
 
@@ -212,12 +218,16 @@ _KEY_PREFIXES = (
     "reconciler:leader",
     "gateway:gauge-leader",
     "write_planned:",
+    "support:",
 )
 
 # (file, exact string) pairs that look like keys but are not. Each needs a reason.
 _ALLOWED = {
     # An in-process SseTransport label, not a Redis key.
     ("api/fleet.py", "fleet:"),
+    # An RBAC scope constant (ADR-0017), not a Redis key — coincidentally shares the
+    # `support:` namespace with the support-grant keys this same ADR adds.
+    ("rbac.py", "support:administer"),
 }
 
 
