@@ -40,6 +40,7 @@ from device_mcp_gateway.api import probes as api_probes
 from device_mcp_gateway.api import sse as api_sse
 from device_mcp_gateway.api import streamable as api_streamable
 from device_mcp_gateway.api import streamable_fleet as api_streamable_fleet
+from device_mcp_gateway.api import support_requests as api_support_requests
 from device_mcp_gateway.api import write_planned as api_write_planned
 
 # Re-exported for tests and internal callers: these lived here before the router
@@ -63,6 +64,14 @@ from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import MemoryRegistryBackend, RedisRegistryBackend
 from device_mcp_gateway.shared.session_owners import ExpiringOwners
+from device_mcp_gateway.support_grants import (
+    InMemoryPendingSupportRequestStore,
+    InMemoryStandingConsentStore,
+    InMemorySupportGrantStore,
+    RedisPendingSupportRequestStore,
+    RedisStandingConsentStore,
+    RedisSupportGrantStore,
+)
 from device_mcp_gateway.write_planned import (
     InMemoryPendingProposalStore,
     InMemoryWritePlannedGrantStore,
@@ -320,6 +329,14 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.write_planned_proposals = InMemoryPendingProposalStore()
     _app.state.write_planned_grants = InMemoryWritePlannedGrantStore()
 
+    # --- Support requests/grants (ADR-0017) ---
+    # Same in-memory-then-Redis shape as the two stores above. A PendingSupportRequest is
+    # short-lived and delivered once to the raising session; a SupportGrant is checked live on
+    # every request under its bearer, potentially for its whole window.
+    _app.state.support_requests = InMemoryPendingSupportRequestStore()
+    _app.state.support_grants = InMemorySupportGrantStore()
+    _app.state.support_standing_consent = InMemoryStandingConsentStore()
+
     # --- CORS (opt-in; configure cors.allowed_origins in config.yaml) ---
     _allowed_origins = cfg.get("cors", {}).get("allowed_origins", [])
     if _allowed_origins:
@@ -395,6 +412,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             app.state.break_glass_activity = RedisBreakGlassActivity(redis_client)
             app.state.write_planned_proposals = RedisPendingProposalStore(redis_client)
             app.state.write_planned_grants = RedisWritePlannedGrantStore(redis_client)
+            app.state.support_requests = RedisPendingSupportRequestStore(redis_client)
+            app.state.support_grants = RedisSupportGrantStore(redis_client)
+            app.state.support_standing_consent = RedisStandingConsentStore(redis_client)
         else:
             await app.state.store.initialize()
             registry = app.state.registry
@@ -484,6 +504,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     protected.include_router(api_admin.router)
     protected.include_router(api_backup.router)
     protected.include_router(api_write_planned.router)
+    protected.include_router(api_support_requests.router)
 
     # Version the entire management API under /v1 (e.g. /v1/devices). Probes
     # (/health, /livez, /readyz) and the Prometheus scrape endpoint stay unversioned.

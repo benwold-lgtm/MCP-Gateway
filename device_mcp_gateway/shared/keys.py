@@ -210,6 +210,19 @@ class KeyBuilder:
         as already gone, not as an error."""
         return self._k("support:pending")
 
+    @property
+    def support_active_grants_index(self) -> str:
+        """Set of grant ids currently live — what "who can reach my stack right now" (the
+        control ADR-0017 gives the tenant) reads before offering a revoke button. Same
+        best-effort membership caveat as `support_pending_index`."""
+        return self._k("support:active_grants")
+
+    @property
+    def support_standing_consent(self) -> str:
+        """Hash holding the tenant's standing-consent setting (ADR-0017 §3) — global to this
+        gateway, since the setting is a tenant-wide toggle, not per-operator."""
+        return self._k("support:standing_consent")
+
     # --- rate limiting -------------------------------------------------------
 
     def ratelimit(self, key: str) -> str:
