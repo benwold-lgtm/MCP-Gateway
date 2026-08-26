@@ -57,6 +57,17 @@ from loguru import logger
 
 from device_mcp_gateway.shared.keys import KEYS
 
+#: Every grant id starts with this, so `CompositeAuthenticator` (slice 2) can tell "this bearer
+#: might be a support grant" from a cheap prefix check before it does a store round-trip — a
+#: real cost only an invalid-credential request would otherwise always pay (a legitimate OIDC
+#: JWT or static key never reaches this check at all; see rbac.py's ordering).
+SUPPORT_GRANT_TOKEN_PREFIX = "sgr_"
+
+
+def is_support_grant_token(token: str) -> bool:
+    return token.startswith(SUPPORT_GRANT_TOKEN_PREFIX)
+
+
 #: Why a poll or a grant check did not return "ok", named rather than left for the caller to
 #: infer from a bare `None` — the same discipline `write_planned.GrantCheckReason` already
 #: established for this codebase's other grant store.
@@ -335,7 +346,7 @@ class InMemorySupportGrantStore:
     ) -> SupportGrant:
         now = time.time()
         grant = SupportGrant(
-            id=secrets.token_urlsafe(24),
+            id=SUPPORT_GRANT_TOKEN_PREFIX + secrets.token_urlsafe(24),
             provider_subject=provider_subject,
             scopes=scopes,
             issued_at=now,
@@ -627,7 +638,7 @@ class RedisSupportGrantStore:
         self_issued: bool,
     ) -> SupportGrant:
         now = time.time()
-        grant_id = secrets.token_urlsafe(24)
+        grant_id = SUPPORT_GRANT_TOKEN_PREFIX + secrets.token_urlsafe(24)
         key = KEYS.support_grant(grant_id)
         pipe = self._r.pipeline(transaction=True)
         pipe.hset(

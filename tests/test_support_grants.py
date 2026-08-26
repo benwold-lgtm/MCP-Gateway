@@ -34,12 +34,14 @@ from device_mcp_gateway.cfg import (
 )
 from device_mcp_gateway.shared.keys import KEYS
 from device_mcp_gateway.support_grants import (
+    SUPPORT_GRANT_TOKEN_PREFIX,
     InMemoryPendingSupportRequestStore,
     InMemoryStandingConsentStore,
     InMemorySupportGrantStore,
     RedisPendingSupportRequestStore,
     RedisStandingConsentStore,
     RedisSupportGrantStore,
+    is_support_grant_token,
     pending_support_request_store,
     standing_consent_store,
     support_grant_store,
@@ -280,6 +282,19 @@ async def test_revoking_an_unknown_grant_is_not_found():
     store = InMemorySupportGrantStore()
     result = await store.revoke("never-issued")
     assert (result.ok, result.reason) == (False, "not_found")
+
+
+@pytest.mark.asyncio
+async def test_a_grant_id_carries_the_recognizable_prefix():
+    """What `CompositeAuthenticator` (slice 2) cheaply checks before a store round-trip."""
+    store = InMemorySupportGrantStore()
+    grant = await store.issue(provider_subject="op1", scopes=SCOPES, ttl_seconds=60)
+    assert grant.id.startswith(SUPPORT_GRANT_TOKEN_PREFIX)
+    assert is_support_grant_token(grant.id)
+
+
+def test_an_ordinary_static_key_does_not_look_like_a_support_grant_token():
+    assert not is_support_grant_token("a" * 40)
 
 
 @pytest.mark.asyncio
