@@ -29,6 +29,8 @@ from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_request
 from device_mcp_gateway.cfg import (
     support_grant_ttl_seconds,
     support_request_ttl_seconds,
+    support_self_issue_review_threshold,
+    support_self_issue_review_window_days,
     support_standing_consent_max_seconds,
 )
 from device_mcp_gateway.rbac import ALL_SCOPES, SCOPE_DEVICES_WRITE_PLANNED, SCOPE_SUPPORT_ADMINISTER, require_scope
@@ -37,9 +39,11 @@ from device_mcp_gateway.support_grant_inflight import support_grant_inflight_reg
 from device_mcp_gateway.support_grant_pop import InvalidPublicKey, parse_public_key
 from device_mcp_gateway.support_grants import (
     pending_support_request_store,
+    self_issue_activity_tracker,
     standing_consent_store,
     support_grant_store,
 )
+from device_mcp_gateway.tenant_notifications import tenant_notification_store
 
 router = APIRouter(dependencies=[Depends(require_scope(SCOPE_SUPPORT_ADMINISTER))])
 
@@ -141,6 +145,7 @@ async def raise_support_request(request: Request):
             bound_public_key=public_key,
         )
         await request_store.mark_approved(request_id, grant_id=grant.id, credential=grant.id)
+        await _flag_frequent_self_issue(request, provider_subject)
 
     # `justification` is recorded here, once, in the tenant's own audit chain — and nowhere
     # in any API response from here on (§2: "recorded once and never echoed back").
@@ -154,6 +159,44 @@ async def raise_support_request(request: Request):
         self_issued=self_issued,
     )
     return {"request_id": request_id, "requested_scopes": sorted(scopes), "expires_at": expires_at}
+
+
+async def _flag_frequent_self_issue(request: Request, provider_subject: str) -> None:
+    """ADR-0017 slice 5: a self-issued grant had no per-instance human approval — flag it if
+    ``provider_subject`` is self-issuing often enough that standing consent has become
+    unreviewed blanket access, the same "an unattended path used this routinely" signal
+    `breakglass.py`'s reactivation flag already gives the tenant for the other silent path.
+
+    Never blocks — same invariant as break-glass's own flag: this only ever informs."""
+    window_days = support_self_issue_review_window_days(request.app.state.config)
+    threshold = support_self_issue_review_threshold(request.app.state.config)
+    tracker = self_issue_activity_tracker(request.app.state)
+    activity = await tracker.record(provider_subject, window_seconds=window_days * 86400)
+    if activity.count_in_window <= threshold:
+        return
+
+    audit_request(
+        request,
+        "support_grant.standing_consent.frequent_self_issue",
+        outcome=AUDIT_OUTCOME_SUCCESS,
+        target=provider_subject,
+        level="WARNING",
+        severity="high",
+        self_issues_in_window=activity.count_in_window,
+        review_window_days=window_days,
+        signal_degraded=activity.degraded,
+    )
+    await tenant_notification_store(request.app.state).create(
+        kind="support_grant.frequent_self_issue",
+        subject=provider_subject,
+        message=(
+            f"{provider_subject} has self-issued a support grant under standing consent "
+            f"{activity.count_in_window} time(s) in the last {window_days} day(s) — none of "
+            "them reviewed by a person. If this is more than expected, review the standing-"
+            "consent setting."
+        ),
+        severity="warning",
+    )
 
 
 @router.get("/support-requests")

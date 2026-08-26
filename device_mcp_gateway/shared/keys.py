@@ -223,6 +223,22 @@ class KeyBuilder:
         gateway, since the setting is a tenant-wide toggle, not per-operator."""
         return self._k("support:standing_consent")
 
+    def support_self_issue_window(self, subject: str) -> str:
+        """Hash of {self_issues, last_self_issue} over a trailing review window — the same
+        shape as `break_glass_window`, for the same reason: a standing-consent self-issued
+        grant has no per-instance human approval, so a subject self-issuing very often is the
+        signal worth flagging (ADR-0017 slice 5). TTL slides from the last self-issue."""
+        return self._k(f"support:selfissue:{subject}:window")
+
+    @property
+    def tenant_notifications(self) -> str:
+        """Capped list of durable, tenant-facing security notifications (ADR-0017 slice 5 /
+        ADR-0023's confirmed gap) — the surface a tenant console will eventually poll so a
+        break-glass activation or a frequently self-issued support grant is something the
+        tenant is shown, not only something logged. Newest first; capped by LTRIM, not TTL'd,
+        since a fixed-size recent list is the semantics wanted here, not an expiring one."""
+        return self._k("tenant:notifications")
+
     # --- rate limiting -------------------------------------------------------
 
     def ratelimit(self, key: str) -> str:

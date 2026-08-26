@@ -403,7 +403,9 @@ def test_build_returns_composite_with_oidc(monkeypatch):
 
 
 def test_new_seed_roles_present():
-    assert ROLE_SCOPES["operator"] == frozenset({"devices:read", "devices:write", "metrics:read", "support:administer"})
+    assert ROLE_SCOPES["operator"] == frozenset(
+        {"devices:read", "devices:write", "metrics:read", "support:administer", "notifications:read"}
+    )
     assert ROLE_SCOPES["auditor"] == frozenset({SCOPE_METRICS_READ})
     assert ROLE_SCOPES["caller"] == frozenset({"devices:read", "tools:call"})
 

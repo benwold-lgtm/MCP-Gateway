@@ -40,6 +40,7 @@ from device_mcp_gateway.api import probes as api_probes
 from device_mcp_gateway.api import sse as api_sse
 from device_mcp_gateway.api import streamable as api_streamable
 from device_mcp_gateway.api import streamable_fleet as api_streamable_fleet
+from device_mcp_gateway.api import notifications as api_notifications
 from device_mcp_gateway.api import support_requests as api_support_requests
 from device_mcp_gateway.api import write_planned as api_write_planned
 
@@ -48,7 +49,13 @@ from device_mcp_gateway.api import write_planned as api_write_planned
 from device_mcp_gateway.api.dispatch import _GATEWAY_ID, _watch_tool_call_timeout  # noqa: F401
 from device_mcp_gateway.bootstrap import apply_gateway_bootstrap
 from device_mcp_gateway.breakglass import InMemoryBreakGlassActivity, RedisBreakGlassActivity
-from device_mcp_gateway.cfg import load_config, resolve_bind_host, resolve_mode, warn_unsafe_settings
+from device_mcp_gateway.cfg import (
+    load_config,
+    resolve_bind_host,
+    resolve_mode,
+    tenant_notifications_max_retained,
+    warn_unsafe_settings,
+)
 from device_mcp_gateway.lifecycle import (  # noqa: F401  (re-exported, see above)
     _LOOP_HEARTBEAT_INTERVAL,
     _acquire_gauge_leadership,
@@ -71,12 +78,15 @@ from device_mcp_gateway.shared.registry_backend import MemoryRegistryBackend, Re
 from device_mcp_gateway.shared.session_owners import ExpiringOwners
 from device_mcp_gateway.support_grants import (
     InMemoryPendingSupportRequestStore,
+    InMemorySelfIssueActivityTracker,
     InMemoryStandingConsentStore,
     InMemorySupportGrantStore,
     RedisPendingSupportRequestStore,
+    RedisSelfIssueActivityTracker,
     RedisStandingConsentStore,
     RedisSupportGrantStore,
 )
+from device_mcp_gateway.tenant_notifications import InMemoryTenantNotificationStore, RedisTenantNotificationStore
 from device_mcp_gateway.write_planned import (
     InMemoryPendingProposalStore,
     InMemoryWritePlannedGrantStore,
@@ -341,6 +351,12 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.support_requests = InMemoryPendingSupportRequestStore()
     _app.state.support_grants = InMemorySupportGrantStore()
     _app.state.support_standing_consent = InMemoryStandingConsentStore()
+    _app.state.support_self_issue_activity = InMemorySelfIssueActivityTracker()
+
+    # --- Tenant notifications (ADR-0017 slice 5 / the ADR-0023 gap) ---
+    _app.state.tenant_notifications = InMemoryTenantNotificationStore(
+        max_retained=tenant_notifications_max_retained(cfg)
+    )
 
     # --- CORS (opt-in; configure cors.allowed_origins in config.yaml) ---
     _allowed_origins = cfg.get("cors", {}).get("allowed_origins", [])
@@ -420,6 +436,10 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             app.state.support_requests = RedisPendingSupportRequestStore(redis_client)
             app.state.support_grants = RedisSupportGrantStore(redis_client)
             app.state.support_standing_consent = RedisStandingConsentStore(redis_client)
+            app.state.support_self_issue_activity = RedisSelfIssueActivityTracker(redis_client)
+            app.state.tenant_notifications = RedisTenantNotificationStore(
+                redis_client, max_retained=tenant_notifications_max_retained(cfg)
+            )
         else:
             await app.state.store.initialize()
             registry = app.state.registry
@@ -510,6 +530,7 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     protected.include_router(api_backup.router)
     protected.include_router(api_write_planned.router)
     protected.include_router(api_support_requests.router)
+    protected.include_router(api_notifications.router)
 
     # Version the entire management API under /v1 (e.g. /v1/devices). Probes
     # (/health, /livez, /readyz) and the Prometheus scrape endpoint stay unversioned.

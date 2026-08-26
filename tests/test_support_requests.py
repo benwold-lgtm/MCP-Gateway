@@ -387,3 +387,48 @@ def test_standing_consent_requires_scopes(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path)
     resp = client.post("/v1/support-requests/standing-consent", headers=_admin(), json={})
     assert resp.status_code == 400
+
+
+# --- self-issue frequency (slice 5) -----------------------------------------------------
+
+
+def test_frequent_self_issue_creates_a_tenant_notification(monkeypatch, tmp_path):
+    """A self-issued grant has no per-instance human approval — crossing the (default: 3)
+    threshold within the review window is flagged onto the durable notification surface, the
+    same "an unreviewed path used this routinely" signal break-glass's own reactivation flag
+    gives for the other silent path."""
+    client = _client(monkeypatch, tmp_path)
+    client.post("/v1/support-requests/standing-consent", headers=_admin(), json={"scopes": ["devices:read"]})
+
+    for _ in range(4):  # threshold defaults to 3 — the 4th crosses it
+        resp = _raise(client, requested_scopes=["devices:read"])
+        assert resp.status_code == 201
+
+    notifications = client.get("/v1/notifications", headers=_admin()).json()["notifications"]
+    frequent = [n for n in notifications if n["kind"] == "support_grant.frequent_self_issue"]
+    assert len(frequent) == 1
+    assert frequent[0]["subject"] == "oidc:provider-idp#op1"
+    assert frequent[0]["severity"] == "warning"
+
+
+def test_self_issue_below_the_threshold_creates_no_notification(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    client.post("/v1/support-requests/standing-consent", headers=_admin(), json={"scopes": ["devices:read"]})
+
+    _raise(client, requested_scopes=["devices:read"])
+    _raise(client, requested_scopes=["devices:read"])
+
+    notifications = client.get("/v1/notifications", headers=_admin()).json()["notifications"]
+    assert notifications == []
+
+
+def test_a_human_approved_grant_never_counts_toward_self_issue_frequency(monkeypatch, tmp_path):
+    """The frequency signal is specifically about the UNREVIEWED path — a request a human
+    actually approved must never contribute toward flagging standing consent."""
+    client = _client(monkeypatch, tmp_path)
+    for _ in range(4):
+        request_id = _raise(client).json()["request_id"]
+        client.post(f"/v1/support-requests/{request_id}/approve", headers=_admin())
+
+    notifications = client.get("/v1/notifications", headers=_admin()).json()["notifications"]
+    assert [n for n in notifications if n["kind"] == "support_grant.frequent_self_issue"] == []

@@ -122,6 +122,8 @@ def test_parity_table_covers_every_key_building_member():
         "support_pending_index",
         "support_active_grants_index",
         "support_standing_consent",
+        "support_self_issue_window",
+        "tenant_notifications",
     }
     assert members == covered, f"parity table out of sync with KeyBuilder: {members ^ covered}"
 
@@ -198,6 +200,8 @@ def _key_samples(kb: KeyBuilder) -> list[tuple[str, str]]:
         ("support_pending_index", kb.support_pending_index),
         ("support_active_grants_index", kb.support_active_grants_index),
         ("support_standing_consent", kb.support_standing_consent),
+        ("support_self_issue_window", kb.support_self_issue_window("op1")),
+        ("tenant_notifications", kb.tenant_notifications),
     ]
 
 
@@ -223,6 +227,7 @@ _KEY_PREFIXES = (
     "gateway:gauge-leader",
     "write_planned:",
     "support:",
+    "tenant:",
 )
 
 # (file, exact string) pairs that look like keys but are not. Each needs a reason.
