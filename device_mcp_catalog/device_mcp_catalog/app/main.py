@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from . import assignments, device_types
+from . import assignments, claims, device_types
 from .config import load_settings
 from .db import Database
 
@@ -68,6 +68,7 @@ def create_app() -> FastAPI:
 
     app.include_router(device_types.router)
     app.include_router(assignments.router)
+    app.include_router(claims.router)
     return app
 
 

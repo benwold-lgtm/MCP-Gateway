@@ -96,3 +96,24 @@ class TenantAssignmentsResponse(BaseModel):
     #: historically) assigned to this tenant. A revoked assignment is simply absent here,
     #: not a device type with some "revoked" flag on it.
     device_types: list[DeviceType]
+
+
+class RecordClaim(BaseModel):
+    """Slice 4: the BFF calls this immediately after the gateway accepts the tenant's
+    registration, to pin down which curated version that device came from. `version` is
+    supplied by the caller rather than resolved here — this service has one trusted caller
+    (the console BFF), the same trust boundary every other route in this service already
+    rests on."""
+
+    tenant_id: str = Field(min_length=1, max_length=200)
+    hostname: str = Field(min_length=1, max_length=253)
+    version: int = Field(ge=1)
+
+
+class Claim(BaseModel):
+    id: uuid.UUID
+    device_type_id: uuid.UUID
+    version: int
+    tenant_id: str
+    hostname: str
+    claimed_at: datetime.datetime

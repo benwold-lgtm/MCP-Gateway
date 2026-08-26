@@ -91,6 +91,29 @@ _MIGRATIONS: tuple[str, ...] = (
         ON assignments (device_type_id, tenant_id)
         WHERE revoked_at IS NULL
     """,
+    # ADR-0020 §4: which device-type VERSION a tenant's device was registered from — the
+    # baseline slice 5's upgrade-offer diff needs, and the thing that makes "pinned"
+    # checkable independently of whatever the tenant's own gateway record later becomes.
+    # The (device_type_id, version) FK targets device_type_versions' own UNIQUE pair, so a
+    # claim can never point at a version that was never curated. One row per (tenant,
+    # hostname): a hostname is claimed at most once at a time in a tenant's own registry,
+    # so a second claim under the same hostname (a delete + re-register) replaces the row
+    # rather than accumulating stale ones — see ClaimRepo.record_claim's ON CONFLICT.
+    """
+    CREATE TABLE IF NOT EXISTS claims (
+        id              UUID PRIMARY KEY,
+        device_type_id  UUID NOT NULL,
+        version         INTEGER NOT NULL,
+        tenant_id       TEXT NOT NULL,
+        hostname        TEXT NOT NULL,
+        claimed_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        FOREIGN KEY (device_type_id, version) REFERENCES device_type_versions (device_type_id, version)
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS claims_tenant_hostname_unique
+        ON claims (tenant_id, hostname)
+    """,
 )
 
 
