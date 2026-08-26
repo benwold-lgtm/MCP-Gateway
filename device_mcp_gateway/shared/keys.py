@@ -190,6 +190,26 @@ class KeyBuilder:
         """Hash holding a `devices:write-planned` grant, scoped to one plan digest."""
         return self._k(f"write_planned:grant:{digest}")
 
+    # --- support requests and grants (ADR-0017) -------------------------------
+
+    def support_request(self, request_id: str) -> str:
+        """Hash holding a pending support request awaiting a tenant admin's decision."""
+        return self._k(f"support:request:{request_id}")
+
+    def support_grant(self, grant_id: str) -> str:
+        """Hash holding a live support grant — checked on every request under its bearer,
+        not consumed once like a `write_planned` grant (ADR-0017 §2: the credential is
+        valid for its whole window, not a single redemption)."""
+        return self._k(f"support:grant:{grant_id}")
+
+    @property
+    def support_pending_index(self) -> str:
+        """Set of request ids still awaiting a tenant admin's decision — what the tenant
+        console's inbox reads. Membership is best-effort: a hash's own TTL reaps it
+        independently of this index, so a reader must treat a member with no surviving hash
+        as already gone, not as an error."""
+        return self._k("support:pending")
+
     # --- rate limiting -------------------------------------------------------
 
     def ratelimit(self, key: str) -> str:

@@ -191,6 +191,27 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         # than fixed permanently here.
         "repeatable_grant_max_seconds": _NUM,
     },
+    # ADR-0017 — the tenant-minted support grant a provider operator is delegated. A
+    # separate block from `write_planned`, even though the shape (a pending record, an
+    # issued grant, both TTL'd) looks similar: a support grant is checked LIVE on every
+    # request during its whole window, never consumed once like write_planned's grant, so
+    # its lifetimes mean something different and are not reused from that block.
+    "support_requests": {
+        # How long a raised-but-undecided request survives before the provider operator
+        # must re-raise it. Short — this is a live, human-in-the-loop interaction, not an
+        # asynchronous queue, so a stale request is a UX problem more than a security one.
+        "request_ttl_seconds": _NUM,
+        # Validity window for an approved grant — the tenant's own §2 "absolute expiry,
+        # never renewed in place." Deliberately much shorter than a repeatable
+        # (standing-consent) grant's ceiling below.
+        "grant_ttl_seconds": _NUM,
+        # Max lifetime of a grant issued under standing consent (§3) — operates on a
+        # months-scale timescale, deliberately distinct from an individual grant's window.
+        # Same starting-default treatment as `write_planned.repeatable_grant_max_seconds`
+        # and the break-glass credential's 90-day default: instrumented and tuned from
+        # operating history, not fixed permanently here.
+        "standing_consent_max_seconds": _NUM,
+    },
     "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM, "auth_token": str},
     "tracing": {
         "enabled": bool,
@@ -400,6 +421,22 @@ def write_planned_repeatable_max_seconds(cfg: dict[str, Any]) -> int:
     return int(cfg.get("write_planned", {}).get("repeatable_grant_max_seconds") or 30 * 24 * 60 * 60)
 
 
+def support_request_ttl_seconds(cfg: dict[str, Any]) -> int:
+    """ADR-0017 — seconds a raised support request survives before it must be re-raised."""
+    return int(cfg.get("support_requests", {}).get("request_ttl_seconds") or 300)
+
+
+def support_grant_ttl_seconds(cfg: dict[str, Any]) -> int:
+    """ADR-0017 §2 — ceiling on an individual support grant's absolute expiry."""
+    return int(cfg.get("support_requests", {}).get("grant_ttl_seconds") or 60 * 60)
+
+
+def support_standing_consent_max_seconds(cfg: dict[str, Any]) -> int:
+    """ADR-0017 §3 — max lifetime of a grant issued under standing consent. See the schema
+    comment on `support_requests.standing_consent_max_seconds` for why 90 days."""
+    return int(cfg.get("support_requests", {}).get("standing_consent_max_seconds") or 90 * 24 * 60 * 60)
+
+
 def _defaults() -> dict:
     return {
         "gateway": {
@@ -442,6 +479,11 @@ def _defaults() -> dict:
             "proposal_ttl_seconds": 3600,  # 1 hour (ADR-0022)
             "grant_ttl_seconds": 24 * 60 * 60,  # 1 day (ADR-0022)
             "repeatable_grant_max_seconds": 30 * 24 * 60 * 60,  # 30 days, a starting default (ADR-0022 §4)
+        },
+        "support_requests": {
+            "request_ttl_seconds": 300,  # 5 minutes — a live, human-in-the-loop wait (ADR-0017)
+            "grant_ttl_seconds": 60 * 60,  # 1 hour ceiling on an individual grant (ADR-0017 §2)
+            "standing_consent_max_seconds": 90 * 24 * 60 * 60,  # 90 days, a starting default (ADR-0017 §3)
         },
         "metrics": {"enabled": True, "port": 9100, "gauge_refresh_interval": 15},
         "logging": {"level": "INFO", "audit_retention": "90 days", "audit_enabled": True},

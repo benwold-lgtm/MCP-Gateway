@@ -48,6 +48,12 @@ SCOPE_METRICS_READ = "metrics:read"
 SCOPE_BACKUP_READ = "backup:read"
 SCOPE_BACKUP_WRITE = "backup:write"
 SCOPE_BACKUP_EXPORT_PORTABLE = "backup:export-portable"
+# ADR-0017: administering who else may act on this tenant's own gateway — raising, deciding,
+# listing and revoking support requests/grants, and the standing-consent setting. A standing
+# bundle member like `devices:write`, deliberately unlike `devices:write-planned` below: this
+# is ordinary fleet-governance authority (who may touch my fleet), not a per-instance
+# elevation, so there is no reason to keep it out of a role's held scopes.
+SCOPE_SUPPORT_ADMINISTER = "support:administer"
 
 ALL_SCOPES: frozenset[str] = frozenset(
     {
@@ -58,6 +64,7 @@ ALL_SCOPES: frozenset[str] = frozenset(
         SCOPE_BACKUP_READ,
         SCOPE_BACKUP_WRITE,
         SCOPE_BACKUP_EXPORT_PORTABLE,
+        SCOPE_SUPPORT_ADMINISTER,
     }
 )
 
@@ -77,7 +84,7 @@ SCOPE_DEVICES_WRITE_PLANNED = "devices:write-planned"
 ROLE_SCOPES: dict[str, frozenset[str]] = {
     "admin": ALL_SCOPES,
     # Manage the fleet (onboard/edit/remove devices, DLQ recovery) but not invoke tools.
-    "operator": frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_METRICS_READ}),
+    "operator": frozenset({SCOPE_DEVICES_READ, SCOPE_DEVICES_WRITE, SCOPE_METRICS_READ, SCOPE_SUPPORT_ADMINISTER}),
     "viewer": frozenset({SCOPE_DEVICES_READ, SCOPE_METRICS_READ}),
     # Observability / compliance only — no device access.
     "auditor": frozenset({SCOPE_METRICS_READ}),
