@@ -98,16 +98,16 @@ async def raise_support_request(request: Request):
         raise HTTPException(status_code=400, detail=f"'justification' must be at most {_MAX_JUSTIFICATION} chars")
     scopes = _validate_scopes(body.get("requested_scopes"))
 
-    requests = pending_support_request_store(request.app.state)
+    request_store = pending_support_request_store(request.app.state)
     ttl = support_request_ttl_seconds(request.app.state.config)
-    request_id = await requests.create(
+    request_id = await request_store.create(
         provider_subject=provider_subject, requested_scopes=scopes, justification=justification, ttl_seconds=ttl
     )
     # Captured now, while the request is still "pending" — `get()` deliberately only ever
     # sees a pending request (its own contract, matching the reviewer-facing routes below),
     # so reading it again *after* a possible self-issue below would see nothing and silently
     # null this out.
-    pending = await requests.get(request_id)
+    pending = await request_store.get(request_id)
     expires_at = pending.expires_at if pending is not None else None
 
     consent = await standing_consent_store(request.app.state).get()
@@ -120,7 +120,7 @@ async def raise_support_request(request: Request):
             ttl_seconds=support_grant_ttl_seconds(request.app.state.config),
             self_issued=True,
         )
-        await requests.mark_approved(request_id, grant_id=grant.id, credential=grant.id)
+        await request_store.mark_approved(request_id, grant_id=grant.id, credential=grant.id)
 
     # `justification` is recorded here, once, in the tenant's own audit chain — and nowhere
     # in any API response from here on (§2: "recorded once and never echoed back").
@@ -139,8 +139,8 @@ async def raise_support_request(request: Request):
 @router.get("/support-requests")
 async def list_pending_support_requests(request: Request):
     """What the tenant console's inbox reads. A read — unaudited, like `GET .../plans/{id}`."""
-    requests = pending_support_request_store(request.app.state)
-    pending = await requests.list_pending()
+    request_store = pending_support_request_store(request.app.state)
+    pending = await request_store.list_pending()
     return {
         "requests": [
             {
@@ -227,8 +227,8 @@ async def disable_standing_consent(request: Request):
 async def poll_support_request(request: Request, request_id: str, provider_subject: str = Query(...)):
     """The raising session's own view. Scoped strictly to `provider_subject` — a mismatch
     reads exactly like the request never existed (§7: never "found but not yours")."""
-    requests = pending_support_request_store(request.app.state)
-    result = await requests.poll(request_id, provider_subject=provider_subject)
+    request_store = pending_support_request_store(request.app.state)
+    result = await request_store.poll(request_id, provider_subject=provider_subject)
     if result.status is None:
         raise HTTPException(status_code=404, detail="No such request, it has expired, or it was already delivered")
     body: dict = {"status": result.status}
@@ -240,8 +240,8 @@ async def poll_support_request(request: Request, request_id: str, provider_subje
 
 @router.post("/support-requests/{request_id}/approve")
 async def approve_support_request(request: Request, request_id: str):
-    requests = pending_support_request_store(request.app.state)
-    pending = await requests.get(request_id)
+    request_store = pending_support_request_store(request.app.state)
+    pending = await request_store.get(request_id)
     if pending is None:
         raise HTTPException(status_code=404, detail="No such request, or it has expired")
 
@@ -267,7 +267,7 @@ async def approve_support_request(request: Request, request_id: str):
         ttl_seconds=ttl,
         step_up_verified=bool(body.get("step_up_verified", False)),
     )
-    delivered = await requests.mark_approved(request_id, grant_id=grant.id, credential=grant.id)
+    delivered = await request_store.mark_approved(request_id, grant_id=grant.id, credential=grant.id)
     if not delivered:
         # Someone else decided it first (or it expired) between our `get` and now — the grant
         # we just minted is orphaned, so revoke it immediately rather than leaving a live,
@@ -290,11 +290,11 @@ async def approve_support_request(request: Request, request_id: str):
 
 @router.post("/support-requests/{request_id}/reject", status_code=204)
 async def reject_support_request(request: Request, request_id: str):
-    requests = pending_support_request_store(request.app.state)
-    pending = await requests.get(request_id)
+    request_store = pending_support_request_store(request.app.state)
+    pending = await request_store.get(request_id)
     if pending is None:
         raise HTTPException(status_code=404, detail="No such request, or it has expired")
-    if not await requests.mark_rejected(request_id):
+    if not await request_store.mark_rejected(request_id):
         raise HTTPException(status_code=409, detail="This request was already decided, or has expired")
     audit_request(
         request,
