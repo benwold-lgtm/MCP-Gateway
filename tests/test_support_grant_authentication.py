@@ -131,9 +131,9 @@ async def test_a_support_grant_principal_is_not_break_glass():
 
     store = InMemorySupportGrantStore()
     grant = await store.issue(provider_subject="op1", scopes=frozenset({"devices:read"}), ttl_seconds=60)
-    app_state = SimpleNamespace(support_grants=store)
+    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(support_grants=store)))
 
-    principal = await _support_grant_principal(app_state, grant.id)
+    principal = await _support_grant_principal(fake_request, grant.id)
 
     assert principal is not None
     assert principal.break_glass is False

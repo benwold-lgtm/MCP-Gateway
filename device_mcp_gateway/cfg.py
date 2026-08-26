@@ -211,6 +211,12 @@ _CONFIG_SCHEMA: dict[str, Any] = {
         # and the break-glass credential's 90-day default: instrumented and tuned from
         # operating history, not fixed permanently here.
         "standing_consent_max_seconds": _NUM,
+        # ADR-0017 §7, Tier 1: how far a signed request's own timestamp may drift from the
+        # gateway's clock — wide enough to absorb genuine clock skew and network latency,
+        # tight enough that a captured signature is worthless well before anyone could reuse
+        # it. Unrelated to the three lifetimes above: those bound a grant's own existence,
+        # this bounds one proof's freshness.
+        "proof_window_seconds": _NUM,
     },
     "metrics": {"enabled": bool, "port": int, "gauge_refresh_interval": _NUM, "auth_token": str},
     "tracing": {
@@ -437,6 +443,12 @@ def support_standing_consent_max_seconds(cfg: dict[str, Any]) -> int:
     return int(cfg.get("support_requests", {}).get("standing_consent_max_seconds") or 90 * 24 * 60 * 60)
 
 
+def support_proof_window_seconds(cfg: dict[str, Any]) -> float:
+    """ADR-0017 §7, Tier 1 — how far a signed request's timestamp may drift from the
+    gateway's own clock. 30s: generous for clock skew and latency, tight for replay value."""
+    return float(cfg.get("support_requests", {}).get("proof_window_seconds") or 30)
+
+
 def _defaults() -> dict:
     return {
         "gateway": {
@@ -484,6 +496,7 @@ def _defaults() -> dict:
             "request_ttl_seconds": 300,  # 5 minutes — a live, human-in-the-loop wait (ADR-0017)
             "grant_ttl_seconds": 60 * 60,  # 1 hour ceiling on an individual grant (ADR-0017 §2)
             "standing_consent_max_seconds": 90 * 24 * 60 * 60,  # 90 days, a starting default (ADR-0017 §3)
+            "proof_window_seconds": 30,  # Tier 1 signature freshness window (ADR-0017 §7)
         },
         "metrics": {"enabled": True, "port": 9100, "gauge_refresh_interval": 15},
         "logging": {"level": "INFO", "audit_retention": "90 days", "audit_enabled": True},

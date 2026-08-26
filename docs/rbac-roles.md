@@ -51,6 +51,16 @@ for the role/scope model; the *decision* behind it is
 > `Principal` with a standing bundle. See
 > [ADR-0017](adr/0017-provider-authority-is-delegated.md).
 >
+> **A support grant's own bearer is checked by `CompositeAuthenticator` as a third, last-
+> resort path** — tried only once a token fails both the OIDC and static-key checks and
+> starts with `sgr_` (`support_grants.is_support_grant_token`), so an invalid credential of
+> any other shape refuses exactly as fast as before this existed. Tier 0 (§7): the bearer
+> alone. Tier 1: the request submitted a `public_key` at raise time, and every call must
+> additionally carry `X-Support-Timestamp` + `X-Support-Signature` — a fresh Ed25519
+> signature (`support_grant_pop.py`) over `METHOD\npath+query\ntimestamp`, strictly newer
+> than the last one this grant accepted (no nonce cache; see that module's docstring for
+> why a monotonic timestamp closes replay without one).
+>
 > `/health`, `/livez`, `/readyz` and the Prometheus scrape port are unauthenticated infra
 > contracts and are not scope-gated.
 >
