@@ -149,3 +149,48 @@ jobs:
       # cases suppressed inline with justified # nosec).
       - name: Static security scan (bandit)
         run: bandit -r device_mcp_gateway -ll
+
+  # `tests/test_k8s_manifests.py` already checks that every manifest is valid YAML with a
+  # `kind`, plus some targeted structure (HPA targets, scrape annotations). What it cannot
+  # check is whether kustomize can BUILD the bundle: valid YAML in a file that kustomize
+  # never reads passes every one of those assertions. So a broken `resources:` list — a
+  # missing path, a moved file, a bad patch target — was invisible to the whole suite, and
+  # surfaced on the operator's machine at `kubectl apply -k`, which is the worst place for
+  # it. That gap is what this job covers; it does not replace those tests.
+  manifests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both bundles must build. They are applied separately and on different cadences —
+      # the tenant stack once per tenant, the catalog once per estate — so a break in one
+      # says nothing about the other.
+      - name: Tenant stack builds
+        run: kubectl kustomize deploy/kubernetes/ > /tmp/tenant.yaml
+
+      - name: Catalog builds
+        run: kubectl kustomize deploy/kubernetes/catalog/ > /tmp/catalog.yaml
+
+      # The separation itself, asserted rather than assumed. Re-adding the catalog to the
+      # tenant kustomization for one-command-demo convenience is the exact regression this
+      # split exists to prevent (ADR-0020 §1: no tenant reach), and it would otherwise be a
+      # three-line change nobody notices — the stack would come up fine, once per tenant.
+      - name: The tenant stack carries no provider-plane storage
+        run: |
+          if grep -qE 'device-mcp-catalog|catalog-postgres' /tmp/tenant.yaml; then
+            echo "::error::The catalog is back in the tenant stack. It is a provider-plane"
+            echo "::error::object with no tenant reach (ADR-0020 §1), and this bundle is"
+            echo "::error::deployed once PER TENANT — so bundling gives every tenant its own"
+            echo "::error::copy of a store that belongs to no tenant. Apply it separately:"
+            echo "::error::  kubectl apply -k deploy/kubernetes/catalog/"
+            exit 1
+          fi
+
+      - name: The catalog carries no tenant-plane markings
+        run: |
+          if grep -qE 'mcp\.gateway/tenant|plane: tenant' /tmp/catalog.yaml; then
+            echo "::error::The catalog namespace is labelled as a tenant. It belongs to no"
+            echo "::error::tenant, and a per-tenant policy must not be able to select it."
+            exit 1
+          fi

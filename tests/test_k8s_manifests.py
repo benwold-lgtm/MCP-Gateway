@@ -20,13 +20,21 @@ def _load_all(path: Path) -> list:
 
 
 def test_all_manifests_are_valid_yaml():
-    files = list(_K8S.glob("*.yaml"))
+    """**rglob, not glob.** This used to walk only the top level, which was the whole tree
+    right up until the catalog moved into `catalog/` as its own kustomization (ADR-0020 §7).
+    A non-recursive glob does not fail when files move out from under it — it silently
+    covers less, and the suite stays green while asserting nothing about the moved files.
+    Every sub-bundle added from here is covered by construction."""
+    files = sorted(_K8S.rglob("*.yaml"))
     assert files, "no kubernetes manifests found"
+    # Named so a future split is visibly in scope rather than assumed to be.
+    assert any(f.parent != _K8S for f in files), "expected at least one sub-bundle (catalog/)"
     for f in files:
         docs = _load_all(f)
-        assert docs, f"{f.name} produced no documents"
+        rel = f.relative_to(_K8S)
+        assert docs, f"{rel} produced no documents"
         for doc in docs:
-            assert "kind" in doc, f"{f.name} has a document without a kind"
+            assert "kind" in doc, f"{rel} has a document without a kind"
 
 
 def test_hpa_targets_both_deployments():

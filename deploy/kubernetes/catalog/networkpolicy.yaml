@@ -1,0 +1,91 @@
+# NetworkPolicy for the provider-plane catalog.
+#
+# Moved out of the gateway stack's networkpolicy.yaml, where these two rules used to sit as
+# policies 8 and 9. They are unchanged in substance; what changed is that they now live with
+# the component they select, so a tenant stack neither ships them nor has to delete them.
+#
+# ⚠️ Same caveat as the gateway stack's file: NetworkPolicy is purely additive-allow. These
+# say what is *meant* to reach the catalog. Actually denying everything else needs a default
+# -deny in this namespace — see the `default-deny` policy at the end of this file, which the
+# gateway stack has an equivalent of and which this namespace previously inherited by
+# accident, because it shared that namespace.
+
+---
+# ── 1. Default deny ────────────────────────────────────────────────────────────────
+# Previously implicit: the catalog lived in the gateway's namespace and was covered by that
+# namespace's own default-deny. Standing alone, it needs its own, or the two allow rules
+# below would be decorative — every other pod in the cluster could still reach Postgres.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    app.kubernetes.io/name: device-mcp-catalog
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# ── 2. Catalog service ─────────────────────────────────────────────────────────────
+# The ONE cross-namespace path a device-mcp-catalog pod accepts, and it is deliberately
+# narrow: the console BFF's namespace, and nothing else (ADR-0020 §7 — the BFF is exactly
+# the caller the design gives it; the gateway and worker have no reason to reach the catalog
+# at all, and none is granted here).
+#
+# ⚠️ Set the namespace name to wherever your **provider console** BFF runs. `mcp-gateway-ui`
+# is the UI repo's own default namespace. Note this is the provider console specifically: a
+# tenant console has no business reaching the catalog directly — a tenant sees offered device
+# types through its own gateway, which is what keeps ADR-0020 §2's "assignment is an offer,
+# claiming is the tenant's act" a real boundary rather than a UI convention.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: device-mcp-catalog
+  labels:
+    app.kubernetes.io/name: device-mcp-catalog
+spec:
+  podSelector:
+    matchLabels:
+      app: device-mcp-catalog
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-gateway-ui
+      ports:
+        - port: 8100
+          protocol: TCP
+
+---
+# ── 3. Catalog Postgres ────────────────────────────────────────────────────────────
+# The store holding every device type and assignment record in the estate is reachable by
+# the catalog service alone.
+#
+# Standing in its own namespace, this is now an enforcement change and not only a
+# declaration. In the shared namespace it was neither: that namespace's blanket
+# `allow-intra-namespace` rule already permitted any pod beside it to reach Postgres, so
+# this policy documented an intent the topology did not hold to. There is no such blanket
+# allow here, and policy 1 denies by default.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: catalog-postgres
+  labels:
+    app.kubernetes.io/name: catalog-postgres
+spec:
+  podSelector:
+    matchLabels:
+      app: catalog-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: device-mcp-catalog
+      ports:
+        - port: 5432
+          protocol: TCP

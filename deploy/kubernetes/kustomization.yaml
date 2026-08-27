@@ -30,13 +30,22 @@ resources:
   - ingress.yaml
   - pdb.yaml
   - hpa.yaml
-  # ADR-0020: the provider-plane device catalog. A separate component (its own image,
-  # its own database) bundled into this stack's namespace for deployment convenience —
-  # see device_mcp_catalog/README.md and docs/adr/0020-the-device-catalog.md §7 for why
-  # it is still architecturally separate despite living in the same kustomization.
-  - postgres.yaml
-  - catalog-deployment.yaml
-  - catalog-service.yaml
+
+# ── The device catalog is NOT here, deliberately ───────────────────────────────────
+# It used to be, as "deployment convenience". It now has its own kustomization:
+#
+#   kubectl apply -k deploy/kubernetes/catalog/
+#
+# The catalog is a provider-plane object with no tenant reach (ADR-0020 §1) and its own
+# component with its own failure domain (§7). This bundle is a TENANT stack, and there is
+# one of it per tenant — so bundling gave every tenant a private copy of a store that
+# belongs to no tenant, making "which device types exist" have as many answers as there
+# were tenants. Applying it here once for a single-tenant install and once more for the
+# next tenant is not a duplicate deployment; it is a second catalog.
+#
+# ⚠️ Do not add it back to make a one-cluster demo simpler. A tenant overlay that has to
+# delete six objects to be correct is how the bundling read from the tenant side, and it is
+# what a real estate would have inherited.
 
 # Single place to retarget the image for BOTH the gateway and the worker — they must
 # stay in lockstep (they share the Redis data model, so a version skew across a schema

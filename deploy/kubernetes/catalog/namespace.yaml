@@ -1,0 +1,33 @@
+# The catalog's namespace — provider plane.
+#
+# ⚠️ Do NOT edit the name here. `namespace:` in this directory's kustomization.yaml is the
+# single source of truth; kustomize's namespace transformer rewrites both this object's name
+# and every resource's `metadata.namespace`.
+#
+# **This is deliberately not a tenant namespace, and there is exactly one of it.** The
+# catalog is a provider-plane object with no tenant reach (ADR-0020 §1): a device type names
+# no host, holds no credential and belongs to no tenant. One catalog per tenant would make
+# "which device types exist" have as many answers as there are tenants, which is not a
+# stricter version of the design — it is a different one.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-provider
+  labels:
+    app.kubernetes.io/name: device-mcp-catalog
+    app.kubernetes.io/managed-by: kustomize
+
+    # ── Policy selectors (ADR-0014 §2) ────────────────────────────────────────────
+    # NetworkPolicy selects on LABELS, not names, so the convention alone is unenforceable.
+    #
+    # `plane: provider` is the point of this label here. A cluster-wide deny keyed on
+    # `plane: tenant` (cilium-clusterwide-deny.yaml) is what stops tenant namespaces
+    # reaching each other; this namespace sits outside that set on purpose, because the
+    # provider console must reach it and no tenant stack ever should. Do not relabel it
+    # `tenant` to "make the policies simpler" — that would place the estate's whole device
+    # -type store inside the blast radius the tenant label exists to bound.
+    mcp.gateway/plane: provider
+
+    # No `mcp.gateway/tenant` label. There is no tenant this namespace belongs to, and
+    # giving it one would make it selectable by a per-tenant policy that has no business
+    # matching it. Its absence is the assertion.
