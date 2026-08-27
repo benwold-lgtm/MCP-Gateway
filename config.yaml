@@ -2,11 +2,17 @@
 
 gateway:
   # Which tenant this stack serves. One gateway, one tenant (ADR-0004), so it is set once
-  # here rather than per issuer. Only used by ADR-0013's elevated grants: a grant claim
-  # names exactly one tenant and is refused unless it names this one. REQUIRED at startup
-  # if any issuer below is on the `provider` plane — a gateway that does not know its own
-  # name can never honour a grant, and finding that out mid-incident is the worst moment.
-  # tenant_id: "acme"
+  # here rather than per issuer. Use the opaque identifier minted by `tools/tenant_id.py new`
+  # (ADR-0019) — random, never derived from the customer's name, and never reissued.
+  #
+  # ⚠️ Nothing in the gateway reads this at runtime today. It used to gate ADR-0013's
+  # elevated grants (a grant claim named exactly one tenant and was refused unless it named
+  # this one), and ADR-0017 removed that mechanism entirely — `plane`, `grant_claim` and
+  # `entitlement_claim` are gone from the code. It is retained as the deployment's own
+  # record of which tenant it serves: the same identifier names the namespace, the console
+  # subdomain and the provider-side registry entry (ADR-0024 §2), and keeping one value in
+  # one place is what stops those three from drifting apart.
+  # tenant_id: "t-3f9a1c2b7d4e8065"
   # Require Authorization: Bearer <token> on all API routes (leave empty to disable).
   # Override with MCP_GATEWAY_API_KEY environment variable. This single key maps to
   # the "admin" role (full access) — today's behaviour, unchanged.
