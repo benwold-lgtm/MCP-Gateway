@@ -391,20 +391,34 @@ softened. Acceptable only where that downtime is genuinely tolerable.
 ## Catalog service (ADR-0020)
 
 > **Status: slice 0 of the ADR-0020 build.** The service exists (`device_mcp_catalog/`),
-> deployed (`deploy/kubernetes/catalog-deployment.yaml`, `catalog-service.yaml`,
-> `postgres.yaml`), and holds a real PostgreSQL connection with named-unavailable readiness
-> (`/readyz`) — but curates nothing yet. Device-type curation, per-tenant assignment, the
-> claim flow, and version/upgrade offers are later slices of the same build; this section
-> describes the deployment shape those slices land on top of, not a finished feature.
+> deployed (`deploy/kubernetes/catalog/`), and holds a real PostgreSQL connection with
+> named-unavailable readiness (`/readyz`) — but curates nothing yet. Device-type curation,
+> per-tenant assignment, the claim flow, and version/upgrade offers are later slices of the
+> same build; this section describes the deployment shape those slices land on top of, not a
+> finished feature.
 
 The provider's device catalog is a **separate process with its own PostgreSQL database**,
 not a client library bolted onto the gateway the way Redis is (ADR-0020 §7: "a separate
 component with its own failure domain... not reached through the [console] BFF's process
-boundary"). It is bundled into this stack's `kustomization.yaml` for deployment convenience —
-one `kubectl apply -k` brings up gateway, worker, Redis, *and* the catalog together — but
-architecturally it is closer to a fourth first-class component than to an add-on: its own
-image, its own database, its own NetworkPolicy, its own CI job
-(`.github/workflows/ci.yml`'s `catalog` job).
+boundary"). Its own image, its own database, its own namespace, its own NetworkPolicy, its
+own CI job (`.github/workflows/ci.yml`'s `catalog` job) — a fourth first-class component
+rather than an add-on.
+
+**It is applied separately, and exactly once per estate:**
+
+```bash
+kubectl apply -k deploy/kubernetes/catalog/     # namespace mcp-provider — ONE per estate
+kubectl apply -k deploy/kubernetes/             # namespace mcp-<tenant> — one per TENANT
+```
+
+It used to be bundled into the gateway's own `kustomization.yaml`, for the convenience of
+bringing everything up in one command. That convenience does not survive contact with more
+than one tenant: this stack is deployed once *per tenant*, so bundling gave every tenant a
+private copy of a store that belongs to no tenant, and "which device types exist" acquired as
+many answers as there were tenants. A tenant overlay had to actively delete six objects to be
+correct — which is what the bundling looked like from the tenant side. The catalog is a
+provider-plane object with no tenant reach (§1); where it physically lives stays a deployment
+choice (§7), and separating it is what makes choosing possible.
 
 **It holds no tenant credential, no claim, and no device instance** (ADR-0020 §5). Its durable
 content is exactly device-type definitions (with full version history) and per-tenant
@@ -415,13 +429,25 @@ story (standard PostgreSQL WAL archiving + periodic base backups, kept separate 
 whatever HA topology is chosen — HA solves availability, not recovery from a bad migration
 or an accidental `DROP`).
 
-**Reachability is deliberately narrow.** `deploy/kubernetes/networkpolicy.yaml` policy 8
-accepts ingress on the catalog's port only from the console BFF's namespace
-(`mcp-gateway-ui` by default — set this to wherever your BFF actually runs); the gateway and
-worker have no reason to reach it and none is granted. Policy 9 restricts Postgres to the
-catalog pod alone, with the same caveat policy 7 (Redis) already carries: NetworkPolicy is
-purely additive-allow, so this is the intended-reachability *statement*, not additional
-enforcement beyond policy 3's blanket intra-namespace allow.
+**Reachability is deliberately narrow.** `deploy/kubernetes/catalog/networkpolicy.yaml`
+accepts ingress on the catalog's port only from the **provider** console BFF's namespace
+(`mcp-gateway-ui` by default — set this to wherever yours actually runs); the gateway and
+worker have no reason to reach it and none is granted. A *tenant* console has no business
+reaching it either: a tenant sees offered device types through its own gateway, which is what
+keeps ADR-0020 §2's "assignment is an offer, claiming is the tenant's act" a real boundary
+rather than a UI convention.
+
+Postgres is restricted to the catalog pod alone — and standing in its own namespace this is
+now an enforcement change, not only a declaration. While the catalog shared the gateway's
+namespace, that namespace's blanket `allow-intra-namespace` rule already let any pod beside
+it reach Postgres, so the policy documented an intent the topology did not hold to. There is
+no blanket allow in `mcp-provider`, and it carries its own `default-deny`, which it
+previously inherited by accident from the namespace it was borrowing.
+
+**Before applying**, create the `catalog-secrets` Secret — both the catalog and its Postgres
+mount it, and without it both sit in `CreateContainerConfigError`, which reads as a broken
+image rather than a missing prerequisite. The command is in
+`deploy/kubernetes/catalog/kustomization.yaml`.
 
 **Production**: the bundled `postgres.yaml` StatefulSet is a single-replica getting-started
 convenience, the same caveat `redis.yaml` carries. Point `CATALOG_DATABASE_URL` at a managed

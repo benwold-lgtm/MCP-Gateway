@@ -1,0 +1,66 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ── The provider-plane device catalog (ADR-0020) ───────────────────────────────────
+#
+# Applied SEPARATELY from the gateway stack, and exactly once per estate:
+#
+#   kubectl apply -k deploy/kubernetes/catalog/
+#
+# **Why it is not in the gateway's kustomization any more.** It used to be, described there
+# as "deployment convenience". Under one-stack-per-tenant that convenience becomes a
+# correctness problem: every tenant got its own copy of a store that belongs to no tenant,
+# so "which device types exist" had as many answers as there were tenants, and a tenant
+# deployment had to actively DELETE six objects to be correct. ADR-0020 §1 makes the catalog
+# a provider-plane object with no tenant reach and §7 makes it its own component with its own
+# failure domain; bundling it into the thing it is supposed to be independent of contradicted
+# both. Where it physically lives stays a deployment choice (§7) — what is fixed is that
+# choosing is now possible.
+#
+# ⚠️ There is ONE of these per estate, not one per tenant. It is not part of the per-tenant
+# overlay, and nothing here should ever be parameterised by tenant.
+
+namespace: mcp-provider
+
+resources:
+  - namespace.yaml
+  - networkpolicy.yaml
+  - postgres.yaml
+  - deployment.yaml
+  - service.yaml
+
+# ── Before applying: the Secret ────────────────────────────────────────────────────
+# `catalog-secrets` is NOT created here (a Secret in git is a credential in git). Both the
+# catalog and its Postgres mount it, so without it both pods sit in CreateContainerConfigError
+# — which reads as a broken image rather than a missing prerequisite.
+#
+#   PG_PW=$(openssl rand -hex 24)
+#   kubectl create namespace mcp-provider
+#   kubectl create secret generic catalog-secrets \
+#     --namespace=mcp-provider \
+#     --from-literal=postgres-password="$PG_PW" \
+#     --from-literal=database-url="postgresql://postgres:$PG_PW@catalog-postgres:5432/catalog" \
+#     --from-literal=api-token=$(openssl rand -hex 32)
+#
+# `api-token` is what the provider console's `CATALOG_API_TOKEN` must match — this service
+# authenticates exactly one caller (device_mcp_catalog/app/config.py). It is wired
+# `optional: true` on the Deployment, so the catalog starts without it and then rejects
+# every request as unauthenticated; set it.
+#
+# `database-url` and `postgres-password` must agree. They are two fields because Postgres
+# reads one and the application reads the other; nothing checks that they match, and a
+# mismatch presents as an application that starts cleanly and cannot authenticate to its
+# own database.
+
+# ── After applying: point the provider console at it ───────────────────────────────
+# The console reaches this across namespaces, so the Service DNS name needs the namespace:
+#
+#   CATALOG_SERVICE_URL: "http://device-mcp-catalog.mcp-provider.svc.cluster.local:8100"
+#
+# An in-namespace short name worked while the catalog lived in the gateway's namespace and
+# will now silently resolve to nothing. Empty disables catalog features as a NAMED condition
+# (ADR-0020 §7) — never inferred from an empty device-type list — so a console pointed at a
+# stale address reports the catalog as unreachable rather than as curated-but-empty.
+#
+# networkpolicy.yaml admits the console's namespace by name; set it to wherever the provider
+# console actually runs.
