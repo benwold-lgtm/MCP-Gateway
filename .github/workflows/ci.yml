@@ -123,6 +123,15 @@ jobs:
       # requirements.txt (see Dockerfile). Nothing compared the two, so a dependency
       # added to one and not the other passed every test here and produced an image
       # that failed on import at runtime. This is the check that names that cause.
+      #
+      # ⚠️ THIS OVERLAPS "The image actually runs" BELOW, DELIBERATELY. Do not remove it
+      # as redundant. That step catches strictly more — a broken entrypoint, a file the
+      # Dockerfile forgot — and it is the backstop precisely because it cannot be fooled by
+      # drift logic being subtly wrong, which this repo has already shipped once. But it
+      # fails as a container that will not start, which is a mystery to diagnose. This step
+      # fails as "your requirements.txt is missing a pin", at the point of the mistake, and
+      # the ordinary mistake is far more common than the rare one the backstop exists for.
+      # The overlap is the design: one check for the class, one for the error message.
       - name: requirements.txt agrees with pyproject.toml
         run: |
           pip install pip-tools
