@@ -21,6 +21,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from device_mcp_catalog.app.auth import TENANT_HEADER
 from device_mcp_catalog.app.config import CatalogAuthConfigError, load_settings
 from device_mcp_catalog.app.main import create_app
 
@@ -50,8 +51,25 @@ def _client(monkeypatch, *, database_url: str = "") -> TestClient:
     return TestClient(create_app(), raise_server_exceptions=False)
 
 
-def _auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
+def _auth(token: str, declare: str | None = None) -> dict:
+    """Credential, plus the §7b declaration where the caller is a tenant.
+
+    Every tenant call below declares its OWN tenant, so that what these tests exercise stays
+    §7a's scope rule rather than §7b's declaration rule. A tenant call with no declaration is
+    refused before the scope check is reached — see `test_declared_tenant.py`, where that is
+    the subject rather than an accident."""
+    headers = {"Authorization": f"Bearer {token}"}
+    if declare:
+        headers[TENANT_HEADER] = declare
+    return headers
+
+
+def _as_a() -> dict:
+    return _auth(TENANT_A_TOKEN, declare=TENANT_A)
+
+
+def _as_b() -> dict:
+    return _auth(TENANT_B_TOKEN, declare=TENANT_B)
 
 
 # --- the caller table itself -------------------------------------------------------------
@@ -74,7 +92,7 @@ def test_an_unknown_token_is_refused(monkeypatch):
 def test_a_tenant_token_is_not_the_provider_token(monkeypatch):
     """The two classes are genuinely distinct credentials, not one token with a flag."""
     with _client(monkeypatch) as client:
-        resp = client.post("/device-types", headers=_auth(TENANT_A_TOKEN), json={"slug": "x", "name": "X"})
+        resp = client.post("/device-types", headers=_as_a(), json={"slug": "x", "name": "X"})
     assert resp.status_code == 403
 
 
@@ -110,7 +128,7 @@ def test_every_path_route_naming_a_tenant_refuses_a_foreign_tenant(monkeypatch):
         assert routes, "expected at least one route with a {tenant_id} path parameter"
         for method, path in routes:
             url = path.replace("{tenant_id}", TENANT_B).replace("{type_id}", TYPE_ID)
-            resp = client.request(method, url, headers=_auth(TENANT_A_TOKEN), json={})
+            resp = client.request(method, url, headers=_as_a(), json={})
             assert resp.status_code == 403, f"{method} {path} did not refuse a foreign tenant"
 
 
@@ -119,7 +137,7 @@ def test_a_foreign_tenant_is_refused_not_filtered_to_empty(monkeypatch):
     tenant with no assignments, which is indistinguishable from a correct refusal in a log and
     invisible to the caller who just probed a neighbour."""
     with _client(monkeypatch) as client:
-        resp = client.get(f"/tenants/{TENANT_B}/assignments", headers=_auth(TENANT_A_TOKEN))
+        resp = client.get(f"/tenants/{TENANT_B}/assignments", headers=_as_a())
     assert resp.status_code == 403
     assert resp.json() != {"device_types": []}
 
@@ -130,7 +148,7 @@ def test_a_foreign_tenant_in_a_request_body_is_refused(monkeypatch):
     with _client(monkeypatch) as client:
         resp = client.post(
             f"/device-types/{TYPE_ID}/claims",
-            headers=_auth(TENANT_A_TOKEN),
+            headers=_as_a(),
             json={"tenant_id": TENANT_B, "hostname": "probe.example", "version": 1},
         )
     assert resp.status_code == 403
@@ -144,7 +162,7 @@ def test_naming_its_own_tenant_is_not_refused(monkeypatch):
     not. Both halves matter: a guard that refused everything would pass the test above.
     """
     with _client(monkeypatch) as client:
-        resp = client.get(f"/tenants/{TENANT_A}/assignments", headers=_auth(TENANT_A_TOKEN))
+        resp = client.get(f"/tenants/{TENANT_A}/assignments", headers=_as_a())
     assert resp.status_code != 403
 
 
@@ -152,7 +170,7 @@ def test_a_tenant_caller_cannot_read_the_unscoped_catalog(monkeypatch):
     """§7a's second rule. Scoping only the assignments route would still let a tenant read the
     provider's whole catalogue, which is estate shape they have no claim to."""
     with _client(monkeypatch) as client:
-        resp = client.get("/device-types", headers=_auth(TENANT_A_TOKEN))
+        resp = client.get("/device-types", headers=_as_a())
     assert resp.status_code == 403
 
 
@@ -172,7 +190,7 @@ def test_curation_and_assignment_are_provider_only(monkeypatch, method, path, bo
     provider act, not for naming a neighbour, so the two rules are not covering for each
     other."""
     with _client(monkeypatch) as client:
-        resp = client.request(method, path, headers=_auth(TENANT_A_TOKEN), json=body)
+        resp = client.request(method, path, headers=_as_a(), json=body)
     assert resp.status_code == 403
 
 
@@ -247,17 +265,17 @@ def test_a_tenant_reads_its_own_assignments_and_the_type_behind_them(monkeypatch
         )
         assert assigned.status_code == 201
 
-        mine = client.get(f"/tenants/{TENANT_A}/assignments", headers=_auth(TENANT_A_TOKEN))
+        mine = client.get(f"/tenants/{TENANT_A}/assignments", headers=_as_a())
         assert mine.status_code == 200
         assert any(t["id"] == type_id for t in mine.json()["device_types"])
 
-        assert client.get(f"/device-types/{type_id}", headers=_auth(TENANT_A_TOKEN)).status_code == 200
+        assert client.get(f"/device-types/{type_id}", headers=_as_a()).status_code == 200
 
         # Tenant B was never assigned this type. It reads as absent, NOT as forbidden: a
         # distinguishable "exists but not yours" would let a tenant enumerate the estate's
         # catalogue one id at a time, which is the same thing the unscoped list route withholds.
-        assert client.get(f"/device-types/{type_id}", headers=_auth(TENANT_B_TOKEN)).status_code == 404
+        assert client.get(f"/device-types/{type_id}", headers=_as_b()).status_code == 404
 
         client.delete(f"/device-types/{type_id}/assign/{TENANT_A}", headers=_auth(PROVIDER_TOKEN))
         # A revoked assignment is absent, so the type detail closes behind it too.
-        assert client.get(f"/device-types/{type_id}", headers=_auth(TENANT_A_TOKEN)).status_code == 404
+        assert client.get(f"/device-types/{type_id}", headers=_as_a()).status_code == 404

@@ -11,3 +11,10 @@ spec:
     - name: http
       port: 8100
       targetPort: 8100
+    # ADR-0020 §7b. A SEPARATE port, not a path on the API: every API route is
+    # credential-gated, and an unauthenticated /metrics beside them would be a hole in the
+    # surface §7a closed. Reachable only from the monitoring namespace — see
+    # networkpolicy.yaml, without which the namespace default-deny drops the scrape.
+    - name: metrics
+      port: 9100
+      targetPort: 9100

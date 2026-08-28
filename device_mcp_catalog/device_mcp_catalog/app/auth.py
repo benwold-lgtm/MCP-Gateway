@@ -28,6 +28,15 @@ remember is the bug, not the fix.
 **A tenant caller cannot see the unscoped catalog.** `GET /device-types` enumerates every
 curated type in the estate. For a tenant caller the type list *is* the assignment list.
 
+**And, since §7b: a tenant caller declares which tenant it believes it serves, on every
+request.** The two rules above both trust the credential completely — that is their job — so
+neither can notice a credential that was *delivered to the wrong console*. The declaration is
+the second assertion needed to see that two things disagree: `X-Catalog-Tenant` carries what
+the deployment thinks it is, the credential carries what it actually holds, and a difference
+between them is a provisioning failure rather than a request-time one. It is **required** of a
+tenant caller, because an optional declaration is a check with an opt-out, taken by exactly the
+deployment that got it wrong.
+
 A mismatch is **refused, never filtered to empty and never rewritten to the caller's own
 tenant** — the disagreement is the signal, and silently reinterpreting it would destroy the
 only evidence that something asked for a neighbour's data.
@@ -46,6 +55,11 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
 from loguru import logger
+
+from . import metrics
+
+#: The header a tenant caller uses to declare which tenant it believes it serves (§7b).
+TENANT_HEADER = "X-Catalog-Tenant"
 
 #: Every request body key that names a tenant. `RecordClaim.tenant_id` is the only one today;
 #: the constant exists so that adding a second is a one-line change here rather than a new
@@ -121,13 +135,88 @@ async def _named_tenants(request: Request) -> list[str]:
     return named
 
 
-async def enforce_tenant_scope(request: Request, caller: Caller = Depends(authenticate_caller)) -> Caller:
-    """The one place the tenant-from-the-credential rule is enforced.
+def _check_declaration(request: Request, caller: Caller) -> None:
+    """Refuse a credential that does not belong to the console presenting it (§7b).
 
-    A provider caller may name any tenant — that is what "read everything" means. A tenant
-    caller may name only itself, on every route that names a tenant at all, whether in the path
-    or in the body.
+    Runs **before** the scope check below, and the order is not incidental. The scope check
+    compares a request's assertions against the credential; if the credential itself is the
+    wrong one, a request that names its own tenant passes that check perfectly — the caller
+    is consistently wrong. Identity has to be settled before consistency means anything.
     """
+    declared = request.headers.get(TENANT_HEADER, "").strip()
+
+    if caller.is_provider:
+        # The provider console never declares a tenant, because it speaks for none. A
+        # declaration arriving with the provider's credential therefore means that credential
+        # is installed in a tenant's console — the exact misdelivery §7b names, and the case
+        # nothing else in this service can see.
+        if declared:
+            _refuse_misdelivery(request, declared=declared, caller=caller)
+        return
+
+    if not declared:
+        metrics.tenant_declaration_missing_total.labels(credential_tenant=caller.tenant_id or "").inc()
+        logger.warning(
+            "catalog: refusing {method} {path} — tenant caller {caller_tenant!r} declared no tenant "
+            "(ADR-0020 §7b: a tenant caller declares the tenant it believes it serves)",
+            method=request.method,
+            path=request.url.path,
+            caller_tenant=caller.tenant_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error_code": "ERR_TENANT_NOT_DECLARED",
+                "message": (
+                    f"a tenant caller must declare its tenant in {TENANT_HEADER} (ADR-0020 §7b). "
+                    "This request was refused rather than served, because a credential nobody "
+                    "checks against a deployment is a credential nobody would notice was misdelivered."
+                ),
+            },
+        )
+
+    if declared != caller.tenant_id:
+        _refuse_misdelivery(request, declared=declared, caller=caller)
+
+
+def _refuse_misdelivery(request: Request, *, declared: str, caller: Caller) -> None:
+    """One refusal path for both misdelivery shapes, so they alert as one condition."""
+    metrics.credential_misdelivery_total.labels(declared_tenant=declared, credential_kind=caller.kind).inc()
+    logger.error(
+        "catalog: CREDENTIAL MISDELIVERY on {method} {path} — a console declaring itself tenant "
+        "{declared!r} presented a {kind} credential"
+        "{owner}. The credential is valid and is deployed in the wrong console; every catalog "
+        "feature there is refused until it is corrected (ADR-0020 §7b).",
+        method=request.method,
+        path=request.url.path,
+        declared=declared,
+        kind=caller.kind,
+        owner=f" belonging to {caller.tenant_id!r}" if caller.tenant_id else "",
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error_code": "ERR_CREDENTIAL_MISDELIVERY",
+            "message": (
+                f"this credential does not belong to tenant '{declared}' (ADR-0020 §7b). It is a "
+                "valid credential in the wrong deployment — correct the provisioning rather than "
+                "the request."
+            ),
+        },
+    )
+
+
+async def enforce_tenant_scope(request: Request, caller: Caller = Depends(authenticate_caller)) -> Caller:
+    """The one place the tenant-from-the-credential rules are enforced.
+
+    Two questions, in order. **Is this credential in the right console?** (§7b — the
+    declaration.) Then: **is this request asking about the right tenant?** (§7a — the scope.)
+    A provider caller may name any tenant, which is what "read everything" means; a tenant
+    caller may name only itself, on every route that names a tenant at all, in the path or in
+    the body.
+    """
+    _check_declaration(request, caller)
+
     if caller.is_provider:
         return caller
 

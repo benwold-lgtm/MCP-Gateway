@@ -24,6 +24,11 @@ spec:
           ports:
             - name: http
               containerPort: 8100
+            # ADR-0020 §7b — Prometheus exposition, restricted by NetworkPolicy (F-36's
+            # caveat applies here as it does to the gateway: unauthenticated unless
+            # CATALOG_METRICS_TOKEN is set).
+            - name: metrics
+              containerPort: 9100
           env:
             - name: CATALOG_DATABASE_URL
               valueFrom:
