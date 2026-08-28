@@ -31,6 +31,13 @@ class VersionFields(BaseModel):
     #: device has no spec_url at all — see `_validate_upstream` in the gateway's own
     #: `registry/validation.py`); enforced in `repo.py`, not here, so the one validation
     #: lives next to the table constraints it must stay consistent with.
+    #:
+    #: NOT a place to put a provider-curated spec document, and not somewhere an absolute
+    #: URL can be smuggled in later: ADR-0020 §4a settles that a spec the *provider*
+    #: curates is snapshotted into the version record as content, because §4's version
+    #: pinning and a live reference are mutually exclusive. `spec_path` is the other
+    #: mechanism — the tenant's own device, fetched live and refreshed on
+    #: `registry.spec_cache_ttl` — and the two must not be collapsed.
     spec_path: Optional[str] = None
     auth_kind: AuthKind = "none"
     fingerprint_policy: Optional[FingerprintPolicy] = None
