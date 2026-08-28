@@ -75,6 +75,83 @@ every customer's fleet at once: the single largest blast radius in this design, 
 a typo. The tool-set diff machinery that already exists is the right vehicle for showing a
 tenant what an upgrade would change.
 
+### 4a. A curated spec is embedded, not referenced (amendment, 2026-08-28)
+
+> **Not built.** A device type version today carries `spec_path` and a declared `tool_set`
+> and has no field for a curated spec document at all. This section decides what that field
+> is before it is added, because the wrong answer is the easy one.
+
+§1 says a device type "names no host". §4 says a claimed device stays pinned to the version
+it claimed. Curating a spec the *provider* supplies — a normalised OpenAPI document for an
+appliance whose own published one is wrong, incomplete or absent — appears to need a host,
+and the naive answer is that the version stores a URL to fetch it from.
+
+**Two different things are being called a host, and only one of them is what §1 prohibits.**
+
+- A **dispatch-time host** is something a tenant's gateway calls at runtime to reach a live
+  device. That is what §1 means, and §6 is the deliberate, heavily-obligated exception.
+- A **curation-time source** is wherever the provider originally obtained the document,
+  reached exactly once by the provider's own curation process and never again. It never
+  becomes a tenant-facing dependency, and was never what §1 was protecting against.
+
+#### Decision: the version holds the content, per version, immutably
+
+A curated spec is **snapshotted into the version record**. It is not a live reference.
+
+This is not merely the cleaner option; **§4 forecloses the alternative**. §4's guarantee is
+that a claimed device stays on the exact version it claimed. If a version stored a URL, "the
+version" would not be a stable artefact at all — it would change the moment whatever sits at
+that URL changes, which is precisely the *"a provider's typo changes every customer's fleet
+at once"* blast radius §4 exists to prevent, reintroduced one layer down through the spec
+instead of through the type record. A live reference and a pinned version are mutually
+exclusive, so the versioning requirement settles this rather than taste.
+
+Concretely, at curation time the provider either pastes or uploads the document — no external
+reach at all — or points curation at a source URL that is **fetched once** and snapshotted.
+Prefer storing it **inline in the version row**: ADR-0025's restore story is point-in-time
+recovery of one PostgreSQL database, and a document held anywhere else is a second store with
+its own backup, its own restore ordering and its own way of being half-recovered. An
+object-storage key internal to the provider plane stays available for documents large enough
+to warrant it, and the cost of taking it is that second restore story, not a saved row.
+
+Either way, **once curation completes the device type is self-contained**: neither claiming it
+nor dispatching a tool against a claimed instance ever reaches back to where the document came
+from.
+
+#### Three spec mechanisms, deliberately different
+
+They look alike — all three are "get a spec from somewhere" — and two of them already exist,
+so the distinction is worth stating rather than leaving to be inferred:
+
+| | Where it comes from | Freshness | Status |
+|---|---|---|---|
+| `spec_path` (§1) | joined to the **tenant's** `base_url` at claim time; the gateway fetches from the tenant's own device, cached for `registry.spec_cache_ttl` and refreshed | **must stay current** | built |
+| `tool_set` (§1) | hand-entered by the curator; declared, never measured | n/a — an assertion | built |
+| a curated spec document | the provider's own curation, snapshotted at version time | **must not drift** | this section |
+
+`spec_path` is the reason this question had not come up: it is *relative*, so the host is
+always the tenant's, and the existing live-fetch-with-TTL pattern carries no provider host
+anywhere. That pattern is right for a device the tenant owns and wrong for a curated document,
+and the two must not be collapsed because they superficially rhyme.
+
+The consequence to accept openly: **a snapshot goes stale against whatever the vendor
+publishes next, and that is the intended behaviour.** Re-curating produces a new version,
+which reaches tenants as an offer through the upgrade path §4 already defines. There is no
+mechanism by which a tenant's pinned device silently picks up a newer document, which is the
+whole point.
+
+#### The fetch still goes through the guard
+
+If curation supports fetching from an operator-supplied URL, that fetch uses the existing
+guarded-fetch discipline — `build_guarded_client` and the URL policy in
+`security/url_policy.py` — even though the caller is a trusted provider curator rather than an
+arbitrary agent.
+
+Not because the threat model is the same; it plainly is not. For the same reason the plaintext
+IdP flag was given no loopback exemption: one rule applied uniformly is easier to reason about
+and to audit than a carve-out for "this caller is trusted enough to skip the guard", which is
+the kind of exception that erodes.
+
 ### 5. The catalog carries no secrets
 
 A device type names the *kind* of credential a device needs (`api_key` in a header,
@@ -314,6 +391,12 @@ operational pressure.
 - **Negative: catalog versioning is a migration problem in miniature** — N tenants on M
   versions of a device type, each needing an upgrade path. Deliberately accepted over the
   alternative in §4.
+- **Negative: a curated spec is bulk the catalog must carry forever.** §4a's snapshot means
+  every version of every type holds a copy of its document rather than a link to one, and
+  those copies are immutable by construction, so the store only grows. Inline in PostgreSQL
+  keeps ADR-0025's single restore story intact and is the default for that reason; the
+  object-storage escape hatch for large documents buys row size at the price of a second
+  store to back up and restore in the right order.
 - **Negative: the catalog needs its own authorization model, which §7 did not anticipate.**
   Making it a separate component gave it a network boundary and therefore a caller identity
   question, and phase 1 answered it with a single shared token on the strength of having one
