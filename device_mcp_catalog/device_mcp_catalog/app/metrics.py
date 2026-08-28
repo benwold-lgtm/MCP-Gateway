@@ -28,8 +28,28 @@ from http.server import ThreadingHTTPServer
 from typing import Optional
 
 from loguru import logger
-from prometheus_client import Counter
+from prometheus_client import Counter, Gauge
 from prometheus_client import start_http_server as _start_http_server
+
+#: Always 1 while this process is exposing metrics — and the only series here that exists in
+#: normal operation.
+#:
+#: The two counters below are label-bearing, so a `Counter` that has never been incremented is
+#: not a series at all: in a healthy estate there is nothing to query. That makes
+#: `MCPCatalogCredentialMisdelivery` unable to tell "no misdeliveries" from "Prometheus has
+#: never reached this pod" — a NetworkPolicy that drops the scrape, an un-applied
+#: ServiceMonitor, a wrong namespace label — and silence is the failure mode a
+#: should-never-happen alert cannot afford, because it looks exactly like success.
+#:
+#: So the alert plane watches for THIS being absent, which is the idiom the gateway's own
+#: `MCPNoLiveWorkers` (`absent(mcp_worker_pods)`) already uses. It covers every cause of a
+#: broken scrape path rather than the one an operator was warned about in a comment.
+catalog_info = Gauge(
+    "catalog_info",
+    "Always 1 while the catalog is exposing metrics. Exists so the alert plane can detect that "
+    "it has stopped being scraped at all (ADR-0020 §7b) — the counters below are absent in "
+    "normal operation and cannot carry that signal.",
+)
 
 #: A tenant console presented a credential that is not its own — §7b's condition. Labelled by
 #: the tenant the CALLER declared itself to be (which is the deployment that is broken) and by
@@ -63,6 +83,7 @@ def start_metrics_server(port: int, auth_token: Optional[str] = None) -> bool:
     distinction is deliberate — that one decides who a request is; this one decides who hears
     about it afterwards.
     """
+    catalog_info.set(1)
     try:
         if auth_token:
             httpd = ThreadingHTTPServer(("", port), _authenticated_handler(auth_token))
