@@ -552,6 +552,139 @@ way. Enabling that path is now explicitly a two-part change, in order: provision
 own credential, then add its namespace. The policy file says so at the line that would be
 edited.
 
+### 7b. A credential can be correct and still be the wrong one (amendment, 2026-08-28)
+
+> **BUILT 2026-08-28**, as decided — including the correction. The declaration
+> (`X-Catalog-Tenant`) is enforced in `auth._check_declaration` before the scope rules; the
+> catalog gained a metrics plane for this one condition, with a `severity: page` rule in
+> `deploy/kubernetes/catalog/monitoring.yaml`; `/whoami` was demoted to a diagnostic and the
+> BFF's client-side gate removed. **The open timing question below resolved itself** — see the
+> note at the end of it.
+
+#### The gap §7a cannot see, by construction
+
+§7a derives the tenant from the credential and refuses a request that names another. That closes
+**forgery at request time**: a caller asserting a tenant its credential does not support.
+
+It says nothing about the credential being the wrong one *before any request is made* — a
+provisioning-time misdelivery that puts tenant B's catalog credential, or the provider's, into
+tenant A's console. From the catalog's side that request is indistinguishable from a correct
+one: a credential arrived, it identified a tenant, and everything agreed. **The mechanism
+working exactly as designed is the failure mode.** Different risk, different moment, and §7a's
+text does not reach it — not by oversight, but because a mechanism whose job is to trust the
+credential's claim cannot also audit that claim's delivery.
+
+The shape is already half-recorded next door. [ADR-0024 §10](0024-tenant-provisioning-is-a-request.md)
+measured the nine manual steps of connecting a tenant, and step 9 is *"wire the catalog:
+address, credential, `TENANT_ID`, and an egress port"*, with its failure listed as **"🔇 times
+out; reads as 'the catalog is down' while it is healthy."** That is the failure when the
+*address* is wrong. When the **credential** is wrong there is no symptom at all: it does not time
+out, it works — for the wrong tenant. It belongs in that table's silent column, and it is the
+worst entry in it.
+
+#### Why this is recorded rather than only coded
+
+§7a closed with **"a documented assumption is not a guard"** — a precondition can be true,
+written down accurately, and become false later without anything failing observably.
+
+Undocumented code is not the safe side of that lesson; it is strictly worse. A stale comment at
+least gives a future reader something to be suspicious of. An unexplained second check gives
+them a reason to delete it — and the reasoning will look sound: *the catalog already enforces
+tenant-from-credential, so a client-side comparison of the same two values is redundant.* Every
+step of that is correct except the conclusion, and nothing in the code says why. **The record is
+what makes the deletion stop looking correct.**
+
+#### Correction: the check belongs on the server
+
+What was built asks `GET /whoami` and lets the **client** decide. That is a client-side gate on a
+server-enforced property — the exact shape [ADR-0017 §7b](0017-provider-authority-is-delegated.md)
+found (a console gate and a server gate that were never asked to agree), and the same
+wrong-layer error §7a corrected two paragraphs earlier in this very document. Building §7a's fix
+and reintroducing its finding in the same change is not a distinction worth defending.
+
+So invert it. **A tenant caller declares the tenant it believes it serves, on every request, and
+the catalog refuses when that declaration disagrees with the credential.** Declared, not asked.
+Three things follow:
+
+- a client that forgets to check cannot skip the check, because it is no longer the client's;
+- the refusal happens where the counter, the log and the route gate already are;
+- `/whoami` survives as a **diagnostic** — *what am I holding?* — which is what it is genuinely
+  good for, rather than as a gate.
+
+The declaration is not authority and must not be mistaken for it. The credential still decides
+what the caller may do; the declaration only supplies the **second** assertion the catalog needs
+in order to notice that two things disagree. A caller that omits it is refused rather than
+admitted — an optional declaration is a check with an opt-out, which is the same thing as no
+check for exactly the deployment that got it wrong.
+
+#### Failure behaviour: loud, and on the alert plane
+
+**Refuse every catalog-dependent route.** Already the built behaviour: `CatalogMisconfigured`
+subclasses `CatalogUnavailable`, so it arrives as §7's named 503 rather than a 500, and it stays
+**non-fatal to the console** for §7's own reason — a credential mistake must not take out a
+tenant's entire UI when everything except the catalog still works.
+
+**And raise a dedicated alert**, reusing the pattern ADR-0023 established for break-glass rather
+than inventing a third notification mechanism: a counter, and a `severity: page` rule beside
+`MCPBreakGlassActivated` in `deploy/kubernetes/prometheus-rules.yaml`. A console holding another
+tenant's credential is a *this-should-never-happen* condition and gets that treatment, not a log
+line nobody is reading.
+
+**The cost, stated because it is not free.** Neither component is a Prometheus target today. The
+BFF *queries* Prometheus for its monitoring view and exposes no `/metrics` of its own; the
+catalog has neither a `prometheus_client` dependency nor a ServiceMonitor. Putting this on the
+alert plane makes one of them a scrape target for the first time.
+
+It should be the **catalog**: one per estate rather than one per tenant, already the side the
+check moves to, and it keeps every tenant console off the scrape path. That is new operational
+surface in a service whose separate failure domain is deliberate (§7), and it is accepted here as
+the honest price of not building a second alerting mechanism for one condition.
+
+#### Where the credential comes from — the other half is already written
+
+[ADR-0024 §10](0024-tenant-provisioning-is-a-request.md) already says: *"This is where ADR-0020
+§7a's credential comes from."* Enrolment mints the per-tenant credential, revoking an enrolment
+revokes it, and that record states plainly that **"the two records should be built together —
+§7a states the property, this states the lifecycle, and neither is complete alone."**
+
+§7a never pointed back. It does now. And this section is the third piece: what happens when that
+lifecycle is executed **incorrectly**. Enrolment is what should make misdelivery impossible;
+§7b is what catches it in the window before enrolment exists — and afterwards, on the paths
+enrolment does not own: a manual rotation, a restored secret, an operator editing a mounted file
+by hand.
+
+#### Open: when the check runs
+
+Deliberately not settled.
+
+- **Startup only** catches provisioning, which is the named risk, and nothing else. A credential
+  rotated in later is never re-examined — and the entire premise of this section is that a wrong
+  credential *works*, so nothing else will notice.
+- **Startup plus every credential reload** covers the supported rotation path, and is the floor.
+- **Plus an independent periodic re-check** is what covers the unsupported paths — the hand-edited
+  file, the restore putting back an older secret — which is precisely the class of drift this
+  record keeps finding.
+
+The lean is all three, with a long period, because this is a should-never-happen check and not a
+health probe.
+
+What argues against settling it now is that the correction above may dissolve the question
+entirely. **Under a declared-tenant design the comparison happens on every request**, because the
+declaration is on every request — there is no cached verdict to go stale, no reload to hook, and
+no heartbeat to schedule. If that holds, the answer to "when" is "always", and the timing
+question was an artefact of checking once and remembering the answer. That is worth confirming
+against a real deployment's request pattern before being written down as settled, which is why
+it is recorded as open rather than resolved by argument.
+
+> **Resolved by construction, 2026-08-28.** It held. The declaration is set once on the BFF's
+> long-lived client and sent with every catalog request; the catalog compares it every time and
+> caches nothing. All three candidate schedules — startup, credential reload, periodic heartbeat
+> — are subsumed, because a credential swapped in by any means, supported or not, is checked on
+> the next request that uses it. Recorded here rather than deleted because the *reason* is the
+> useful part: the question only existed while the check was something a client did once and
+> remembered, and moving the check to the server removed the state that needed a schedule. **A
+> caching decision was masquerading as a scheduling problem.**
+
 ### 8. Why this comes before ADR-0017 in the build order
 
 Once a provider cannot reach into a tenant's stack, the catalog is how they do their job.
@@ -593,6 +726,12 @@ operational pressure.
   keeps ADR-0025's single restore story intact and is the default for that reason; the
   object-storage escape hatch for large documents buys row size at the price of a second
   store to back up and restore in the right order.
+- **Negative: a per-tenant credential can be delivered to the wrong tenant, and §7a cannot
+  tell.** §7b names the gap — misdelivery at provisioning rather than forgery at request time —
+  and closing it costs a declared tenant on every tenant-caller request, plus making the catalog
+  a Prometheus scrape target for the first time so the condition reaches the alert plane rather
+  than a log. New surface in a service whose separate failure domain is deliberate, taken over
+  building a second notification mechanism for one condition.
 - **Negative: the catalog needs its own authorization model, which §7 did not anticipate.**
   Making it a separate component gave it a network boundary and therefore a caller identity
   question, and phase 1 answered it with a single shared token on the strength of having one
