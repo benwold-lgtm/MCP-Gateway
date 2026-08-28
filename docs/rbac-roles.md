@@ -18,7 +18,8 @@ for the role/scope model; the *decision* behind it is
 | `backup:write` | Apply a restore | `POST /v1/admin/restore/apply` |
 | `backup:export-portable` | **Additionally** export a *portable* archive — credentials re-encrypted to a passphrase instead of the stack key | `POST /v1/admin/backup` with `kind=portable` |
 | `devices:write-planned` | Apply **exactly one** reviewed, digest-bound device-write plan (ADR-0022) | `POST /v1/devices/plans/apply` |
-| `support:administer` | Raise, decide, list and revoke support requests/grants; the standing-consent setting (ADR-0017) | `POST /v1/support-requests`, `GET /v1/support-requests`, `GET/POST .../{id}`, `DELETE /v1/support-grants/{id}` |
+| `support:request` | **Ask** to act on this tenant, and poll your own request's outcome (ADR-0017). Held by a **provider**, granted through a named RBAC entry the tenant creates. Confers no read, no write, no invoke, and no decision | `POST /v1/support-requests`, `GET /v1/support-requests/{id}` |
+| `support:administer` | **Decide** who may act on this tenant: list, approve, reject, revoke, and the standing-consent setting (ADR-0017). The tenant's own authority | `GET /v1/support-requests`, `POST .../{id}/approve`, `POST .../{id}/reject`, `GET/POST/DELETE /v1/support-requests/standing-consent`, `GET /v1/support-grants`, `DELETE /v1/support-grants/{id}` |
 | `notifications:read` | Read the durable tenant-facing notification list — a break-glass activation, a frequently self-issued support grant (ADR-0017 slice 5) | `GET /v1/notifications` |
 
 > **`backup:read` is not a read-only grant in the ordinary sense.** An archive contains
@@ -98,17 +99,19 @@ for the role/scope model; the *decision* behind it is
 Two kinds of principal: **humans** operating the UI, and **machines** (an MCP client/agent
 invoking tools over SSE). One scope model serves both.
 
-| Role | `devices:read` | `devices:write` | `tools:call` | `metrics:read` | `backup:read` | `backup:write` | `backup:export-portable` | `support:administer` | `notifications:read` | For |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|-----|
-| **admin** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Full control (human) |
-| **operator** | ✅ | ✅ | — | ✅ | — | — | — | ✅ | ✅ | Onboard / edit / remove devices, manage the dead-letter queue, administer support access — but not invoke tools (human) |
-| **viewer** | ✅ | — | — | ✅ | — | — | — | — | — | Read-only (human) — *current `viewer`* |
-| **auditor** | — | — | — | ✅ | — | — | — | — | — | Observability / compliance, no device access (human). Widens to `audit:read` when that scope exists |
-| **caller** (agent) | ✅ | — | ✅ | — | — | — | — | — | — | An MCP client/agent that discovers and invokes tools — **machine identity**, not a UI role |
-| **backup** (agent) | — | — | — | — | ✅ | ✅ | — | — | — | A scheduled backup/restore job — **machine identity**. Deliberately not `admin`: a nightly cron entry should not also be able to invoke tools or edit the fleet, and the portable archive stays an explicit operator action rather than a standing grant |
-| **console** (agent) | ✅ | ✅ | ✅ | ✅ | — | — | — | ✅ | ✅ | The console's BFF relaying a **password** session, which has no per-user token to pass through — **machine identity**. `operator` ∪ `caller` (both provider- and tenant-plane views live in this one process today, ADR-0017/pre-ADR-0021), and deliberately no `backup:*` (below) |
+| Role | `devices:read` | `devices:write` | `tools:call` | `metrics:read` | `backup:read` | `backup:write` | `backup:export-portable` | `support:request` | `support:administer` | `notifications:read` | For |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|-----|
+| **admin** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Full control (human) |
+| **operator** | ✅ | ✅ | — | ✅ | — | — | — | — | ✅ | ✅ | Onboard / edit / remove devices, manage the dead-letter queue, administer support access — but not invoke tools (human) |
+| **viewer** | ✅ | — | — | ✅ | — | — | — | — | — | — | Read-only (human) — *current `viewer`* |
+| **auditor** | — | — | — | ✅ | — | — | — | — | — | — | Observability / compliance, no device access (human). Widens to `audit:read` when that scope exists |
+| **caller** (agent) | ✅ | — | ✅ | — | — | — | — | — | — | — | An MCP client/agent that discovers and invokes tools — **machine identity**, not a UI role |
+| **backup** (agent) | — | — | — | — | ✅ | ✅ | — | — | — | — | A scheduled backup/restore job — **machine identity**. Deliberately not `admin`: a nightly cron entry should not also be able to invoke tools or edit the fleet, and the portable archive stays an explicit operator action rather than a standing grant |
+| **console** (agent) | ✅ | ✅ | ✅ | ✅ | — | — | — | — | ✅ | ✅ | The console's BFF relaying a **password** session, which has no per-user token to pass through — **machine identity**. `operator` ∪ `caller` (both provider- and tenant-plane views live in this one process today, ADR-0017/pre-ADR-0021), and deliberately no `backup:*` (below) |
 
-All seven roles are defined in [`ROLE_SCOPES`](../device_mcp_gateway/rbac.py) today
+| **support-requester** (agent) | — | — | — | — | — | — | — | ✅ | — | — | The identity a **provider** presents to THIS tenant's gateway so it can ask for access and watch its own request — **machine identity**. The narrowest bundle here, and the narrowness is the point: it reads nothing, writes nothing, invokes nothing and decides nothing. Notably **not** `support:administer` — approving is the tenant's act, and a provider that could approve its own request would be asserting the authority ADR-0017 says must be delegated |
+
+All eight roles are defined in [`ROLE_SCOPES`](../device_mcp_gateway/rbac.py) today
 (`operator`/`auditor`/`caller` were added with the OIDC work, ADR-0007; `backup` with
 ADR-0011; `console` with ADR-0023 slice 4). Add a role by adding one entry to `ROLE_SCOPES`
 — no route changes. `devices:write-planned` has no column here, deliberately: it is not a

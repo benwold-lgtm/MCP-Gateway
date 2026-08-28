@@ -234,9 +234,12 @@ _KEY_PREFIXES = (
 _ALLOWED = {
     # An in-process SseTransport label, not a Redis key.
     ("api/fleet.py", "fleet:"),
-    # An RBAC scope constant (ADR-0017), not a Redis key — coincidentally shares the
-    # `support:` namespace with the support-grant keys this same ADR adds.
+    # RBAC scope constants (ADR-0017), not Redis keys — they coincidentally share the
+    # `support:` namespace with the support-grant keys the same ADR adds. Two of them since
+    # §7a split asking from deciding: `support:request` is the provider's authority,
+    # `support:administer` the tenant's.
     ("rbac.py", "support:administer"),
+    ("rbac.py", "support:request"),
 }
 
 
