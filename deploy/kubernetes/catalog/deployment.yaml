@@ -30,13 +30,31 @@ spec:
                 secretKeyRef:
                   name: catalog-secrets
                   key: database-url
-            # The one caller this service authenticates today (the console BFF's
-            # CatalogClient) — see device_mcp_catalog/app/config.py.
+            # The PROVIDER's credential: the privileged caller class (ADR-0020 §7a) —
+            # curate, assign, read everything. The provider console's own
+            # CATALOG_API_TOKEN must match this value; a tenant's must not.
             - name: CATALOG_API_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: catalog-secrets
                   key: api-token
+                  optional: true
+            # The tenant caller class: a JSON map {tenant_id: token}, one entry per tenant
+            # console that reads the catalog directly. Each token admits exactly that
+            # tenant's assignments and claims — the tenant is read from the credential, never
+            # from the request (ADR-0020 §7a).
+            #
+            # Optional, and empty is correct for a provider plane whose tenants do not read
+            # the catalog. Malformed is NOT tolerated: a token shared with the provider, or
+            # between two tenants, refuses startup rather than picking a winner — unlike the
+            # database, where unavailability is a named condition the service stays up to
+            # report. A credential table that resolves ambiguously does not fail to answer,
+            # it answers as the wrong caller.
+            - name: CATALOG_TENANT_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-secrets
+                  key: tenant-tokens
                   optional: true
           resources:
             requests:

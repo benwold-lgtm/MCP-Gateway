@@ -390,12 +390,13 @@ softened. Acceptable only where that downtime is genuinely tolerable.
 
 ## Catalog service (ADR-0020)
 
-> **Status: slice 0 of the ADR-0020 build.** The service exists (`device_mcp_catalog/`),
-> deployed (`deploy/kubernetes/catalog/`), and holds a real PostgreSQL connection with
-> named-unavailable readiness (`/readyz`) — but curates nothing yet. Device-type curation,
-> per-tenant assignment, the claim flow, and version/upgrade offers are later slices of the
-> same build; this section describes the deployment shape those slices land on top of, not a
-> finished feature.
+> **Status: ADR-0020 phase 1 (§1–§5) is built** — the service (`device_mcp_catalog/`),
+> deployed (`deploy/kubernetes/catalog/`), device-type curation, per-tenant assignment, the
+> claim flow and upgrade offers, with a real PostgreSQL connection and named-unavailable
+> readiness (`/readyz`). Since ADR-0020 §7a it authenticates **two caller classes** rather
+> than one shared token; see "Reachability" below, because the tenant half needs a deliberate
+> change here before it works at all. §6 (provider-operated services) and per-tool→scope
+> mapping remain deferred.
 
 The provider's device catalog is a **separate process with its own PostgreSQL database**,
 not a client library bolted onto the gateway the way Redis is (ADR-0020 §7: "a separate
@@ -432,10 +433,20 @@ or an accidental `DROP`).
 **Reachability is deliberately narrow.** `deploy/kubernetes/catalog/networkpolicy.yaml`
 accepts ingress on the catalog's port only from the **provider** console BFF's namespace
 (`mcp-gateway-ui` by default — set this to wherever yours actually runs); the gateway and
-worker have no reason to reach it and none is granted. A *tenant* console has no business
-reaching it either: a tenant sees offered device types through its own gateway, which is what
-keeps ADR-0020 §2's "assignment is an offer, claiming is the tenant's act" a real boundary
-rather than a UI convention.
+worker have no reason to reach it and none is granted.
+
+⚠️ **This section previously said a tenant console has no business reaching the catalog
+either. That was wrong about the code and is corrected rather than quietly rewritten.** The
+tenant console's catalog routes read the catalog service directly and always have — see
+[ADR-0020 §7a](adr/0020-the-device-catalog.md). What was true is that this policy never let
+them, and that is the only reason a single shared credential spanning the provider plane and
+every tenant was never reachable in a deployment.
+
+Enabling a tenant's claim view is therefore a **two-part change, in this order**: give that
+tenant its own catalog credential (`tenant-tokens` in `catalog-secrets`), *then* add its
+namespace to the policy. The reverse order is the configuration §7a exists to prevent. The
+catalog refuses to start if a tenant's token is the provider's, so the first step cannot be
+faked, but nothing enforces the ordering itself.
 
 Postgres is restricted to the catalog pod alone — and standing in its own namespace this is
 now an enforcement change, not only a declaration. While the catalog shared the gateway's

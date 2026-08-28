@@ -18,11 +18,12 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from loguru import logger
 
 from . import assignments, claims, device_types, upgrades
+from .auth import Caller, authenticate_caller
 from .config import load_settings
 from .db import Database
 
@@ -65,6 +66,24 @@ def create_app() -> FastAPI:
         if not await db.ping():
             return JSONResponse(status_code=503, content={"status": "unavailable", "reason": "database unreachable"})
         return JSONResponse(status_code=200, content={"status": "ok"})
+
+    @app.get("/whoami")
+    async def whoami(caller: Caller = Depends(authenticate_caller)) -> dict:
+        """Which caller class this credential is, and which tenant it speaks for.
+
+        Exists to close the one misconfiguration §7a's caller table cannot catch by itself.
+        This service refuses at startup if two *configured* callers share a token, but nothing
+        here can tell that an operator pasted the **provider's** credential into a tenant's
+        BFF: that request simply arrives as the provider, correctly authenticated, and the
+        cross-tenant authority §7a exists to remove is quietly back.
+
+        A caller that knows which tenant it is supposed to be can ask, and refuse to use a
+        credential that answers with anything else (`CatalogClient.request` in the UI repo does
+        exactly that). Reads nothing and touches no database, so it stays answerable while the
+        store is down — a credential check is not availability, and conflating the two is what
+        ADR-0020 §7 already warns against in the other direction.
+        """
+        return {"kind": caller.kind, "tenant_id": caller.tenant_id}
 
     app.include_router(device_types.router)
     app.include_router(assignments.router)

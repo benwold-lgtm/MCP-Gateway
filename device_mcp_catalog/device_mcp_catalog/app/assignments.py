@@ -15,11 +15,11 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from .auth import require_api_token
+from .auth import Caller, enforce_tenant_scope, require_provider
 from .repo import AssignmentNotFound, AssignmentRepo, DeviceTypeNotFound
 from .schemas import AssignRequest, Assignment, TenantAssignmentsResponse
 
-router = APIRouter(dependencies=[Depends(require_api_token)])
+router = APIRouter(dependencies=[Depends(enforce_tenant_scope)])
 
 
 def _repo(request: Request) -> AssignmentRepo:
@@ -27,7 +27,12 @@ def _repo(request: Request) -> AssignmentRepo:
 
 
 @router.post("/device-types/{type_id}/assign", response_model=Assignment, status_code=201)
-async def assign_device_type(type_id: uuid.UUID, body: AssignRequest, request: Request):
+async def assign_device_type(
+    type_id: uuid.UUID, body: AssignRequest, request: Request, _: Caller = Depends(require_provider)
+):
+    """Provider-only. Note this route names a tenant in its body and is still gated on the
+    provider class: a tenant assigning a device type to itself would be granting itself an
+    offer, which is the provider's half of §2 and not a scoping question."""
     try:
         return await _repo(request).assign(type_id, body.tenant_id, body.assigned_by)
     except DeviceTypeNotFound:
@@ -35,7 +40,9 @@ async def assign_device_type(type_id: uuid.UUID, body: AssignRequest, request: R
 
 
 @router.delete("/device-types/{type_id}/assign/{tenant_id}", status_code=204)
-async def revoke_assignment(type_id: uuid.UUID, tenant_id: str, request: Request):
+async def revoke_assignment(
+    type_id: uuid.UUID, tenant_id: str, request: Request, _: Caller = Depends(require_provider)
+):
     try:
         await _repo(request).revoke(type_id, tenant_id)
     except AssignmentNotFound:
@@ -44,4 +51,8 @@ async def revoke_assignment(type_id: uuid.UUID, tenant_id: str, request: Request
 
 @router.get("/tenants/{tenant_id}/assignments", response_model=TenantAssignmentsResponse)
 async def list_tenant_assignments(tenant_id: str, request: Request):
+    """Both caller classes. `tenant_id` is still a path parameter — a client assertion — and
+    `enforce_tenant_scope` has already refused the request if a tenant caller named anyone but
+    itself, so by the time this body runs the two agree. The parameter is not the authority;
+    the credential is."""
     return TenantAssignmentsResponse(device_types=await _repo(request).list_for_tenant(tenant_id))

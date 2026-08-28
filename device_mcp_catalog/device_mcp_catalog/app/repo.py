@@ -226,6 +226,27 @@ class AssignmentRepo:
         )
         return [DeviceType(**dict(row)) for row in rows]
 
+    async def is_assigned(self, device_type_id: uuid.UUID, tenant_id: str) -> bool:
+        """Whether this type is *currently* offered to this tenant (ADR-0020 §7a).
+
+        Deliberately not expressed as `device_type_id in list_for_tenant(...)`: that reads the
+        whole offer list to answer a yes/no, and it would drift the moment the list route
+        gained a filter this check should not inherit. `revoked_at IS NULL` mirrors
+        `list_for_tenant`'s own definition of an active offer — a revoked assignment is absent,
+        never a row with a flag on it.
+        """
+        return bool(
+            await self._db.pool.fetchval(
+                """
+                SELECT 1 FROM assignments
+                WHERE device_type_id = $1 AND tenant_id = $2 AND revoked_at IS NULL
+                LIMIT 1
+                """,
+                device_type_id,
+                tenant_id,
+            )
+        )
+
 
 class ClaimRepo:
     """ADR-0020 §4: records which device-type version a tenant's claimed device came from —

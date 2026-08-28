@@ -22,11 +22,37 @@ Tests that need a real Postgres are marked `integration` and skip (not fail) whe
 `CATALOG_TEST_DATABASE_URL` (default `postgresql://postgres:test@localhost:55432/catalog_test`)
 is unreachable — there is no fake/in-memory double for this store.
 
+## Callers (ADR-0020 §7a)
+
+Every route requires `Authorization: Bearer <token>`, and **which token decides what the
+caller may do and, for a tenant, which tenant it is**:
+
+| Caller | Configured as | May |
+|---|---|---|
+| Provider console | `CATALOG_API_TOKEN` | curate, assign and revoke, read everything |
+| A tenant's console | one entry in `CATALOG_TENANT_TOKENS`, a JSON `{tenant_id: token}` map | read the types assigned **to it**, record claims **for itself** |
+
+Two rules follow, and the routes below are written assuming them:
+
+* **The tenant comes from the credential, never from the request.** A `tenant_id` in a path or
+  a body is a client assertion. A tenant caller that names anyone but itself is refused with
+  `403` — never filtered to an empty result, never rewritten to its own tenant.
+* **A tenant caller cannot see the unscoped catalog.** `GET /device-types` is provider-only;
+  for a tenant, the type list *is* the assignment list.
+
+A malformed caller table — a tenant token equal to the provider's, or shared between two
+tenants — **refuses startup**. Unlike an unreachable database, which this service stays up to
+report as a named condition, an ambiguous credential does not fail to answer: it answers as
+the wrong caller.
+
+`GET /whoami` returns `{kind, tenant_id}` for the presented credential. It exists so a tenant
+console can verify on startup that it was not handed the provider's token — the one
+misconfiguration this service cannot detect from its own side, since that request is a
+perfectly valid provider request.
+
 ## API (device-type curation, ADR-0020 §1)
 
-Every route below requires `Authorization: Bearer $CATALOG_API_TOKEN` — this service has
-exactly one caller in phase 1 (the console BFF), so a shared token gates all of it rather
-than a scope model with no second caller yet to justify it.
+Provider-only (see Callers above).
 
 - `POST /device-types` — create a device type and its version 1.
 - `POST /device-types/{id}/versions` — add the next version (monotonic, immutable once created).
@@ -39,8 +65,9 @@ names the appliance model, never an instance's address.
 
 ## API (assignment, ADR-0020 §2)
 
-Assignment is an offer, written here only — it never reaches a tenant's registry. Same
-bearer-token gate as curation.
+Assignment is an offer, written here only — it never reaches a tenant's registry. Assigning
+and revoking are provider-only; reading a tenant's assignments is available to that tenant's
+own credential as well.
 
 - `POST /device-types/{id}/assign` (`{tenant_id, assigned_by}`) — offer a type to a tenant.
   Idempotent: assigning an already-active pair returns the existing assignment rather than
