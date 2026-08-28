@@ -126,6 +126,15 @@ class Settings:
     # present, so every caller must be the provider.
     tenant_tokens: dict[str, str] = field(default_factory=dict)
 
+    # --- Metrics (ADR-0020 §7b) ------------------------------------------------------
+    # A dedicated exposition port, never the API port: the API is entirely credential-gated
+    # and an unauthenticated /metrics beside it would be a hole in the surface §7a closed.
+    # Unauthenticated by default and restricted by NetworkPolicy, with an optional bearer
+    # token — the same arrangement and the same caveat as the gateway's own (F-36).
+    metrics_enabled: bool = True
+    metrics_port: int = 9100
+    metrics_token: str = ""
+
 
 def load_settings() -> Settings:
     provider_token = _secret("CATALOG_API_TOKEN", "CATALOG_API_TOKEN_FILE")
@@ -140,4 +149,7 @@ def load_settings() -> Settings:
         tenant_tokens=_parse_tenant_tokens(
             _secret("CATALOG_TENANT_TOKENS", "CATALOG_TENANT_TOKENS_FILE"), provider_token
         ),
+        metrics_enabled=os.getenv("CATALOG_METRICS_ENABLED", "true").strip().lower() not in ("false", "0", "no"),
+        metrics_port=int(os.getenv("CATALOG_METRICS_PORT", "9100")),
+        metrics_token=_secret("CATALOG_METRICS_TOKEN", "CATALOG_METRICS_TOKEN_FILE"),
     )

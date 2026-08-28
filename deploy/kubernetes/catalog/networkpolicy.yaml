@@ -74,7 +74,41 @@ spec:
           protocol: TCP
 
 ---
-# ── 3. Catalog Postgres ────────────────────────────────────────────────────────────
+# ── 3. Monitoring scrape (ADR-0020 §7b) ────────────────────────────────────────────
+# Without this the namespace default-deny silently drops every scrape, and the alert this
+# service now exists to raise never fires — which is the worst possible failure for a
+# should-never-happen alert: it is indistinguishable from the condition never occurring.
+#
+# ⚠️ Set the namespace to wherever YOUR Prometheus runs. `monitoring` is the
+# kube-prometheus-stack default and is a guess about your cluster, exactly as it is in the
+# gateway stack's own equivalent rule.
+#
+# Only :9100 is opened, never the API port. The exposition endpoint is unauthenticated by
+# default (set CATALOG_METRICS_TOKEN to change that), so this rule is what keeps it from
+# being readable by every namespace in the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-scrape
+  labels:
+    app.kubernetes.io/name: device-mcp-catalog
+spec:
+  podSelector:
+    matchLabels:
+      app: device-mcp-catalog
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 9100
+          protocol: TCP
+
+---
+# ── 4. Catalog Postgres ────────────────────────────────────────────────────────────
 # The store holding every device type and assignment record in the estate is reachable by
 # the catalog service alone.
 #

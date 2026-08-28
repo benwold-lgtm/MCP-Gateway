@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from . import assignments, claims, device_types, upgrades
+from . import assignments, claims, device_types, metrics, upgrades
 from .auth import Caller, authenticate_caller
 from .config import load_settings
 from .db import Database
@@ -32,6 +32,11 @@ from .db import Database
 async def _lifespan(app: FastAPI):
     settings = load_settings()
     app.state.settings = settings
+    if settings.metrics_enabled:
+        # Started before the database, deliberately: §7b's condition is a credential problem,
+        # and a catalog that came up with an unreachable store still authenticates callers and
+        # can still be handed the wrong credential. The alert must not depend on the store.
+        metrics.start_metrics_server(settings.metrics_port, auth_token=settings.metrics_token or None)
     db = Database(settings.database_url)
     if settings.database_url:
         try:
@@ -77,11 +82,17 @@ def create_app() -> FastAPI:
         BFF: that request simply arrives as the provider, correctly authenticated, and the
         cross-tenant authority §7a exists to remove is quietly back.
 
-        A caller that knows which tenant it is supposed to be can ask, and refuse to use a
-        credential that answers with anything else (`CatalogClient.request` in the UI repo does
-        exactly that). Reads nothing and touches no database, so it stays answerable while the
-        store is down — a credential check is not availability, and conflating the two is what
-        ADR-0020 §7 already warns against in the other direction.
+        **A diagnostic, not a gate (§7b).** The check that consumed this used to live in the
+        tenant BFF, which decided client-side whether to proceed — a client-side gate on a
+        server-enforced property, and the same wrong-layer error §7a corrected. Enforcement now
+        happens here, on every request, against the `X-Catalog-Tenant` declaration
+        (`auth._check_declaration`). What survives is the question this route is actually good
+        at answering: *what am I holding?*
+
+        Reads nothing and touches no database, so it stays answerable while the store is down —
+        a credential check is not availability, and conflating the two is what ADR-0020 §7 warns
+        against in the other direction. It takes a credential but no declaration: asking what
+        you hold cannot require already knowing.
         """
         return {"kind": caller.kind, "tenant_id": caller.tenant_id}
 

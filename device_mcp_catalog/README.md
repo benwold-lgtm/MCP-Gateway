@@ -45,10 +45,31 @@ tenants — **refuses startup**. Unlike an unreachable database, which this serv
 report as a named condition, an ambiguous credential does not fail to answer: it answers as
 the wrong caller.
 
-`GET /whoami` returns `{kind, tenant_id}` for the presented credential. It exists so a tenant
-console can verify on startup that it was not handed the provider's token — the one
-misconfiguration this service cannot detect from its own side, since that request is a
-perfectly valid provider request.
+**A tenant caller also declares itself (ADR-0020 §7b).** Every tenant-caller request carries
+`X-Catalog-Tenant: <tenant_id>` — the tenant that *deployment* believes it serves — and the
+service refuses when that disagrees with the credential:
+
+| Credential | `X-Catalog-Tenant` | Result |
+|---|---|---|
+| provider | absent | served (the provider console declares no tenant) |
+| provider | present | **`403 ERR_CREDENTIAL_MISDELIVERY`** — the provider's token is installed in a tenant's console |
+| tenant | absent | `403 ERR_TENANT_NOT_DECLARED` |
+| tenant | a different tenant | **`403 ERR_CREDENTIAL_MISDELIVERY`** — another tenant's token is installed here |
+| tenant | its own | served |
+
+The rules above trust the credential completely — that is their job — so none of them can notice
+a credential *delivered to the wrong console*. Such a request is otherwise indistinguishable
+from a correct one. The declaration is the second assertion that makes the disagreement visible,
+and it is required rather than optional because an optional one is skipped by exactly the
+deployment that got its credential wrong.
+
+A misdelivery increments `catalog_credential_misdelivery_total` and is expected to page
+(`deploy/kubernetes/catalog/monitoring.yaml`). It is checked **before** the scope rules: a
+console consistently wrong about its own identity satisfies those rules perfectly.
+
+`GET /whoami` returns `{kind, tenant_id}` for the presented credential — a **diagnostic**, not a
+gate. It takes a credential but no declaration, since asking what you hold cannot require
+already knowing.
 
 ## API (device-type curation, ADR-0020 §1)
 

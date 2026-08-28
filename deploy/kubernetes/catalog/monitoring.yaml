@@ -1,0 +1,69 @@
+# Prometheus Operator wiring for the catalog service (ADR-0020 §7b).
+#
+# OPTIONAL and NOT in kustomization.yaml, matching the gateway stack's own
+# servicemonitor.yaml: both objects need the Operator CRDs
+# (monitoring.coreos.com/v1). Apply only if you run the Operator.
+#
+#   kubectl apply -f deploy/kubernetes/catalog/monitoring.yaml
+#
+# ⚠️ Applying this WITHOUT the matching NetworkPolicy rule (networkpolicy.yaml, policy 3)
+# produces a ServiceMonitor that discovers the target and never scrapes it. The alert
+# below then stays silent, which is indistinguishable from the condition never occurring —
+# the worst failure mode available to a should-never-happen alert.
+#
+# The `release:` label must match your Operator's serviceMonitorSelector /
+# ruleSelector (e.g. `release: kube-prometheus-stack` for the common Helm chart).
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: device-mcp-catalog
+  labels:
+    app.kubernetes.io/name: device-mcp-catalog
+    release: kube-prometheus-stack   # match your Operator's serviceMonitorSelector
+spec:
+  # No `namespaceSelector`, for the same reason the gateway's file gives: an omitted
+  # selector means "this ServiceMonitor's own namespace", which is the only form that
+  # survives kustomize's `namespace:` transformer — that transformer does not rewrite
+  # `namespaceSelector.matchNames`, since it is a CRD field.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: device-mcp-catalog
+  endpoints:
+    - port: metrics          # the named :9100 port on the catalog Service
+      path: /metrics
+      interval: 30s
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: device-mcp-catalog
+  labels:
+    app.kubernetes.io/name: device-mcp-catalog
+    release: kube-prometheus-stack   # match your Operator's ruleSelector
+spec:
+  groups:
+    - name: mcp-catalog.credentials
+      rules:
+        - alert: MCPCatalogCredentialMisdelivery
+          # Deliberately shaped like MCPBreakGlassActivated in the gateway stack's
+          # prometheus-rules.yaml, rather than as a new kind of signal: both are
+          # "this should never happen, and a human needs to know now."
+          expr: sum by (declared_tenant, credential_kind) (increase(catalog_credential_misdelivery_total[10m])) > 0
+          labels:
+            severity: page
+          annotations:
+            summary: "A console serving tenant {{ $labels.declared_tenant }} is holding the wrong catalog credential"
+            description: "A console declaring itself tenant {{ $labels.declared_tenant }} presented a {{ $labels.credential_kind }} credential that does not belong to it (ADR-0020 §7b). The credential is VALID — this is a provisioning error, not an attack signature, and the request was refused. If credential_kind is 'provider', that deployment was one check away from reading and writing every tenant's catalog data. Correct the deployment's CATALOG_API_TOKEN; its catalog features stay refused until you do."
+        - alert: MCPCatalogTenantDeclarationMissing
+          # A different condition and deliberately not a page: this is a console that has
+          # not been updated to declare itself, not a credential in the wrong place. It
+          # still means that tenant's catalog is entirely refused, so it is not nothing.
+          expr: sum by (credential_tenant) (increase(catalog_tenant_declaration_missing_total[30m])) > 0
+          for: 15m
+          labels:
+            severity: ticket
+          annotations:
+            summary: "Tenant {{ $labels.credential_tenant }}'s console is not declaring its tenant"
+            description: "A caller holding tenant {{ $labels.credential_tenant }}'s catalog credential is not sending X-Catalog-Tenant, so every catalog request from it is refused (ADR-0020 §7b). Usually a console predating that requirement. The declaration is mandatory rather than optional because an optional one is skipped by exactly the deployment that got its credential wrong."

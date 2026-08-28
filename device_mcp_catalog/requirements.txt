@@ -26,6 +26,8 @@ idna==3.19
     # via anyio
 loguru==0.7.3
     # via device-mcp-catalog (pyproject.toml)
+prometheus-client==0.26.0
+    # via device-mcp-catalog (pyproject.toml)
 pydantic==2.13.4
     # via
     #   device-mcp-catalog (pyproject.toml)
