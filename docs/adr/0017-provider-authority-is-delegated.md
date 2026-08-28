@@ -398,6 +398,78 @@ legitimately given both scopes, which an estate running one directory across bot
 create without noticing. It does **not** defend against a second provider identity approving
 the first's request; no self-check can, and the scope split is what does.
 
+### 7b. Who on the provider's side may ask, and for what (amendment, 2026-08-28)
+
+**Found in the same lab session as §7a**, by signing in to the provider console as a
+read-only operator — the negative test, which is the one that finds these.
+
+§7a settled the authority *between* the planes. It left unstated something the record had
+never addressed at all: which **provider-plane** role may raise a request. The implementation
+had answered `provider:admin`, and the console had answered "anyone with any provider scope" —
+so a `provider:monitor` session was offered the whole raise form and refused on submit.
+
+The console's answer was wrong and the BFF's answer was also wrong, in opposite directions.
+
+**Asking is not an authority.** That is §7's own premise: the raiser's identity "authorizes
+nothing by itself", and every capability arrives only through a grant the tenant's gateway
+mints after a human on the tenant's side approves. A role that may read a tenant's estate but
+may not *ask* to be helped with it must find an admin to ask on its behalf — and the moment it
+does, the `provider_subject` on the request names the admin, not the operator who will use the
+grant. **That is precisely the identity collapse §7's residual asks us to test for**, arrived
+at through a role boundary rather than through a relay.
+
+So `provider:monitor` may raise, poll, hold and release. Those four move together: a role that
+may ask but not poll can ask and never learn the answer, and one that cannot release cannot
+hand back what it holds.
+
+**What is narrowed instead is the vocabulary it may name:**
+
+| Provider scope | May raise | May request |
+|---|---|---|
+| `provider:monitor` | yes | `devices:read`, `metrics:read` — read-only, and enforced |
+| `provider:admin` | yes | unconstrained by this plane |
+
+`tools:call` is deliberately not in the monitor set. Invoking a tool is how a diagnosis is
+actually performed, which is the argument for including it — but the gateway cannot tell a
+read-only tool from a destructive one, so it stays admin-raised.
+
+Admin being *unconstrained* is a decision, not an omission. What an admin may ask for is
+already bounded by two things stronger than a list in the console's process: the tenant's own
+RBAC on its gateway, and a tenant administrator reading the request and deciding. The console
+offers a short menu of the routine scopes for ergonomics; an operator who genuinely needs
+`backup:*` is not blocked from naming it.
+
+#### Where this is enforced, and why it can only be there
+
+**The tenant's gateway cannot enforce it.** Since §7a the provider authenticates with a single
+`support:request` credential the tenant issued to the provider *organisation*. The gateway sees
+that credential, not which provider employee is behind it, so it cannot distinguish a monitor's
+raise from an admin's. The browser cannot enforce it either — a narrowed checkbox list is a
+statement about the UI, and a hand-made POST ignores it.
+
+That leaves the provider's own BFF as the only component that holds both facts at once: the
+authenticated operator's provider scopes, and the request being raised. So the constraint lives
+there, and is stated here as a property to test rather than a list to maintain: **a session
+without `provider:admin` cannot cause a request naming a write-shaped scope to reach any
+tenant's gateway.** The refusal is audited as `denied`/`scope_above_role`.
+
+This is a **provider-side** control, and its trust properties should not be overstated. It
+governs what a provider's own operators can ask for; it is not a guarantee the tenant is owed,
+because the tenant's guarantee is the one that has not moved — nothing is granted until a
+tenant administrator approves the request in front of them, and the scopes they approve are the
+scopes the grant carries.
+
+#### The shape worth remembering
+
+A control that was offered and then refused. The gate existed on the server and the console
+never asked what it was, so the two drifted, and **no test could see it**: the BFF suite proved
+admin could raise and never asked what a monitor got, the console suite rendered the panel and
+never asked who was looking at it. It took a browser, a second role, and the negative case.
+
+That is the same lesson as §7a's from the same day — a collision that only exists once two
+things are genuinely separate — arriving this time as two *layers* that were never asked to
+agree, rather than two planes.
+
 ### 8. Revocation tries to stop work in flight; expiry does not
 
 ADR-0013's D4 asked what happens to an in-flight call when a grant ends, and the answer for
