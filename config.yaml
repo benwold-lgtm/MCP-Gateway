@@ -450,10 +450,19 @@ cors:
   allowed_origins: []
 
 security:
-  # SSRF policy (Tier-0 F-02): device base_url/spec_url are fetched server-side, so by
-  # default the gateway refuses targets that resolve to internal/loopback/link-local/
-  # private addresses (e.g. cloud metadata 169.254.169.254). Set true ONLY for a trusted
-  # internal device fleet where devices legitimately live on private addresses.
+  # SSRF policy (Tier-0 F-02). Applies to EVERY URL the gateway fetches server-side, which
+  # is more than devices: device base_url/spec_url, and also the OIDC issuer, an explicit
+  # gateway.oidc.jwks_uri, and the JWKS fetch itself (TM-I-10). By default the gateway
+  # refuses targets resolving to internal/loopback/link-local/private addresses (e.g. cloud
+  # metadata at 169.254.169.254). Set true ONLY for a trusted internal deployment — devices
+  # on private addresses, or an on-premises IdP.
+  #
+  # ⚠️ For OIDC this is checked at STARTUP, not on the first login. An on-prem IdP on a
+  # private address makes the gateway REFUSE TO START, naming the field it rejected —
+  # it does not look like a login problem, because no login has happened yet.
+  #
+  # Not the same thing as allow_plaintext_idp below, and deliberately not one flag: this
+  # one is about WHERE a target is, that one about whether the connection is encrypted.
   # Env override: MCP_ALLOW_PRIVATE_TARGETS=true.
   allow_private_targets: false
 
@@ -466,7 +475,9 @@ security:
   # lab or air-gapped deployment; it is warned about loudly at startup when set.
   allow_plaintext_idp: false
 
-  # Which ports a device target URL may use. EMPTY (the default) does NOT mean "any port":
+  # Which ports a server-side fetch may use — device target URLs, and equally the OIDC
+  # issuer and JWKS endpoint (see allow_private_targets above; the same policy covers both).
+  # EMPTY (the default) does NOT mean "any port":
   # it means the built-in denylist applies, refusing ports that carry a non-HTTP protocol —
   # 22 SSH, 23, 25/465/587 SMTP, 53, 110/143/993/995 mail, 135/139/445 SMB, 389/636 LDAP,
   # 1433, 2049, 3306, 3389, 5432, 5900, 6379 Redis, 11211, 27017 — plus 2375/2376, which
@@ -481,6 +492,10 @@ security:
   # only these ports are permitted, and you can deliberately re-open a denylisted one.
   #   allowed_target_ports: [80, 443]            # tightest posture
   #   allowed_target_ports: [80, 443, 8080]      # ...plus one known fleet port
+  #
+  # ⚠️ Remember the IdP when tightening this. An allowlist chosen for a device fleet will
+  # also refuse an IdP on a port outside it — at startup, as above. An IdP on 9000 (or any
+  # other non-listed port) needs its port here too.
   allowed_target_ports: []
 
   # Address ranges your reverse proxies / load balancers connect FROM — the required
