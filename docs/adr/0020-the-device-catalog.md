@@ -172,6 +172,118 @@ Where it physically lives — its own database, a managed service, a schema in a
 stays a deployment choice. What is fixed is that it is not reached through the BFF's process
 boundary and does not share the BFF's availability.
 
+### 7a. The catalog needs a caller identity per tenant (amendment, 2026-08-28)
+
+> **Not built.** This section records a decision, not an implementation. The catalog today
+> still authenticates a single shared token exactly as described below. Nothing here is
+> deployed anywhere, and the tenant-facing claim path must not be deployed until it is.
+
+**Found trying to run the claim flow end to end for the first time**, in a lab where the
+provider plane and a tenant stack are separate deployments on separate hosts. §2 is the half
+of this record that had never been executed.
+
+The catalog authenticates **one shared bearer token** for every route, and `auth.py` states
+its own assumption plainly:
+
+> *"Phase 1 has exactly one caller (the console BFF's `CatalogClient`) — see the plan's own
+> reasoning for not building a scope model with no second caller yet to justify it."*
+
+That reasoning was sound. What invalidates it is that **the second caller already exists in
+the code**: the tenant console's own catalog routes — listing assigned types, claiming one,
+and the upgrade offers — read the catalog *directly*, through the same client and therefore
+the same token. They were built in the same phase as the assumption and never tested against
+it, because no tenant stack had yet been wired to a catalog.
+
+So deploying §2's tenant half as it stands means **every tenant's BFF holds the provider's
+catalog token**, and the catalog authorizes nothing beyond possessing it:
+
+- `GET /tenants/{tenant_id}/assignments` takes the tenant from the **URL path**. A holder can
+  read any other tenant's assignments — which device types a competitor has been offered.
+- `RecordClaim` takes `tenant_id` from the **request body**. A holder can record claims
+  against another tenant, corrupting the provenance the upgrade-offer diff depends on.
+- The same token reaches the curation and assignment routes. A tenant could curate a device
+  type and assign it to themselves — or to anyone.
+
+**The tenant console is not the problem, and that is the instructive part.** It already does
+the right thing: its list route asks for *this* tenant's assignments rather than the unscoped
+catalog, and its claim route refuses a type not assigned to it. The behaviour is correct and
+the **enforcement is in the wrong layer** — it holds exactly as long as no BFF route forgets
+it. This codebase has already made that argument once, in `rbac.py`, about the `console` role
+and the backup scopes: *"A role that cannot express the scope moves it to the gateway, where a
+console-side bug cannot undo it."* The same reasoning applies to the catalog, and this is the
+same mistake one component along.
+
+#### Decision: two caller classes, and the tenant is derived from the credential
+
+| Caller | Holds | May |
+|---|---|---|
+| **Provider console** | one privileged catalog credential | curate device types, assign and revoke assignments, read everything |
+| **A tenant's console** | its own credential, one per tenant | read the device types assigned **to it**, and record claims **for itself** |
+
+Two rules make it work, and neither is optional:
+
+**The tenant is read from the credential, never from the request.** A path parameter or a body
+field naming a tenant is a *client assertion*, and this codebase has already settled how those
+are treated everywhere else it matters — ADR-0017's `provider_subject` is "filled in from the
+session's own subject and never taken from the request body", and §2's own `assigned_by`
+follows the same rule. The catalog's `tenant_id` is the one place that pattern was not applied,
+because with a single trusted caller there was nothing to distinguish. A request whose named
+tenant disagrees with its credential's tenant is **refused**, not quietly reinterpreted — the
+disagreement is the signal.
+
+**A tenant caller cannot see the unscoped catalog.** `GET /device-types` enumerates every
+curated type across the estate. Scoping only the assignments route would still let a tenant
+read the provider's whole catalogue, which is estate shape they have no claim to. For a tenant
+caller the type list *is* the assignment list.
+
+#### What this costs, stated rather than glossed
+
+The catalog gains its **first authorization model**, having deliberately had none — a caller
+table mapping a credential to a kind and, for tenant callers, to exactly one tenant. That is
+new surface in a component whose simplicity was a feature.
+
+It also creates a **credential per tenant to provision, rotate and revoke**, which is real
+operational weight and a new way for onboarding to fail. Two things make it the right trade
+anyway: the alternative is a shared secret whose blast radius is the entire estate, and
+ADR-0018's by-reference discipline already covers operator-provisioned secrets of exactly this
+shape, so the mechanism exists.
+
+Rejected alternatives, briefly. **Routing the tenant's catalog reads through the provider's
+console** removes the tenant's token but makes a tenant unable to onboard a device while the
+provider's console is down, inverting ADR-0017's dependency direction for no security gain —
+the provider BFF would then have to authenticate tenants, which is this same problem moved.
+**Mirroring assignments into each tenant's stack** replaces an authorization question with a
+synchronisation one, and §7 has already ruled that unavailability must be a named condition
+rather than something inferred from an empty list; a stale mirror is precisely an empty list
+that cannot say why.
+
+#### The property to test
+
+Stated as a property because the positive case will pass on its own:
+
+> **A tenant caller naming a tenant other than its own is refused, on every route that names a
+> tenant.** Not filtered to an empty result, not silently rewritten to its own tenant —
+> refused, and audited.
+
+An implementation where each tenant only ever names itself is indistinguishable from a correct
+one until someone names a neighbour. That negative test is the whole check, and it is the same
+test that has now found three defects in this estate.
+
+#### The shape worth remembering
+
+**A documented assumption is not a guard.** `auth.py` named its own precondition — "exactly one
+caller" — accurately and in writing, and the precondition was invalidated by code added in the
+same phase, in another repository, that nobody re-read it against. The comment stayed true
+about the past and became false about the present, and nothing failed, because the second
+caller was built but never deployed.
+
+This is the third finding in one day with one shape: [ADR-0017 §7a](0017-provider-authority-is-delegated.md)
+(raising and deciding shared one scope), §7b (a console gate and a server gate that were never
+asked to agree), and now a shared token spanning two trust domains. Each was invisible until
+two things that had always run as one were finally deployed apart. **Deployment topology is a
+test input**, and an estate that has only ever run as one process has not tested its own
+boundaries.
+
 ### 8. Why this comes before ADR-0017 in the build order
 
 Once a provider cannot reach into a tenant's stack, the catalog is how they do their job.
@@ -202,6 +314,11 @@ operational pressure.
 - **Negative: catalog versioning is a migration problem in miniature** — N tenants on M
   versions of a device type, each needing an upgrade path. Deliberately accepted over the
   alternative in §4.
+- **Negative: the catalog needs its own authorization model, which §7 did not anticipate.**
+  Making it a separate component gave it a network boundary and therefore a caller identity
+  question, and phase 1 answered it with a single shared token on the strength of having one
+  caller. §7a is what that costs once the tenant half of §2 is real: a credential per tenant
+  to provision and rotate, in a component whose lack of an authorization model was a feature.
 
 ## Alternatives considered
 
