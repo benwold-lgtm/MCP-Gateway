@@ -554,10 +554,12 @@ edited.
 
 ### 7b. A credential can be correct and still be the wrong one (amendment, 2026-08-28)
 
-> **Partially built.** `GET /whoami` is on the catalog (§7a's build); the check that consumes
-> it lives in the tenant BFF and decides client-side (`CatalogClient`, UI repo). This section
-> keeps the check, **corrects the layer it runs in**, and specifies the alerting it does not yet
-> have. Neither the re-layered check nor the alert plane is built.
+> **BUILT 2026-08-28**, as decided — including the correction. The declaration
+> (`X-Catalog-Tenant`) is enforced in `auth._check_declaration` before the scope rules; the
+> catalog gained a metrics plane for this one condition, with a `severity: page` rule in
+> `deploy/kubernetes/catalog/monitoring.yaml`; `/whoami` was demoted to a diagnostic and the
+> BFF's client-side gate removed. **The open timing question below resolved itself** — see the
+> note at the end of it.
 
 #### The gap §7a cannot see, by construction
 
@@ -673,6 +675,15 @@ no heartbeat to schedule. If that holds, the answer to "when" is "always", and t
 question was an artefact of checking once and remembering the answer. That is worth confirming
 against a real deployment's request pattern before being written down as settled, which is why
 it is recorded as open rather than resolved by argument.
+
+> **Resolved by construction, 2026-08-28.** It held. The declaration is set once on the BFF's
+> long-lived client and sent with every catalog request; the catalog compares it every time and
+> caches nothing. All three candidate schedules — startup, credential reload, periodic heartbeat
+> — are subsumed, because a credential swapped in by any means, supported or not, is checked on
+> the next request that uses it. Recorded here rather than deleted because the *reason* is the
+> useful part: the question only existed while the check was something a client did once and
+> remembered, and moving the check to the server removed the state that needed a schedule. **A
+> caching decision was masquerading as a scheduling problem.**
 
 ### 8. Why this comes before ADR-0017 in the build order
 
