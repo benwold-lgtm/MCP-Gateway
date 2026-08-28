@@ -152,6 +152,101 @@ IdP flag was given no loopback exemption: one rule applied uniformly is easier t
 and to audit than a carve-out for "this caller is trusted enough to skip the guard", which is
 the kind of exception that erodes.
 
+### 4b. A snapshot is consumed by its own path (amendment, 2026-08-28)
+
+> **Not built**, like §4a and for the same reason: none of this exists until a curated spec
+> document does. Recorded now because each decision below has a cheaper wrong answer that is
+> easiest to take mid-slice, under time pressure, with the ADR closed.
+
+§4a decided what a curated spec *is*. Tracing it through the gateway showed it cannot yet be
+consumed at all: [`DeviceConfig`](../../device_mcp_gateway/schemas.py) carries a `spec_url` and
+nothing else, and `SpecService.fetch_spec` either GETs that URL or probes discovery paths on
+`base_url`. There is no registration input that takes spec *content*. This section decides how
+that gap is closed, because the cheap version of each answer is wrong in a way this codebase
+has already been bitten by.
+
+#### The claim path is a second construction path, not a new optional field
+
+A device claimed from a catalog type is built by an **internal construction path that takes the
+snapshot directly and never enters `spec_service.py`'s fetch logic**. Not the existing
+`spec_url`-driven path with an optional `spec_content` bolted beside it.
+
+One path that handles both *"fetch this live"* and *"this was already fetched, once, somewhere
+else"* is a function with two preconditions and no way to tell which one it is under. That is
+precisely the shape §7a found in the catalog's `auth.py` — a precondition stated accurately,
+invalidated by a second caller, and nothing failing because the two cases were never
+distinguished in code. Making them two paths means the ambiguity cannot arise.
+
+#### `_check_target_url(spec_url, …)` does not apply, which is not the same as being skipped
+
+On the claim path there is no URL to check, and the SSRF guard is therefore **inapplicable
+rather than relaxed**. The distinction has to be stated or someone reading the diff will read
+a missing guard as a weakening.
+
+The guard's precondition is *a live fetch is about to happen*. For a claimed device that
+precondition does not hold — nothing is fetched, at claim time or ever. The safety property it
+enforces **was satisfied once already**, at curation time, by §4a's guarded fetch against the
+provider's own source. That is a different invariant holding at a different moment, not the
+same invariant loosened.
+
+Collapsing "does not apply" into "was skipped" is the same category error this project has
+already caught once. TM-I-05b found the egress policy allowing both `http` and `https` **by
+design** — *"its job is SSRF, which is TM-I-10's control, not transport encryption"* — and the
+fix was a second, independent control rather than an argument that the first one had been
+weakened. Two properties, two moments, two controls.
+
+#### `spec_hash` is recomputed at claim time and the catalog's stored hash is never trusted
+
+The gateway hashes the snapshot's bytes itself, exactly as `fetch_spec` hashes what came back
+over the wire.
+
+This needs no fresh judgement — it is [ADR-0015](0015-endpoint-fingerprinting.md)'s own logic
+with nothing adapted. ADR-0015 exists to *not accept an asserted identity*: pin it, then verify
+against it. The hash stored on a catalog version is what curation **asserted**; recomputing
+from the stored content at claim time is the verification, and here it is free — the bytes are
+already in hand and no network fetch is involved.
+
+What it buys is the case nothing else covers. If a bug, a migration or a compromised curation
+path ever let a version's stored hash and stored content drift apart, trusting the stored hash
+would never notice; recomputing catches it on the first claim against that version.
+
+#### A version carries a curated document or a `spec_path`, never both
+
+Enforced as a **write-time validation error**, by a `_check_curated_document` alongside
+`_check_spec_path` in `repo.py` — same shape, same file, same "raise, don't reconcile".
+
+Explicitly **not** "the curated document wins if both are set". A silent precedence rule is
+what this project refuses everywhere else it has faced the choice: `devices:write-planned` is
+deliberately not a member of any role bundle, so it can never be acquired by an implicit path;
+an unnamed `break_glass: true` entry **refuses to start** rather than falling back to
+`key:<role>`, because *"an omitted field must not silently produce the behaviour the ADR
+forbids"*. A record that can hold both fields, resolved by a tie-break, is a state a future bug
+reaches accidentally and which then fails silently instead of loudly. The ambiguity gets
+resolved by the curator at write time or not at all.
+
+#### `tool_set` becomes derived, because its stated premise expires
+
+`VersionFields.tool_set` documents its own justification for being unverified: *"the catalog
+has no tenant base_url to fetch a live spec against"*. That is true today and **stops being
+true the moment a curated document sits in the row**.
+
+This is worth naming plainly: §7a corrected this record for exactly this failure shape — a
+written precondition that quietly became false — and leaving `tool_set` alone would reintroduce
+an instance of it in the very next section. Left as a curator assertion, §4's upgrade diff
+compares two unverified claims about what changed, when it could compare two tool sets parsed
+from content already in hand. That is a strictly stronger guarantee, available for free, and
+the only place in this whole change that **closes** an existing weakness rather than relocating
+one.
+
+So for a version carrying a curated document, the tool set is **derived from the snapshot** —
+parsed at curation time, and re-derivable at claim time on the same reasoning as the hash —
+rather than stored as a curator-supplied field. If curator-declared metadata about tools is
+still wanted for some other purpose, it takes a **different field name**, so that nothing
+downstream inherits the current docstring's expired premise by association with the old one.
+
+`spec_path` versions keep the declared `tool_set` unchanged: there is no content in the row to
+derive anything from, which is exactly what the docstring says.
+
 ### 5. The catalog carries no secrets
 
 A device type names the *kind* of credential a device needs (`api_key` in a header,
@@ -391,6 +486,11 @@ operational pressure.
 - **Negative: catalog versioning is a migration problem in miniature** — N tenants on M
   versions of a device type, each needing an upgrade path. Deliberately accepted over the
   alternative in §4.
+- **Negative: claiming becomes a second construction path to keep correct.** §4b refuses to
+  reach a snapshot through the `spec_url` path with an optional field, so the gateway gains a
+  device-construction path that must stay behaviourally aligned with the fetch-driven one
+  without sharing its preconditions. That is real duplication, taken deliberately over a single
+  function with two modes and no way to tell which it is in.
 - **Negative: a curated spec is bulk the catalog must carry forever.** §4a's snapshot means
   every version of every type holds a copy of its document rather than a link to one, and
   those copies are immutable by construction, so the store only grows. Inline in PostgreSQL
