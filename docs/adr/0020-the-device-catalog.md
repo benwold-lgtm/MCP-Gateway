@@ -251,9 +251,10 @@ boundary and does not share the BFF's availability.
 
 ### 7a. The catalog needs a caller identity per tenant (amendment, 2026-08-28)
 
-> **Not built.** This section records a decision, not an implementation. The catalog today
-> still authenticates a single shared token exactly as described below. Nothing here is
-> deployed anywhere, and the tenant-facing claim path must not be deployed until it is.
+> **BUILT 2026-08-28.** Two caller classes in `device_mcp_catalog/app/auth.py`, a caller table
+> in `config.py` that refuses startup when it is ambiguous, and `enforce_tenant_scope` as a
+> router-level dependency covering path- and body-named tenants alike. The finding below is
+> preserved in the past tense it was written in; what changed is stated at the end.
 
 **Found trying to run the claim flow end to end for the first time**, in a lab where the
 provider plane and a tenant stack are separate deployments on separate hosts. §2 is the half
@@ -409,6 +410,52 @@ asked to agree), and now a shared token spanning two trust domains. Each was inv
 two things that had always run as one were finally deployed apart. **Deployment topology is a
 test input**, and an estate that has only ever run as one process has not tested its own
 boundaries.
+
+#### What shipped, and the second gate nobody had counted
+
+Built as decided, with three things worth recording because none was visible from the decision
+alone.
+
+**The enforcement is one dependency, not a rule each route follows.** `enforce_tenant_scope`
+runs at the router, reads the tenant from the credential, and compares it against every tenant
+the request names — in the **path** and in the **body**, since `RecordClaim` names one there.
+Splitting those (a dependency for paths, a line in each handler for bodies) would have
+recreated the finding above in miniature: one rule with two enforcement points, correct until
+a handler forgets. A test discovers the routes from the OpenAPI schema rather than a list, so a
+route added later is covered without anyone remembering to add it.
+
+**A malformed caller table refuses startup**, deliberately unlike this service's database.
+§7 requires an unreachable store to be a *named condition* the service stays up to report; an
+ambiguous credential is not that. A store that is down cannot answer, and a caller table with a
+token shared between the provider and a tenant — or between two tenants — answers **as the
+wrong caller**. That is `BreakGlassConfigError`'s reasoning one service along, and it is why
+`CatalogAuthConfigError` has no permissive mode.
+
+**One misconfiguration remains invisible from here, and it needed the other side to close.**
+The catalog cannot detect a tenant console configured with the *provider's* token: that request
+authenticates correctly, as the provider, and every tenant's data is in reach. Nothing in the
+caller table can see it, because nothing about it is wrong from this side. So the catalog gained
+`GET /whoami` (`{kind, tenant_id}`, no database read), and the tenant BFF's `CatalogClient`
+asks once, on first use, and disables catalog features rather than proceeding if the answer is
+not its own tenant. Deliberately lazy rather than at startup: a startup probe would either make
+the console's boot depend on the catalog being up, which §7 refuses, or pass silently whenever
+the catalog was slow. "Could not check" and "checked and it was wrong" stay different
+conditions — the first is retried, the second is not.
+
+**And the gate that was actually holding.** `deploy/kubernetes/catalog/networkpolicy.yaml`
+admits only the provider console's namespace, and its own comment asserted that a tenant
+console "has no business reaching the catalog directly" — which was **false about the code**
+and had been since the tenant routes were written. That comment is the reason the shared token
+was never exploitable in a deployment: the credential gate was open and the network gate was
+shut. Two gates, and the one holding was the one whose comment was wrong about why.
+
+It is worth being precise about what that means, because "we were protected anyway" is the
+wrong conclusion. The network policy was not a compensating control chosen for this risk — it
+was correct for a topology in which the tenant half did not exist, and it would have been
+opened by whoever first enabled a tenant's claim view, at which point nothing else stood in the
+way. Enabling that path is now explicitly a two-part change, in order: provision the tenant's
+own credential, then add its namespace. The policy file says so at the line that would be
+edited.
 
 ### 8. Why this comes before ADR-0017 in the build order
 

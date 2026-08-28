@@ -15,11 +15,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 
-from .auth import require_api_token
+from .auth import enforce_tenant_scope
 from .repo import ClaimRepo
 from .schemas import UpgradeOffersResponse
 
-router = APIRouter(dependencies=[Depends(require_api_token)])
+router = APIRouter(dependencies=[Depends(enforce_tenant_scope)])
 
 
 @router.get("/tenants/{tenant_id}/upgrades", response_model=UpgradeOffersResponse)

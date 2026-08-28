@@ -34,10 +34,24 @@ spec:
 # at all, and none is granted here).
 #
 # ⚠️ Set the namespace name to wherever your **provider console** BFF runs. `mcp-gateway-ui`
-# is the UI repo's own default namespace. Note this is the provider console specifically: a
-# tenant console has no business reaching the catalog directly — a tenant sees offered device
-# types through its own gateway, which is what keeps ADR-0020 §2's "assignment is an offer,
-# claiming is the tenant's act" a real boundary rather than a UI convention.
+# is the UI repo's own default namespace.
+#
+# ⚠️ **This paragraph used to say a tenant console has no business reaching the catalog
+# directly. That was wrong about the code, and it is worth leaving the correction visible.**
+# The tenant console's catalog routes read this service directly and always have — that second
+# caller is what ADR-0020 §7a is about. What was true is that this policy never let them, which
+# is the only reason a shared provider token spanning two trust domains was never reachable in
+# a deployment: the credential gate was open and the network gate was shut. Two gates, one of
+# them load-bearing by accident.
+#
+# So enabling the tenant claim path is a deliberate two-part change, and the order matters:
+#
+#   1. give that tenant its own credential (`tenant-tokens` in `catalog-secrets`, ADR-0020
+#      §7a) — never the provider's, which the catalog now refuses to start with;
+#   2. THEN add its namespace to the `from` list below.
+#
+# Doing 2 without 1 is exactly the configuration §7a exists to prevent. Nothing enforces the
+# ordering, which is why it is written here, next to the change that would break it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

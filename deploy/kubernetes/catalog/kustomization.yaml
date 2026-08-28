@@ -42,6 +42,13 @@ resources:
 #     --from-literal=database-url="postgresql://catalog:$PG_PW@catalog-postgres:5432/catalog" \
 #     --from-literal=api-token=$(openssl rand -hex 32)
 #
+# Add one credential per tenant console that reads the catalog directly (ADR-0020 §7a).
+# Each value is that tenant's own, and none of them is `api-token`:
+#
+#   kubectl create secret generic catalog-secrets --namespace=mcp-provider \
+#     --dry-run=client -o yaml --from-literal=tenant-tokens="$(jq -nc \
+#       --arg a "$(openssl rand -hex 32)" '{"t-example-tenant": $a}')" | kubectl apply -f -
+#
 # ⚠️ The user is `catalog`, NOT `postgres`. postgres.yaml sets POSTGRES_USER=catalog, so the
 # image creates that role and never sets a password on the built-in `postgres` superuser. A
 # URL naming `postgres` fails with `password authentication failed for user "postgres"` —
@@ -49,10 +56,15 @@ resources:
 # (This line said `postgres` when the catalog was first deployed for real. It had never been
 # run before that, so nothing contradicted it; documenting a command makes it look verified.)
 #
-# `api-token` is what the provider console's `CATALOG_API_TOKEN` must match — this service
-# authenticates exactly one caller (device_mcp_catalog/app/config.py). It is wired
+# `api-token` is what the PROVIDER console's `CATALOG_API_TOKEN` must match. It is wired
 # `optional: true` on the Deployment, so the catalog starts without it and then rejects
 # every request as unauthenticated; set it.
+#
+# `tenant-tokens` is the second caller class (ADR-0020 §7a): a JSON map `{tenant_id: token}`,
+# one credential per tenant console that reads the catalog directly, each admitting only that
+# tenant's own assignments and claims. Do not reuse `api-token` for a tenant — the service
+# refuses to start if you do, because that credential would authenticate as the provider and
+# reach every tenant's data. Omit the key entirely where no tenant reads the catalog.
 #
 # `database-url` and `postgres-password` must agree — on the USER as well as the password.
 # They are separate fields because Postgres reads one and the application reads the other;

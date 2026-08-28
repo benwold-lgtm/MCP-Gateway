@@ -16,15 +16,19 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from .auth import require_api_token
+from .auth import enforce_tenant_scope
 from .repo import ClaimRepo, DeviceTypeVersionNotFound
 from .schemas import Claim, RecordClaim
 
-router = APIRouter(dependencies=[Depends(require_api_token)])
+router = APIRouter(dependencies=[Depends(enforce_tenant_scope)])
 
 
 @router.post("/device-types/{type_id}/claims", response_model=Claim, status_code=201)
 async def record_claim(type_id: uuid.UUID, body: RecordClaim, request: Request):
+    """`body.tenant_id` is the one place §7a found a tenant taken from a request *body* rather
+    than a path. `enforce_tenant_scope` reads bodies for exactly this reason, so a tenant
+    caller recording a claim for a neighbour is refused here the same way it is on a path —
+    one rule, one place, both shapes."""
     repo = ClaimRepo(request.app.state.db)
     try:
         return await repo.record_claim(type_id, body.version, body.tenant_id, body.hostname)
