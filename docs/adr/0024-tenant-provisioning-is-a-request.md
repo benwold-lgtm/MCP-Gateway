@@ -182,6 +182,152 @@ Stating that here is what keeps the manual phase from being read as a temporary 
 automation will replace. The request object, the gates and the four-state progression are the
 design; who executes the middle step is not.
 
+### 10. Connecting the tenant to the provider is an enrolment, and an enrolment does not expire (amendment, 2026-08-28)
+
+> **Not built.** This section records a decision. Today the connection is made by editing
+> config on both sides by hand; nothing here is implemented.
+
+**Found by standing up the estate's second tenant** — the first time this record's subject
+matter was executed rather than described.
+
+#### What this record did not say
+
+§5 captures a **provider-access tier** as a field on the request form, and §9 says fulfilment
+is manual. Between them they imply that connecting a tenant to its provider is a setting.
+It is not. It is state on **both sides**, and neither side can produce it alone:
+
+| Side | Must hold |
+|---|---|
+| The tenant's gateway | an RBAC entry for the provider, carrying `support:request` and nothing else (ADR-0017 §7a) |
+| The provider's console | the tenant's id, display name and gateway URL, in its registry |
+| The tenant's console | the catalog's address, a credential for it, and its own `TENANT_ID` |
+
+None of that appears on the request form, and none of it is derivable from the other side.
+
+#### Measured: nine steps, and the failure modes matter more than the list
+
+Recorded because the *shape* of each failure is what a mechanism has to defend against, and
+three of these are silent:
+
+| # | Step | If wrong |
+|---|---|---|
+| 1 | Mint the tenant id (§2) | irreversible; never reissued |
+| 2 | Choose non-colliding ingress ports | reads as a routing fault |
+| 3 | Give the tenant its **own** IdP application **and its own group names** | 🔇 sharing them makes another tenant's admin an admin here — and it *works*, for the wrong users |
+| 4 | Point `group_roles` at those names | 🔇 authenticates, zero scopes, 403 everywhere — reads as a directory problem |
+| 5 | Mint the provider's `support-requester` token | **gateway refuses to start, naming the field** — the model failure mode |
+| 6 | Generate the console's own secrets | console cannot start |
+| 7 | Install the ingress controller | 🔇 **no connection at all**, while ports listen and Ingress objects exist — every symptom says "deployed" |
+| 8 | Create the device credential (a directory user *and* a policy binding it a role) | a user without the binding is refused everything |
+| 9 | Wire the catalog: address, credential, `TENANT_ID`, **and an egress port** | 🔇 times out; reads as "the catalog is down" while it is healthy |
+
+Step 5 is the one to imitate. It fails **loudly, at startup, naming the missing field**, because
+ADR-0017 §7a made the entry explicit rather than optional. Steps 3, 4, 7 and 9 fail quietly, and
+two of them were defects in the tooling itself, found only because a *second* tenant existed.
+
+#### Decision: a request-and-approve handshake, in §7's direction
+
+Model it on [ADR-0017 §7](0017-provider-authority-is-delegated.md): **the provider asks, and a
+human on the tenant's side decides.** Nothing about enrolment may be asserted by the provider,
+for the same reason nothing about access may be — §1 of that record is the constraint, and a
+provider that could enrol itself would be choosing its own customers.
+
+Approving an enrolment performs, atomically, what nine manual steps do today: the tenant's
+gateway gains the `support:request` RBAC entry, the provider's registry gains the tenant, and
+the tenant receives the catalog's address and **its own** credential for it.
+
+#### The bootstrap problem, and why the invitation is the thing that expires
+
+There is a chicken-and-egg at the start: a provider cannot raise a request against a tenant's
+gateway before it holds a credential to raise one with. Two ways out, and only one is
+acceptable.
+
+An **unauthenticated enrolment endpoint** on the tenant's gateway is rejected, for the reason
+§7a already rejected an unauthenticated raise route: it converts a closed surface on the
+tenant's gateway into an open one, and that trade belongs to the tenant rather than to a
+default.
+
+So the tenant issues an **invitation**: a one-time, short-lived code generated in the tenant's
+own console and handed to the provider out of band. The provider redeems it once; redemption is
+what mints the standing credential. The tenant is still the origin of every authority the
+provider ends up holding, and no surface is opened to anyone who was not invited.
+
+**The invitation expires. The enrolment it produces does not.** That distinction is the whole
+of the next section.
+
+#### Why an enrolment must not expire
+
+ADR-0017's grants are time-boxed, and this deliberately is not. The difference is what the
+thing carries.
+
+**A grant carries capability** — read this fleet, invoke that tool. A capability outliving the
+reason it was issued is exactly the risk, so it expires, and the window is the control.
+
+**An enrolment carries no capability at all.** The provider's side of it permits one verb:
+*ask*. It reads no device, writes nothing, invokes nothing and decides nothing — §7a is
+explicit that what a provider holds continuously is standing permission to raise a request. The
+tenant's side permits reading what it has itself been offered. Neither is a capability whose
+staleness is dangerous.
+
+Given that, an expiry would not be a security control. It would be **a scheduled outage with a
+security-shaped name**: on a timer nobody watches, the provider silently loses the ability to be
+asked for help, the tenant's catalog goes empty, and the first symptom is a support request that
+cannot be raised during whatever incident prompted it. Renewal machinery would then exist solely
+to prevent the failure the expiry introduced.
+
+It is also the wrong instrument for the question. "Is this company still our supplier?" is a
+commercial fact that changes at a contract boundary, not a clock, and no interval approximates
+it. **So the control is revocation, and revocation only:** a tenant administrator ends the
+relationship in their own console, immediately, at a moment they choose.
+
+#### What replaces expiry, because something must
+
+An expiry has one virtue worth keeping: it forces a periodic re-examination. Removing it without
+replacement leaves a supplier relationship that ended two years ago still live because nobody
+remembered. So the requirement transfers rather than disappearing — **visible, not expiring**:
+
+- Every enrolment is listed in the tenant's own console, with who approved it and when.
+- Each carries **last-used**, sourced from the audit rather than self-reported, so a dormant
+  relationship is discoverable by looking rather than by remembering.
+- Revocation is immediate and needs no counterparty. Following §8's reasoning about revoke
+  versus expiry: a tenant ending a supplier relationship is very often doing so *because*
+  something is wrong right now.
+
+A dormant enrolment should be **easy to find and trivial to end**, which is a stronger property
+than one that lapses on a schedule and takes working access with it.
+
+#### This is where ADR-0020 §7a's credential comes from
+
+[ADR-0020 §7a](0020-the-device-catalog.md) requires the catalog to issue **one credential per
+tenant** rather than share the provider's. It does not say what mints them, and a per-tenant
+credential provisioned by hand is step 9 again with more steps.
+
+Enrolment is the answer: approving one is the moment a tenant first needs catalog access, and
+the moment both sides' identities are known. Revoking an enrolment revokes that credential too.
+The two records should be built together — §7a states the property, this states the lifecycle,
+and neither is complete alone.
+
+#### The property to test
+
+> **Every piece of state the connection depends on is created by approving the enrolment, and
+> removed by revoking it.** No step in the nine above may remain something a human does
+> separately and correctly.
+
+Test it by revoking: the provider must lose the ability to raise, the tenant's catalog must
+close, and **the tenant's own operation must be unaffected** — devices keep working, users keep
+signing in. An enrolment that takes the tenant's fleet down when it ends was a dependency, not a
+relationship.
+
+#### The shape worth remembering
+
+A record can be accepted, correct, and still silent about the thing that turns out to be hard.
+ADR-0024 describes provisioning a tenant thoroughly — the identifier, the overlay, the secrets
+package, the checklist gates — and never asks how the tenant and the provider come to know
+about each other, because when it was written there was one tenant and the question could not
+arise. **The second instance is what makes a relationship visible as a thing needing its own
+design**, which is the same lesson ADR-0017 §7a and ADR-0020 §7a each learned on the same day,
+in different components.
+
 ## Consequences
 
 - **Positive:** the mechanism five Accepted ADRs depend on becomes a numbered record in the
@@ -189,6 +335,10 @@ design; who executes the middle step is not.
   relies on it. Two silent-omission failure modes get gates that must be affirmatively
   cleared. The console gains no cluster-mutating authority. The existing overlay and the
   manual path keep working, so a Lite or single-tenant operator is unaffected.
+- **Negative: connecting the tenant to its provider has no mechanism yet** (§10). It is nine
+  manual steps spanning two clusters and an identity provider, three of which fail silently,
+  and this record described none of them until a second tenant made them visible. §10 records
+  the decision — a request-and-approve enrolment that does not expire — and nothing is built.
 - **Negative / cost:** provisioning a tenant remains a multi-step operation with a human in
   the middle, which is slower than a console button and will be asked about. The request
   object, its status machine and its checklist gates are real state the provider console must
