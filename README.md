@@ -422,6 +422,8 @@ With OIDC enabled the static keys become a **break-glass fallback** (OIDC JWT �
 - **A plaintext `http://` issuer is refused at startup** unless `security.allow_plaintext_idp: true` is set deliberately, which warns loudly. The egress URL policy permits `http` by design — its job is SSRF, not transport encryption — so nothing else enforces TLS to your IdP.
 - **The discovery document must declare the issuer you configured**, or it is refused and nothing is cached. Pinning `iss` at decode time does not cover this: an attacker who supplies the *keys* also chooses the claims. Fixed in [0.3.4](CHANGELOG.md).
 
+**Setting up a specific IdP?** [docs/identity-integration.md](docs/identity-integration.md) walks through Keycloak and Authentik (both verified against running instances), sketches Entra ID, Okta and Google Workspace as **untested** integration paths, and lists the failure modes that are silent — including the one above, where every SSO user gets a 401 while key holders keep working.
+
 The seam (`authenticate()` → `Principal{subject, scopes}`) means routes are unchanged either way.
 
 Rate limits (per source IP): `/health` and `/readyz` — 300 req/min; `POST /v1/devices` — 60 req/min; `POST /messages` — 600 req/min. Returns 429 on excess.
