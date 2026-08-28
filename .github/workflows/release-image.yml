@@ -63,3 +63,63 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+
+  # The catalog is a SECOND image. ci.yml already BUILDS it per PR (its `catalog` job runs
+  # `docker build` under working-directory: device_mcp_catalog), so Dockerfile breakage was
+  # always caught — what nothing did was PUBLISH it, while
+  # deploy/kubernetes/catalog/deployment.yaml pinned
+  # ghcr.io/<owner>/device-mcp-catalog:latest. Applying the shipped catalog kustomization
+  # therefore gave ImagePullBackOff on a tag that had never been published. It went
+  # unnoticed because the catalog used to be bundled into the gateway's kustomization, so
+  # nobody deployed it on its own and nothing ever tried to pull it (ADR-0020 §7 makes it a
+  # separate component; the deployment finally matches).
+  catalog-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/device-mcp-catalog
+          # No `lite` tag: the lite/home profile is a single-tenant stack with no provider
+          # plane, and the catalog is a provider-plane object with no tenant reach
+          # (ADR-0020 §1). Shipping it to that profile would invite exactly the bundling
+          # this component was split out of.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+          flavor: |
+            latest=auto
+
+      # ⚠️ context is device_mcp_catalog/, NOT the repo root. The catalog is a separate
+      # distribution with its own pyproject.toml — that is where the `device-mcp-catalog`
+      # console script and `packages.find include = ["device_mcp_catalog*"]` live. Built
+      # from the root, `COPY pyproject.toml ./` picks up the gateway's, which declares
+      # neither, and the image builds CLEANLY then dies at startup with
+      # `exec: "device-mcp-catalog": executable file not found in $PATH`.
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: device_mcp_catalog
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false

@@ -39,18 +39,28 @@ resources:
 #   kubectl create secret generic catalog-secrets \
 #     --namespace=mcp-provider \
 #     --from-literal=postgres-password="$PG_PW" \
-#     --from-literal=database-url="postgresql://postgres:$PG_PW@catalog-postgres:5432/catalog" \
+#     --from-literal=database-url="postgresql://catalog:$PG_PW@catalog-postgres:5432/catalog" \
 #     --from-literal=api-token=$(openssl rand -hex 32)
+#
+# ⚠️ The user is `catalog`, NOT `postgres`. postgres.yaml sets POSTGRES_USER=catalog, so the
+# image creates that role and never sets a password on the built-in `postgres` superuser. A
+# URL naming `postgres` fails with `password authentication failed for user "postgres"` —
+# which reads as a wrong password and sends you to check the password, which is correct.
+# (This line said `postgres` when the catalog was first deployed for real. It had never been
+# run before that, so nothing contradicted it; documenting a command makes it look verified.)
 #
 # `api-token` is what the provider console's `CATALOG_API_TOKEN` must match — this service
 # authenticates exactly one caller (device_mcp_catalog/app/config.py). It is wired
 # `optional: true` on the Deployment, so the catalog starts without it and then rejects
 # every request as unauthenticated; set it.
 #
-# `database-url` and `postgres-password` must agree. They are two fields because Postgres
-# reads one and the application reads the other; nothing checks that they match, and a
-# mismatch presents as an application that starts cleanly and cannot authenticate to its
-# own database.
+# `database-url` and `postgres-password` must agree — on the USER as well as the password.
+# They are separate fields because Postgres reads one and the application reads the other;
+# nothing checks that they agree, and a mismatch in either presents the same way: an
+# application that starts cleanly and cannot authenticate to its own database. It does not
+# crash — it logs `catalog database unavailable at startup, continuing degraded` and reports
+# 503 on /readyz while /healthz stays 200, which is ADR-0020 §7's named-unavailable
+# condition working as intended. Read /readyz, not the pod's Running status.
 
 # ── After applying: point the provider console at it ───────────────────────────────
 # The console reaches this across namespaces, so the Service DNS name needs the namespace:
