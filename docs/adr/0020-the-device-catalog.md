@@ -197,12 +197,56 @@ it, because no tenant stack had yet been wired to a catalog.
 So deploying §2's tenant half as it stands means **every tenant's BFF holds the provider's
 catalog token**, and the catalog authorizes nothing beyond possessing it:
 
-- `GET /tenants/{tenant_id}/assignments` takes the tenant from the **URL path**. A holder can
-  read any other tenant's assignments — which device types a competitor has been offered.
+- `GET /tenants/{tenant_id}/upgrades` takes the tenant from the **URL path** and returns
+  `UpgradeOffer` objects carrying **`hostname`** — the tenant's actual device names, with the
+  version each is pinned to. This is the sharp one: there is no `GET /claims`, so claims are
+  readable only here, but this *is* the claim.
+- `GET /tenants/{tenant_id}/assignments`, same path-parameter problem — which device types a
+  competitor has been offered.
 - `RecordClaim` takes `tenant_id` from the **request body**. A holder can record claims
   against another tenant, corrupting the provenance the upgrade-offer diff depends on.
 - The same token reaches the curation and assignment routes. A tenant could curate a device
   type and assign it to themselves — or to anyone.
+
+**Measured, not reasoned** (lab, two tenants, one shared token, asked about each in turn):
+
+```
+tenant1  assignments=['acme-storage-array']   upgrades=[]
+tenant2  assignments=[]                       upgrades=[]
+```
+
+One credential, the tenant named in the path, and each answered for whoever was asked about.
+Nothing checked entitlement.
+
+#### Ranked by what actually leaks
+
+Worth stating, because it changes what a fix must cover first and the obvious ordering is
+wrong:
+
+| Route | Leaks | Priority |
+|---|---|---|
+| `GET /tenants/{id}/upgrades` | **Tenant device hostnames** + pinned versions | **First** |
+| `GET /tenants/{id}/assignments` | Which device types a tenant was offered — commercial intelligence about a competitor | Second |
+| `GET /device-types` | The provider's whole catalogue | Third — this is the **provider's** product surface, not tenant data |
+
+Scoping `assignments` alone is not enough, and scoping `device-types` — the one that looks
+most like "too much data" — is the least urgent of the three.
+
+One nuance that makes `upgrades` less than a total dump, and not much less: it returns only
+claims whose pinned version differs from the current curated one. A tenant fully up to date
+appears empty. In an estate where the provider keeps curating, being behind is the normal
+state rather than the exception.
+
+#### The tenant console is not the exposure, and that is the point
+
+A tenant *operator* cannot reach any of this through the UI. The tenant BFF builds every
+catalog call from `_tenant_id(request)`, which reads the BFF's **own configuration** — never
+anything the browser sends — and the tenant console never calls the unscoped `/device-types`
+at all. There is no parameter to tamper with.
+
+The exposure is the **credential**, not the interface. Which means the boundary today is one
+component's discipline rather than an enforced property, and every future route added to that
+component has to remember it independently.
 
 **The tenant console is not the problem, and that is the instructive part.** It already does
 the right thing: its list route asks for *this* tenant's assignments rather than the unscoped
@@ -264,6 +308,11 @@ Stated as a property because the positive case will pass on its own:
 > **A tenant caller naming a tenant other than its own is refused, on every route that names a
 > tenant.** Not filtered to an empty result, not silently rewritten to its own tenant —
 > refused, and audited.
+
+Test `upgrades` first and by name. It is the route that returns hostnames, and it is the one
+an implementation is most likely to leave behind — `assignments` is the obvious one to scope
+because it is the one the tenant console calls, and `upgrades` is reached by a different
+component on a different schedule.
 
 An implementation where each tenant only ever names itself is indistinguishable from a correct
 one until someone names a neighbour. That negative test is the whole check, and it is the same
