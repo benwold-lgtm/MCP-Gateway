@@ -160,6 +160,11 @@ gateway:
       mcp-auditors:  auditor
 ```
 
+> **Setting up a specific IdP?** [identity-integration.md](identity-integration.md) has the
+> per-vendor walkthroughs (Keycloak and Authentik verified; Entra ID, Okta and Google
+> Workspace as untested integration paths), the silent failure modes, and how to prove an
+> integration actually works.
+
 A user in multiple groups gets the **union** of the mapped scopes. A valid token whose groups
 map to **no** role authenticates with an **empty scope set** — every route then 403s, and the
 audit shows *who* was denied. `jwks_uri` is auto-discovered from the issuer unless set
