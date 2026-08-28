@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from device_mcp_gateway.audit import AUDIT_OUTCOME_SUCCESS, audit_request
+from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, AUDIT_OUTCOME_SUCCESS, audit_request
 from device_mcp_gateway.cfg import (
     support_grant_ttl_seconds,
     support_request_ttl_seconds,
@@ -33,7 +33,13 @@ from device_mcp_gateway.cfg import (
     support_self_issue_review_window_days,
     support_standing_consent_max_seconds,
 )
-from device_mcp_gateway.rbac import ALL_SCOPES, SCOPE_DEVICES_WRITE_PLANNED, SCOPE_SUPPORT_ADMINISTER, require_scope
+from device_mcp_gateway.rbac import (
+    ALL_SCOPES,
+    SCOPE_DEVICES_WRITE_PLANNED,
+    SCOPE_SUPPORT_ADMINISTER,
+    SCOPE_SUPPORT_REQUEST,
+    require_scope,
+)
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
 from device_mcp_gateway.support_grant_inflight import support_grant_inflight_registry
 from device_mcp_gateway.support_grant_pop import InvalidPublicKey, parse_public_key
@@ -45,15 +51,36 @@ from device_mcp_gateway.support_grants import (
 )
 from device_mcp_gateway.tenant_notifications import tenant_notification_store
 
-router = APIRouter(dependencies=[Depends(require_scope(SCOPE_SUPPORT_ADMINISTER))])
+# ⚠️ NO router-level scope. There are two different authorities on this router and putting
+# one dependency across all of it collapsed them: *asking* to act on this tenant, and
+# *deciding* who may. A provider console has to authenticate here to raise a request, so a
+# single `support:administer` gate meant any provider able to ask was able to approve its
+# own request — the exact authority ADR-0017 says the tenant delegates and the provider never
+# asserts. Invisible while both planes ran as one process against one gateway, because the
+# raiser and the approver were the same credential; it appeared the first time they were
+# deployed apart.
+#
+# So the gate is per route, and the split is the security boundary:
+#   support:request     -> raise, and poll your own request  (held by a PROVIDER)
+#   support:administer  -> list, approve, reject, revoke, standing consent  (the TENANT's)
+router = APIRouter()
+
+_REQUESTER = Depends(require_scope(SCOPE_SUPPORT_REQUEST))
+_ADMINISTER = Depends(require_scope(SCOPE_SUPPORT_ADMINISTER))
 
 #: The closed vocabulary a support grant's scopes may be drawn from — the tenant's own
 #: vocabulary (ADR-0017 §2), never a provider vocabulary (there isn't one in this gateway).
 #: Excludes `support:administer` itself (a support grant must not be able to mint the power to
 #: administer more support grants — that is a privilege-escalation shape, not a support
-#: session) and `devices:write-planned` (which by design is never held via any standing or
+#: session), `support:request` (a grant is for doing the tenant's fleet work; the ability to
+#: ask for another grant is the provider's standing identity, not something a grant hands
+#: out) and `devices:write-planned` (which by design is never held via any standing or
 #: administered mechanism, only minted per-plan at Review; ADR-0022's own rule, unchanged here).
-GRANTABLE_SUPPORT_SCOPES = ALL_SCOPES - {SCOPE_SUPPORT_ADMINISTER, SCOPE_DEVICES_WRITE_PLANNED}
+GRANTABLE_SUPPORT_SCOPES = ALL_SCOPES - {
+    SCOPE_SUPPORT_ADMINISTER,
+    SCOPE_SUPPORT_REQUEST,
+    SCOPE_DEVICES_WRITE_PLANNED,
+}
 
 _MAX_JUSTIFICATION = 2000
 
@@ -82,7 +109,7 @@ def _validate_scopes(requested: object) -> frozenset[str]:
     return scopes
 
 
-@router.post("/support-requests", status_code=201)
+@router.post("/support-requests", status_code=201, dependencies=[_REQUESTER, *_RAISE_LIMITS])
 async def raise_support_request(request: Request):
     """A provider operator raises a request. `provider_subject` is attribution only — it is
     recorded, and it is the only identity the poll below will ever deliver a decision to; it
@@ -199,7 +226,7 @@ async def _flag_frequent_self_issue(request: Request, provider_subject: str) -> 
     )
 
 
-@router.get("/support-requests")
+@router.get("/support-requests", dependencies=[_ADMINISTER])
 async def list_pending_support_requests(request: Request):
     """What the tenant console's inbox reads. A read — unaudited, like `GET .../plans/{id}`."""
     request_store = pending_support_request_store(request.app.state)
@@ -227,7 +254,7 @@ async def list_pending_support_requests(request: Request):
 # this ordering exists to keep passing.
 
 
-@router.get("/support-requests/standing-consent")
+@router.get("/support-requests/standing-consent", dependencies=[_ADMINISTER])
 async def get_standing_consent(request: Request):
     consent = await standing_consent_store(request.app.state).get()
     if consent is None:
@@ -241,7 +268,7 @@ async def get_standing_consent(request: Request):
     }
 
 
-@router.post("/support-requests/standing-consent", status_code=201)
+@router.post("/support-requests/standing-consent", status_code=201, dependencies=[_ADMINISTER])
 async def enable_standing_consent(request: Request):
     try:
         body = await request.json()
@@ -274,7 +301,7 @@ async def enable_standing_consent(request: Request):
     return {"scopes": sorted(consent.scopes), "enabled_by": consent.enabled_by, "expires_at": consent.expires_at}
 
 
-@router.delete("/support-requests/standing-consent", status_code=204)
+@router.delete("/support-requests/standing-consent", status_code=204, dependencies=[_ADMINISTER])
 async def disable_standing_consent(request: Request):
     disabled = await standing_consent_store(request.app.state).disable()
     if disabled:
@@ -286,7 +313,7 @@ async def disable_standing_consent(request: Request):
         )
 
 
-@router.get("/support-requests/{request_id}", dependencies=_POLL_LIMITS)
+@router.get("/support-requests/{request_id}", dependencies=[_REQUESTER, *_POLL_LIMITS])
 async def poll_support_request(request: Request, request_id: str, provider_subject: str = Query(...)):
     """The raising session's own view. Scoped strictly to `provider_subject` — a mismatch
     reads exactly like the request never existed (§7: never "found but not yours")."""
@@ -301,12 +328,38 @@ async def poll_support_request(request: Request, request_id: str, provider_subje
     return body
 
 
-@router.post("/support-requests/{request_id}/approve")
+@router.post("/support-requests/{request_id}/approve", dependencies=[_ADMINISTER])
 async def approve_support_request(request: Request, request_id: str):
     request_store = pending_support_request_store(request.app.state)
     pending = await request_store.get(request_id)
     if pending is None:
         raise HTTPException(status_code=404, detail="No such request, or it has expired")
+
+    # Nobody approves their own request. The scope split above is what actually keeps the
+    # decision on the tenant's side — a provider holds `support:request` and cannot reach
+    # this route at all — so this is the second line, not the first: it catches the case
+    # where an identity has legitimately been given both scopes (an estate where one
+    # directory serves both planes, a tenant admin who also operates the provider console),
+    # which is a configuration nobody will notice they have created.
+    #
+    # Compared on the same string the poll is scoped by, so "who asked" and "who may not
+    # decide" cannot drift apart. This does NOT defend against a second provider identity
+    # approving the first's request — no self-check can, and the scope split is what does.
+    approver = getattr(request.state, "principal", None)
+    approver_subject = getattr(approver, "subject", None)
+    if approver_subject is not None and approver_subject == pending.provider_subject:
+        audit_request(
+            request,
+            "support_grant.approve",
+            outcome=AUDIT_OUTCOME_DENIED,
+            target=pending.provider_subject,
+            request_id=request_id,
+            reason="self_approval",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="A support request cannot be approved by the identity that raised it.",
+        )
 
     try:
         body = await request.json()
@@ -352,7 +405,7 @@ async def approve_support_request(request: Request, request_id: str):
     return {"grant_id": grant.id, "expires_at": grant.expires_at}
 
 
-@router.post("/support-requests/{request_id}/reject", status_code=204)
+@router.post("/support-requests/{request_id}/reject", status_code=204, dependencies=[_ADMINISTER])
 async def reject_support_request(request: Request, request_id: str):
     request_store = pending_support_request_store(request.app.state)
     pending = await request_store.get(request_id)
@@ -369,7 +422,7 @@ async def reject_support_request(request: Request, request_id: str):
     )
 
 
-@router.get("/support-grants")
+@router.get("/support-grants", dependencies=[_ADMINISTER])
 async def list_active_support_grants(request: Request):
     """ "Who can reach my stack right now" — the control ADR-0017 gives the tenant."""
     grants = await support_grant_store(request.app.state).list_active()
@@ -389,7 +442,7 @@ async def list_active_support_grants(request: Request):
     }
 
 
-@router.delete("/support-grants/{grant_id}", status_code=204)
+@router.delete("/support-grants/{grant_id}", status_code=204, dependencies=[_ADMINISTER])
 async def revoke_support_grant(request: Request, grant_id: str):
     result = await support_grant_store(request.app.state).revoke(grant_id)
     if not result.ok and result.reason == "not_found":

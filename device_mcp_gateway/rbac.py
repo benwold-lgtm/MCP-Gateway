@@ -54,6 +54,17 @@ SCOPE_BACKUP_EXPORT_PORTABLE = "backup:export-portable"
 # is ordinary fleet-governance authority (who may touch my fleet), not a per-instance
 # elevation, so there is no reason to keep it out of a role's held scopes.
 SCOPE_SUPPORT_ADMINISTER = "support:administer"
+# ADR-0017: *asking* to act on this tenant, and polling your own request's outcome. Split out
+# of `support:administer` once the two planes were first deployed as separate processes,
+# which is when the collision became visible: a provider console must authenticate to a
+# tenant's gateway to raise a request, the whole router required `support:administer`, and
+# that scope also decides requests — so any provider able to ask was able to approve itself,
+# which is exactly the authority ADR-0017 exists to keep on the tenant's side.
+#
+# Deliberately NOT a member of any tenant-plane role bundle below except `admin`'s implicit
+# ALL_SCOPES. It is the provider's scope, granted through a named RBAC entry the *tenant*
+# creates, and it confers no read of anything: a holder may ask and may watch its own answer.
+SCOPE_SUPPORT_REQUEST = "support:request"
 # ADR-0017 slice 5: reading the durable, tenant-facing notification surface (a break-glass
 # activation, a frequently self-issued support grant — things that must not only be logged).
 # A standing bundle member for the same reason as `support:administer` above: this is
@@ -70,6 +81,7 @@ ALL_SCOPES: frozenset[str] = frozenset(
         SCOPE_BACKUP_WRITE,
         SCOPE_BACKUP_EXPORT_PORTABLE,
         SCOPE_SUPPORT_ADMINISTER,
+        SCOPE_SUPPORT_REQUEST,
         SCOPE_NOTIFICATIONS_READ,
     }
 )
@@ -110,6 +122,18 @@ ROLE_SCOPES: dict[str, frozenset[str]] = {
     # ciphertext kind, and the key-independent archive is an operator decision, not a
     # thing a scheduler holds standing permission to produce.
     "backup": frozenset({SCOPE_BACKUP_READ, SCOPE_BACKUP_WRITE}),
+    # ADR-0017: the identity a PROVIDER presents to THIS tenant's gateway, so it can ask for
+    # access and watch its own request. The narrowest bundle here, and the narrowness is the
+    # whole point — it can raise and poll, and it can read nothing, write nothing, invoke
+    # nothing, and decide nothing. Notably it does NOT carry `support:administer`: approving
+    # is the tenant's act, and a provider that could approve its own request would be
+    # asserting the authority ADR-0017 says must be delegated.
+    #
+    # A tenant grants this by creating a named `rbac` entry for a provider it has chosen to
+    # work with. That is a standing credential, and worth naming as such: what it is standing
+    # permission to do is *ask*. Every actual capability still arrives only through a grant
+    # this gateway mints after a human on the tenant's side approves.
+    "support-requester": frozenset({SCOPE_SUPPORT_REQUEST}),
 }
 
 # The console's own server-side identity: what the BFF presents to this gateway when it

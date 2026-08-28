@@ -354,6 +354,50 @@ the relay would prove and is not the property.
 question. It belongs to the hardening track named in §4, which should not be deferred
 independently of this.
 
+### 7a. Asking and deciding are separate scopes (amendment, 2026-08-28)
+
+**Added after the first deployment of the two planes as separate processes**, which is when a
+gap between this record and its implementation became visible.
+
+A provider console must authenticate to a tenant's gateway to raise a request — §7's whole
+mechanism starts with a call that lands on the tenant's side. The implementation put every
+support-request route behind a single `support:administer` scope, and that same scope decides
+requests. So the estate had exactly two reachable states, neither of them this ADR:
+
+- the provider holds no credential on the tenant's gateway and **cannot ask at all** (a 401,
+  measured); or
+- it holds one that can ask, which by construction **can also approve its own request** —
+  authority asserted by the provider, which is the thing §1 forbids.
+
+The collision could not appear while both planes ran as one process against one gateway,
+because the raiser and the approver were the same credential. Deploying them apart is what
+separated them.
+
+So the vocabulary now distinguishes the two authorities:
+
+| Scope | Held by | Permits |
+|---|---|---|
+| `support:request` | the **provider**, via a named RBAC entry the tenant creates | raise a request; poll its own outcome |
+| `support:administer` | the **tenant** | list, approve, reject, revoke, standing consent |
+
+**This does introduce a standing credential the provider holds on the tenant's gateway**, and
+that is worth stating rather than glossing: §1 says the tenant is the only source of authority,
+and a provider now holds something continuously. What it is standing permission to do is
+*ask* — it reads nothing, writes nothing, invokes nothing and decides nothing. Every actual
+capability still arrives only through a grant this gateway mints after a human on the tenant's
+side approves. The alternative considered was an unauthenticated raise route, which is
+arguably more faithful to §7's own reasoning (the raiser's identity "authorizes nothing by
+itself"; the guarantee is session-bound delivery) — but it converts a closed surface on the
+tenant's gateway into an open one, and that trade belongs to the tenant, not to a default.
+
+A **self-approval guard** backs the split: approve refuses when the approving principal's
+subject equals the request's `provider_subject`, audited as `denied`/`self_approval`. It is
+explicitly the second line, not the first — the scope split is what keeps the decision on the
+tenant's side. The guard covers the configuration the split cannot police, an identity
+legitimately given both scopes, which an estate running one directory across both planes will
+create without noticing. It does **not** defend against a second provider identity approving
+the first's request; no self-check can, and the scope split is what does.
+
 ### 8. Revocation tries to stop work in flight; expiry does not
 
 ADR-0013's D4 asked what happens to an in-flight call when a grant ends, and the answer for

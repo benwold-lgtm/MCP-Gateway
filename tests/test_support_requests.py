@@ -6,7 +6,12 @@ The store itself is covered by `test_support_grants.py`.
 
 Properties that carry this slice:
 
-1. **Every route needs `support:administer`.** `caller`'s baseline (no such scope) is refused.
+1. **Every route needs a support scope**, and since the ADR-0017 scope split there are two:
+   `support:request` raises and polls (a PROVIDER's authority), `support:administer` lists,
+   decides and revokes (the TENANT's). `caller`'s baseline holds neither and is refused.
+   The split itself — and that neither side can do the other's job — is covered by
+   `test_support_request_scope_split.py`; this file exercises the mechanism through an
+   admin principal, which holds both.
 2. **A poll is scoped to its own `provider_subject`** — the wrong one 404s exactly like the
    request never existed, never a different error that would leak its existence.
 3. **`justification` is recorded in the audit chain and never echoed back** in any response.
@@ -78,7 +83,7 @@ def test_admin_has_support_administer():
     assert SCOPE_SUPPORT_ADMINISTER in scopes_for_role("admin")
 
 
-def test_raise_is_refused_without_support_administer(monkeypatch, tmp_path):
+def test_raise_is_refused_without_a_support_scope(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path)
     resp = client.post("/v1/support-requests", headers=_no_scope(), json=RAISE_BODY)
     assert resp.status_code == 403
