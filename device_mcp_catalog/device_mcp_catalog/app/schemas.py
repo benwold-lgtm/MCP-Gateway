@@ -52,6 +52,14 @@ class VersionFields(BaseModel):
     #: framing on the gateway side. `None` when the curator hasn't supplied one — the
     #: upgrade-offer diff (slice 5) treats that as "no data to diff", a distinct condition
     #: from "diffed and found no changes".
+    #:
+    #: THE JUSTIFICATION ABOVE EXPIRES. "No tenant base_url to fetch a live spec against" is
+    #: true only while a version holds no spec content of its own. ADR-0020 §4b: once a
+    #: version carries a curated spec document, its tool set is DERIVED from that snapshot,
+    #: not declared here, and the §4 upgrade diff then compares two measured tool sets
+    #: instead of two curator assertions. A curator-supplied declaration that survives
+    #: alongside it takes a different field name, so nothing inherits this premise by
+    #: association. Versions carrying only `spec_path` keep this field exactly as described.
     tool_set: Optional[list[dict[str, Any]]] = None
 
 
