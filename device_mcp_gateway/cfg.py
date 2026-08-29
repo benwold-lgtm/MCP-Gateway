@@ -442,6 +442,22 @@ def write_planned_repeatable_max_seconds(cfg: dict[str, Any]) -> int:
     return int(cfg.get("write_planned", {}).get("repeatable_grant_max_seconds") or 30 * 24 * 60 * 60)
 
 
+def configured_tenant_id(cfg: dict[str, Any]) -> str:
+    """ADR-0024 §10 — which tenant this stack serves, as its own config states it.
+
+    `gateway.tenant_id` has existed since ADR-0019 and its own comment in `config.yaml` said
+    plainly that **nothing read it at runtime**. Redemption is the first thing that legitimately
+    must: the provider redeeming an invitation has to learn which tenant it just enrolled, so
+    that it can check the catalog credential it minted was minted for that same tenant. Without
+    it, a mistyped tenant id at the provider's end produces a credential belonging to one tenant
+    installed in another's console — the misdelivery ADR-0020 §7b exists to catch, arriving one
+    level up at the relationship rather than the request.
+
+    Returns "" when unset, which `api/enrolments.py` treats as a refusal rather than a default.
+    """
+    return str(cfg.get("gateway", {}).get("tenant_id") or "").strip()
+
+
 def support_request_ttl_seconds(cfg: dict[str, Any]) -> int:
     """ADR-0017 — seconds a raised support request survives before it must be re-raised."""
     return int(cfg.get("support_requests", {}).get("request_ttl_seconds") or 300)

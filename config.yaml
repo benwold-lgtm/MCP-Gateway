@@ -5,7 +5,12 @@ gateway:
   # here rather than per issuer. Use the opaque identifier minted by `tools/tenant_id.py new`
   # (ADR-0019) — random, never derived from the customer's name, and never reissued.
   #
-  # ⚠️ Nothing in the gateway reads this at runtime today. It used to gate ADR-0013's
+  # Read at runtime since ADR-0024 §10: redeeming an enrolment invitation reports this value
+  # to the provider, so the provider can check that the catalog credential it minted belongs
+  # to the tenant it actually reached. Redemption REFUSES when it is unset, naming this field
+  # — a stack that cannot say which tenant it is cannot be enrolled.
+  #
+  # ⚠️ Beyond that one reader, nothing in the gateway consults it. It used to gate ADR-0013's
   # elevated grants (a grant claim named exactly one tenant and was refused unless it named
   # this one), and ADR-0017 removed that mechanism entirely — `plane`, `grant_claim` and
   # `entitlement_claim` are gone from the code. It is retained as the deployment's own
