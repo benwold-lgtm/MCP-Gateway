@@ -124,6 +124,11 @@ def test_parity_table_covers_every_key_building_member():
         "support_standing_consent",
         "support_self_issue_window",
         "tenant_notifications",
+        "enrolment_invitation",
+        "enrolment_invitation_index",
+        "enrolment",
+        "enrolment_index",
+        "enrolment_credential",
     }
     assert members == covered, f"parity table out of sync with KeyBuilder: {members ^ covered}"
 
@@ -202,6 +207,11 @@ def _key_samples(kb: KeyBuilder) -> list[tuple[str, str]]:
         ("support_standing_consent", kb.support_standing_consent),
         ("support_self_issue_window", kb.support_self_issue_window("op1")),
         ("tenant_notifications", kb.tenant_notifications),
+        ("enrolment_invitation", kb.enrolment_invitation("h1")),
+        ("enrolment_invitation_index", kb.enrolment_invitation_index),
+        ("enrolment", kb.enrolment("e1")),
+        ("enrolment_index", kb.enrolment_index),
+        ("enrolment_credential", kb.enrolment_credential("h1")),
     ]
 
 
@@ -228,6 +238,10 @@ _KEY_PREFIXES = (
     "write_planned:",
     "support:",
     "tenant:",
+    # ADR-0024 §10. Added with the keys themselves: this list is what makes the seam test
+    # able to SEE a new inline f-string, so a namespace whose prefix is missing here is one
+    # the guard silently ignores — the guard passing would mean nothing for it.
+    "enrolment:",
 )
 
 # (file, exact string) pairs that look like keys but are not. Each needs a reason.

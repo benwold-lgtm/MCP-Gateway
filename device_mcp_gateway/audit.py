@@ -273,8 +273,18 @@ def audit_request(request: Any, action: str, *, outcome: str, target: str | None
     # ``extra`` wins on a key collision rather than raising: a caller that passes its own
     # ``grant=`` is being explicit, and an audit emitter must never be the thing that 500s a
     # route it is only observing.
+    #
+    # ⚠️ That contract was stated here and NOT implemented: `subject` and `rid` were passed
+    # both explicitly and via `**fields`, so a caller supplying either got
+    # `TypeError: got multiple values for keyword argument` — the audit emitter 500ing the
+    # route it observes, which is the one thing this comment says it must never do. Popping
+    # them makes the documented behaviour true. Found by ADR-0024 §10's redemption route,
+    # which is authenticated by an invitation rather than a Principal and so has a subject to
+    # record that `subject_of` cannot know.
     fields = dict(extra)
-    audit_event(action, subject=subject_of(request), outcome=outcome, rid=rid, target=target, **fields)
+    subject = fields.pop("subject", None) or subject_of(request)
+    rid = fields.pop("rid", None) or rid
+    audit_event(action, subject=subject, outcome=outcome, rid=rid, target=target, **fields)
 
 
 def verify_audit_chain(
