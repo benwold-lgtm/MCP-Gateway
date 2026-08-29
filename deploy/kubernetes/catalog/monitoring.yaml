@@ -7,9 +7,11 @@
 #   kubectl apply -f deploy/kubernetes/catalog/monitoring.yaml
 #
 # ⚠️ Applying this WITHOUT the matching NetworkPolicy rule (networkpolicy.yaml, policy 3)
-# produces a ServiceMonitor that discovers the target and never scrapes it. The alert
-# below then stays silent, which is indistinguishable from the condition never occurring —
-# the worst failure mode available to a should-never-happen alert.
+# produces a ServiceMonitor that discovers the target and never scrapes it. That is why
+# MCPCatalogMetricsAbsent exists below: a comment telling you to apply two files together
+# is not a guard, and the misdelivery alert cannot detect its own blindness — its counter
+# is absent in normal operation, so "no misdeliveries" and "never scraped" are the same
+# empty query result.
 #
 # The `release:` label must match your Operator's serviceMonitorSelector /
 # ruleSelector (e.g. `release: kube-prometheus-stack` for the common Helm chart).
@@ -46,6 +48,23 @@ spec:
   groups:
     - name: mcp-catalog.credentials
       rules:
+        - alert: MCPCatalogMetricsAbsent
+          # The guard for every other rule in this file. `catalog_info` is 1 whenever the
+          # exposition server is up, so its ABSENCE means the scrape path is broken —
+          # NetworkPolicy, ServiceMonitor, namespace label, a crashed exposition thread, any
+          # of them. Without this, a broken path silences the page-severity alert below and
+          # looks exactly like a healthy estate.
+          #
+          # The same idiom as the gateway's MCPNoLiveWorkers (`absent(mcp_worker_pods)`),
+          # deliberately: this is not a new kind of signal, it is that one applied to a
+          # service that has just acquired its first alert.
+          expr: absent(catalog_info)
+          for: 10m
+          labels:
+            severity: page
+          annotations:
+            summary: "The catalog is not being scraped — its credential alerts cannot fire"
+            description: "No catalog_info series has been seen for 10 minutes, so Prometheus is not scraping the catalog service. Every alert in this group is therefore silent, including MCPCatalogCredentialMisdelivery — and a should-never-happen alert that cannot fire is indistinguishable from one that never needed to (ADR-0020 §7b). Check the NetworkPolicy (deploy/kubernetes/catalog/networkpolicy.yaml policy 3 must name YOUR Prometheus namespace), the ServiceMonitor's release label, and that the catalog pod is running with CATALOG_METRICS_ENABLED unset or true."
         - alert: MCPCatalogCredentialMisdelivery
           # Deliberately shaped like MCPBreakGlassActivated in the gateway stack's
           # prometheus-rules.yaml, rather than as a new kind of signal: both are

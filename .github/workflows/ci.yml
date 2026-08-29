@@ -119,8 +119,96 @@ jobs:
       - name: Static security scan (bandit)
         run: bandit -r device_mcp_catalog -ll
 
+      # The tests above install from pyproject.toml; the IMAGE installs from
+      # requirements.txt (see Dockerfile). Nothing compared the two, so a dependency
+      # added to one and not the other passed every test here and produced an image
+      # that failed on import at runtime. This is the check that names that cause.
+      #
+      # ⚠️ THIS OVERLAPS "The image actually runs" BELOW, DELIBERATELY. Do not remove it
+      # as redundant. That step catches strictly more — a broken entrypoint, a file the
+      # Dockerfile forgot — and it is the backstop precisely because it cannot be fooled by
+      # drift logic being subtly wrong, which this repo has already shipped once. But it
+      # fails as a container that will not start, which is a mystery to diagnose. This step
+      # fails as "your requirements.txt is missing a pin", at the point of the mistake, and
+      # the ordinary mistake is far more common than the rare one the backstop exists for.
+      # The overlap is the design: one check for the class, one for the error message.
+      - name: requirements.txt agrees with pyproject.toml
+        run: |
+          pip install pip-tools
+          cp requirements.txt /tmp/requirements.before
+          pip-compile --quiet --output-file=requirements.txt pyproject.toml
+          # Compare the PINS, not the whole file. pip-compile writes its own invocation into
+          # the file header, and that line changes with the pip-tools version — 7.6.1 on the
+          # runner adds `--no-index`, which a local run does not. Diffing the whole file
+          # therefore fails on a tool upgrade while every pin is identical, and a check that
+          # cries wolf on an unrelated upgrade is one somebody eventually deletes. The `# via`
+          # provenance comments are dropped for the same reason: informative, not load-bearing.
+          if ! diff -u <(grep -v '^[[:space:]]*#' /tmp/requirements.before) \
+                       <(grep -v '^[[:space:]]*#' requirements.txt); then
+            echo "::error::requirements.txt is out of date with pyproject.toml. The image"
+            echo "::error::installs from requirements.txt, so this drift ships a container"
+            echo "::error::that builds cleanly and fails on import. Re-run:"
+            echo "::error::  cd device_mcp_catalog && pip-compile --output-file=requirements.txt pyproject.toml"
+            exit 1
+          fi
+          # Leave the tree as it was found: later steps build the image from this file, and
+          # they must build what the commit actually contains, not what pip-compile just
+          # regenerated. Otherwise the smoke test would validate a requirements.txt nobody
+          # committed — a check quietly testing something other than the artifact.
+          cp /tmp/requirements.before requirements.txt
+
       - name: Build Docker image
         run: docker build -t device-mcp-catalog:ci .
+
+      # Building an image proves it compiles, not that it runs. Every failure the check
+      # above catches is a subset of what this one catches — a missing dependency, a
+      # broken entrypoint, a file the Dockerfile forgot to COPY — and this one cannot be
+      # fooled by getting the drift logic subtly wrong, which has happened in this repo
+      # before. /healthz is liveness only and needs no database, so this asserts the
+      # process starts and serves, nothing more.
+      - name: The image actually runs
+        run: |
+          docker run -d --name catalog-smoke -e CATALOG_API_TOKEN=smoke device-mcp-catalog:ci
+          # Probed from INSIDE the container, not over a published port. Host port
+          # publishing is the runner's business and can fail for reasons that have nothing
+          # to do with the image — which would make this check flaky in exactly the
+          # direction that gets checks deleted. `python` is guaranteed present here; curl
+          # is not, on a slim base.
+          probe() {
+            docker exec catalog-smoke python -c "
+          import sys, urllib.request
+          try:
+              body = urllib.request.urlopen('http://127.0.0.1:$1$2', timeout=3).read().decode()
+          except Exception as exc:
+              print(exc); sys.exit(1)
+          sys.exit(0 if '$3' in body else 1)
+          "
+          }
+          for i in $(seq 1 30); do
+            if probe 8100 /healthz '"status":"ok"'; then
+              echo "catalog answered /healthz"
+              # And the series the MCPCatalogMetricsAbsent alert watches for actually
+              # exists in the built image. That alert is the backstop for every other rule
+              # in monitoring.yaml; a typo'd or unregistered metric would silence the lot
+              # while every YAML file still looked correct.
+              if ! probe 9100 /metrics catalog_info; then
+                echo "::error::The image serves /healthz but exposes no catalog_info on :9100."
+                echo "::error::MCPCatalogMetricsAbsent watches for that series, so without it"
+                echo "::error::every catalog alert is silent and looks healthy (ADR-0020 §7b)."
+                docker logs catalog-smoke
+                docker rm -f catalog-smoke >/dev/null
+                exit 1
+              fi
+              echo "catalog exposed catalog_info on :9100"
+              docker rm -f catalog-smoke >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::The image built but never served /healthz. Container logs:"
+          docker logs catalog-smoke
+          docker rm -f catalog-smoke >/dev/null
+          exit 1
 
   security:
     runs-on: ubuntu-latest
@@ -194,3 +282,51 @@ jobs:
             echo "::error::tenant, and a per-tenant policy must not be able to select it."
             exit 1
           fi
+
+      # ADR-0020 §7b. A ServiceMonitor pointing at a port the NetworkPolicy does not admit
+      # discovers its target and never scrapes it — and every alert on that target then
+      # stays silent, which for a should-never-happen alert is indistinguishable from a
+      # healthy estate. The runtime backstop is MCPCatalogMetricsAbsent; this is the
+      # cheaper, earlier one, and it names the specific port rather than the symptom.
+      - name: Every scraped port is admitted by a NetworkPolicy
+        run: |
+          python3 - <<'EOF'
+          import sys, yaml, pathlib
+
+          mon = list(yaml.safe_load_all(pathlib.Path("deploy/kubernetes/catalog/monitoring.yaml").read_text()))
+          npol = list(yaml.safe_load_all(pathlib.Path("deploy/kubernetes/catalog/networkpolicy.yaml").read_text()))
+          svc = list(yaml.safe_load_all(pathlib.Path("deploy/kubernetes/catalog/service.yaml").read_text()))
+
+          # ServiceMonitor endpoints name a Service PORT NAME; NetworkPolicy rules name a
+          # number. The Service is what maps between them, so all three files have to agree
+          # and the check has to read all three.
+          port_numbers = {
+              p["name"]: p.get("targetPort", p["port"])
+              for d in svc if d and d.get("kind") == "Service"
+              for p in d["spec"]["ports"]
+          }
+          scraped = {
+              ep["port"]
+              for d in mon if d and d.get("kind") == "ServiceMonitor"
+              for ep in d["spec"]["endpoints"]
+          }
+          allowed = {
+              port.get("port")
+              for d in npol if d and d.get("kind") == "NetworkPolicy"
+              for rule in (d["spec"].get("ingress") or [])
+              for port in (rule.get("ports") or [])
+          }
+
+          failed = False
+          for name in sorted(scraped):
+              if name not in port_numbers:
+                  print(f"::error::ServiceMonitor scrapes port '{name}', which the Service does not define.")
+                  failed = True
+              elif port_numbers[name] not in allowed:
+                  print(f"::error::ServiceMonitor scrapes port '{name}' (:{port_numbers[name]}), which no")
+                  print("::error::NetworkPolicy admits. The namespace default-deny will drop every scrape,")
+                  print("::error::silently, and every alert on that target will stay quiet while looking")
+                  print("::error::healthy. Add an ingress rule for it in networkpolicy.yaml.")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          EOF
