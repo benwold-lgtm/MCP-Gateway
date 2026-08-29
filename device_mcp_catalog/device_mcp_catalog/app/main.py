@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from . import assignments, claims, device_types, metrics, upgrades
+from . import assignments, claims, device_types, metrics, tenant_credentials, upgrades
 from .auth import Caller, authenticate_caller
 from .config import load_settings
 from .db import Database
@@ -100,6 +100,10 @@ def create_app() -> FastAPI:
     app.include_router(assignments.router)
     app.include_router(claims.router)
     app.include_router(upgrades.router)
+    # ADR-0024 §10: the tenant caller table stops being static config. Provider-only, and
+    # mounted like every other router — it is ordinary provider authority over the provider's
+    # own catalog, not a new plane.
+    app.include_router(tenant_credentials.router)
     return app
 
 

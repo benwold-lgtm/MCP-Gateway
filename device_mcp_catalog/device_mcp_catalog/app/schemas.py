@@ -143,6 +143,39 @@ class Claim(BaseModel):
     claimed_at: datetime.datetime
 
 
+class TenantCredential(BaseModel):
+    """One entry in the tenant caller table (ADR-0024 §10). **No hash, no secret.**
+
+    A listing answers "how many credentials does this tenant hold, when were they issued, and
+    are any still live" — none of which needs the credential itself, and including its hash
+    would hand anyone with a candidate token something to compare against.
+    """
+
+    id: uuid.UUID
+    tenant_id: str
+    label: str
+    issued_at: datetime.datetime
+    issued_by: str
+    revoked_at: Optional[datetime.datetime] = None
+
+
+class TenantCredentialListResponse(BaseModel):
+    credentials: list[TenantCredential]
+
+
+class IssuedCredential(BaseModel):
+    """The one response in this service that carries a live secret, returned exactly once.
+
+    There is deliberately no route that can re-show it: a store that can re-show a credential
+    is a store that can leak one, and the recovery path is to issue another and revoke this.
+    """
+
+    id: uuid.UUID
+    tenant_id: str
+    label: str
+    credential: str
+
+
 class ToolSetDiff(BaseModel):
     """Mirrors `device_mcp_gateway.core.manifest_diff.ToolSetDiff` field-for-field — the
     shape a caller displaying an upgrade offer already knows how to render. See
