@@ -27,6 +27,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, AUDIT_OUTCOME_SUCCESS, audit_request
+from device_mcp_gateway.cfg import configured_tenant_id
 from device_mcp_gateway.enrolments import (
     DEFAULT_INVITATION_TTL_SECONDS,
     INVITATION_CODE_PREFIX,
@@ -217,6 +218,31 @@ async def redeem_invitation(request: Request, authorization: str = Header(defaul
     nothing else. That is §10's atomicity requirement: every piece of state the connection
     depends on is created here, so none of it remains a step a human does separately.
     """
+    # A stack that cannot say which tenant it is cannot be enrolled. Refused rather than
+    # answered with a null: the provider uses this value to check that the catalog credential
+    # it minted was minted for the tenant it is actually enrolling, and an optional check is
+    # one skipped by exactly the deployment that got it wrong (ADR-0020 §7b's lesson, arriving
+    # a level up — at the relationship rather than the request).
+    #
+    # This is also the first thing in the gateway to READ `gateway.tenant_id`, whose own
+    # config comment said plainly that nothing did. Failing here, loudly, naming the field, is
+    # the shape ADR-0024 §10 singles out as the model: step 5 of its nine "fails loudly, at
+    # startup, naming the missing field", and is "the one to imitate".
+    tenant_id = configured_tenant_id(request.app.state.config)
+    if not tenant_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "ERR_TENANT_ID_NOT_CONFIGURED",
+                "message": (
+                    "this gateway has no gateway.tenant_id set, so it cannot tell a provider "
+                    "which tenant it is enrolling. Set it (ADR-0019's opaque identifier) before "
+                    "issuing an invitation — an enrolment whose tenant nobody can name is one "
+                    "nobody can verify was delivered to the right place."
+                ),
+            },
+        )
+
     scheme, _, code = authorization.partition(" ")
     if scheme.lower() != "bearer" or not code.startswith(INVITATION_CODE_PREFIX):
         # A cheap shape check, and NOT the thing that keeps other credentials out — removing it
@@ -278,6 +304,10 @@ async def redeem_invitation(request: Request, authorization: str = Header(defaul
     )
     return {
         "enrolment_id": result.enrolment.enrolment_id,
+        # Which tenant the provider has just enrolled, from this stack's OWN configuration —
+        # never from anything the redeeming caller sent. It is what lets the provider confirm
+        # the catalog credential it minted belongs to the tenant it actually reached.
+        "tenant_id": tenant_id,
         "credential": result.credential,
         "approved_by": result.enrolment.approved_by,
         "approved_at": result.enrolment.approved_at,

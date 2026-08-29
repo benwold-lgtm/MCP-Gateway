@@ -31,16 +31,30 @@ _STACK_SEQ = itertools.count()
 ADMIN_KEY = "a" * 40
 CATALOG_URL = "https://catalog.provider.example"
 CATALOG_CREDENTIAL = "tenant-catalog-token"
+TENANT_ID = "t-3f9a1c2b7d4e8065"
 
 
-def _client(monkeypatch, tmp_path) -> TestClient:
+def _client(monkeypatch, tmp_path, *, tenant_id: str | None = TENANT_ID) -> TestClient:
     stack_dir = tmp_path / f"stack-{next(_STACK_SEQ)}"
     stack_dir.mkdir()
+    # A stack that cannot say which tenant it is cannot be enrolled, so every client here
+    # configures one — `tenant_id=None` is how the refusal itself is tested.
+    #
+    # ⚠️ The config is loaded EXPLICITLY and passed in, not selected via `MCP_CONFIG`. That env
+    # var is read into `cfg.CONFIG_PATH` at module-import time and then baked into
+    # `load_config`'s default argument, so the FIRST test in a session to import the gateway
+    # fixes the config path for every test after it — setting it per-test looks like it works
+    # and silently does nothing. (Found here: whichever of these tests ran first decided
+    # whether the rest saw a tenant id.) Passing `override_config` is the only per-test route
+    # that is not at the mercy of import order.
+    config_path = stack_dir / "config.yaml"
+    config_path.write_text(f'gateway:\n  tenant_id: "{tenant_id}"\n' if tenant_id else "gateway: {}\n")
     monkeypatch.chdir(stack_dir)
     monkeypatch.setenv("MCP_ADMIN_KEY", ADMIN_KEY)
+    from device_mcp_gateway.cfg import load_config
     from device_mcp_gateway.main import create_app
 
-    return TestClient(create_app())
+    return TestClient(create_app(override_config=load_config(str(config_path))))
 
 
 def _admin() -> dict:
@@ -115,6 +129,27 @@ def test_an_enrolment_credential_cannot_redeem(monkeypatch, tmp_path):
 
 
 # --- redemption is single-use and atomic ---------------------------------------------------
+
+
+def test_a_stack_that_cannot_name_its_tenant_refuses_to_be_enrolled(monkeypatch, tmp_path):
+    """§10 praises step 5 of its nine for failing "loudly, at startup, naming the missing
+    field" — the model failure mode. This is that shape at the first moment it can matter.
+
+    The provider uses the returned `tenant_id` to check the catalog credential it minted was
+    minted for the tenant it actually reached. Answering `null` would make that check optional,
+    and an optional check is skipped by exactly the deployment that got it wrong.
+    """
+    client = _client(monkeypatch, tmp_path, tenant_id=None)
+    resp = _redeem(client, _invite(client))
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error_code"] == "ERR_TENANT_ID_NOT_CONFIGURED"
+
+
+def test_redemption_tells_the_provider_which_tenant_it_enrolled(monkeypatch, tmp_path):
+    """From this stack's OWN configuration, never from anything the redeeming caller sent —
+    the rule `provider_subject` and `assigned_by` already follow."""
+    client = _client(monkeypatch, tmp_path)
+    assert _redeem(client, _invite(client)).json()["tenant_id"] == TENANT_ID
 
 
 def test_redemption_mints_a_credential_and_records_who_approved_it(monkeypatch, tmp_path):
