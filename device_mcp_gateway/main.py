@@ -42,6 +42,7 @@ from device_mcp_gateway.api import streamable as api_streamable
 from device_mcp_gateway.api import streamable_fleet as api_streamable_fleet
 from device_mcp_gateway.api import notifications as api_notifications
 from device_mcp_gateway.api import support_requests as api_support_requests
+from device_mcp_gateway.api import enrolments as api_enrolments
 from device_mcp_gateway.api import write_planned as api_write_planned
 
 # Re-exported for tests and internal callers: these lived here before the router
@@ -76,6 +77,12 @@ from device_mcp_gateway.registry.server import Registry
 from device_mcp_gateway.shared.crypto import CredentialCodec
 from device_mcp_gateway.shared.registry_backend import MemoryRegistryBackend, RedisRegistryBackend
 from device_mcp_gateway.shared.session_owners import ExpiringOwners
+from device_mcp_gateway.enrolments import (
+    InMemoryEnrolmentStore,
+    InMemoryInvitationStore,
+    RedisEnrolmentStore,
+    RedisInvitationStore,
+)
 from device_mcp_gateway.support_grants import (
     InMemoryPendingSupportRequestStore,
     InMemorySelfIssueActivityTracker,
@@ -353,6 +360,19 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     _app.state.support_standing_consent = InMemoryStandingConsentStore()
     _app.state.support_self_issue_activity = InMemorySelfIssueActivityTracker()
 
+    # --- Enrolment (ADR-0024 §10) ---
+    # Two stores again, and here the difference is the whole design: an Invitation is
+    # short-lived and single-use (it exists only to bootstrap the first credential), while an
+    # Enrolment deliberately never expires — §10 argues an expiry on it would be "a scheduled
+    # outage with a security-shaped name", since it carries no capability beyond asking.
+    # The enrolment store reads the invitation store, so it is constructed with it rather than
+    # looking it up off app.state later: redemption is one atomic act across both.
+    _app.state.enrolment_invitations = InMemoryInvitationStore()
+    # The codec is passed in because the enrolment holds ONE credential that must be readable
+    # again — the tenant's own catalog token — unlike the invitation code and the enrolment
+    # credential, which are only ever recognised and so are hashed.
+    _app.state.enrolments = InMemoryEnrolmentStore(_app.state.enrolment_invitations, codec=_codec)
+
     # --- Tenant notifications (ADR-0017 slice 5 / the ADR-0023 gap) ---
     _app.state.tenant_notifications = InMemoryTenantNotificationStore(
         max_retained=tenant_notifications_max_retained(cfg)
@@ -437,6 +457,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             app.state.support_grants = RedisSupportGrantStore(redis_client)
             app.state.support_standing_consent = RedisStandingConsentStore(redis_client)
             app.state.support_self_issue_activity = RedisSelfIssueActivityTracker(redis_client)
+            _invitations = RedisInvitationStore(redis_client)
+            app.state.enrolment_invitations = _invitations
+            app.state.enrolments = RedisEnrolmentStore(redis_client, _invitations, codec=app.state.codec)
             app.state.tenant_notifications = RedisTenantNotificationStore(
                 redis_client, max_retained=tenant_notifications_max_retained(cfg)
             )
@@ -531,6 +554,15 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     protected.include_router(api_write_planned.router)
     protected.include_router(api_support_requests.router)
     protected.include_router(api_notifications.router)
+    protected.include_router(api_enrolments.router)
+
+    # ADR-0024 §10: redemption is versioned like everything else but sits OUTSIDE
+    # `authenticate_request`, because the caller has no gateway credential yet — obtaining one
+    # is what the call does. It is not unauthenticated: the invitation code in the
+    # Authorization header is the credential, and the tenant issued it deliberately. Mounted
+    # separately rather than by exempting a path inside the protected router, so no future
+    # route can end up outside authentication by editing a list of exceptions.
+    _app.include_router(api_enrolments.redeem_router, prefix=API_V1_PREFIX)
 
     # Version the entire management API under /v1 (e.g. /v1/devices). Probes
     # (/health, /livez, /readyz) and the Prometheus scrape endpoint stay unversioned.

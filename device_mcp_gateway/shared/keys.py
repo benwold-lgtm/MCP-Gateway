@@ -223,6 +223,64 @@ class KeyBuilder:
         gateway, since the setting is a tenant-wide toggle, not per-operator."""
         return self._k("support:standing_consent")
 
+    # --- enrolment (ADR-0024 §10) ---------------------------------------------
+
+    def enrolment_invitation(self, code_hash: str) -> str:
+        """Hash holding an unredeemed invitation, keyed by a HASH of the code rather than the
+        code itself (ADR-0024 §10).
+
+        The code is a bearer credential for exactly one call, so storing it verbatim would put
+        a live credential in Redis for anyone with keyspace access — the thing ADR-0018's
+        by-reference discipline exists to avoid. Redemption hashes what it was given and looks
+        that up, so this key names the invitation without being able to present it. TTL'd:
+        unlike the enrolment it produces, an invitation is the part that expires.
+        """
+        return self._k(f"enrolment:invitation:{code_hash}")
+
+    @property
+    def enrolment_invitation_index(self) -> str:
+        """Set of live invitation code-hashes, so the tenant console can show what it has
+        outstanding. Same best-effort membership caveat as `support_pending_index`: the hash's
+        own TTL reaps it independently of this set."""
+        return self._k("enrolment:invitations")
+
+    def enrolment(self, enrolment_id: str) -> str:
+        """Hash holding a live enrolment — the standing relationship between this tenant and
+        its provider.
+
+        **Deliberately not TTL'd**, unlike every other credential-bearing key in this file.
+        ADR-0024 §10: an enrolment carries no capability (the provider's side permits one verb,
+        *ask*), so an expiry would not be a security control but "a scheduled outage with a
+        security-shaped name". The control is revocation, and the replacement for expiry's one
+        virtue is that enrolments are listed and carry last-used.
+
+        Note this sits at the same level as `enrolment:all` and `enrolment:invitations`. That
+        is safe because an id is `secrets.token_urlsafe(16)` — 22 URL-safe characters, never a
+        bare word — so no id can ever name an index. Written down because it is an invariant
+        of the id generator rather than of this key, and a future change to shorter or
+        caller-supplied ids would break it silently.
+        """
+        return self._k(f"enrolment:{enrolment_id}")
+
+    @property
+    def enrolment_index(self) -> str:
+        """Set of live enrolment ids — what the tenant console lists. Unlike the support
+        indexes nothing reaps members behind this set's back, so a member with no surviving
+        hash means a revoke removed one and not the other; readers still tolerate it.
+
+        Named `enrolment:all` rather than `enrolments` to keep every key in this namespace
+        under one prefix — the convention `support:pending` and `devices:all` already follow.
+        A bare plural also collides with the natural JSON field name in the API response,
+        which made `test_no_inline_redis_key_strings_outside_the_keys_module` flag a response
+        body as a stray key literal. The guard was right that the namespace was ambiguous."""
+        return self._k("enrolment:all")
+
+    def enrolment_credential(self, credential_hash: str) -> str:
+        """Maps a presented enrolment credential to its enrolment id, keyed by the credential's
+        hash for the same reason invitations are. This is the lookup `rbac.py` performs on every
+        request the provider makes, so it is a direct key rather than a scan."""
+        return self._k(f"enrolment:credential:{credential_hash}")
+
     def support_self_issue_window(self, subject: str) -> str:
         """Hash of {self_issues, last_self_issue} over a trailing review window — the same
         shape as `break_glass_window`, for the same reason: a standing-consent self-issued

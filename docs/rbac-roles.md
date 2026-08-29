@@ -18,8 +18,10 @@ for the role/scope model; the *decision* behind it is
 | `backup:write` | Apply a restore | `POST /v1/admin/restore/apply` |
 | `backup:export-portable` | **Additionally** export a *portable* archive — credentials re-encrypted to a passphrase instead of the stack key | `POST /v1/admin/backup` with `kind=portable` |
 | `devices:write-planned` | Apply **exactly one** reviewed, digest-bound device-write plan (ADR-0022) | `POST /v1/devices/plans/apply` |
-| `support:request` | **Ask** to act on this tenant, and poll your own request's outcome (ADR-0017). Held by a **provider**, granted through a named RBAC entry the tenant creates. Confers no read, no write, no invoke, and no decision | `POST /v1/support-requests`, `GET /v1/support-requests/{id}` |
+| `support:request` | **Ask** to act on this tenant, and poll your own request's outcome (ADR-0017). Held by a **provider**, and since [ADR-0024](adr/0024-tenant-provisioning-is-a-request.md) §10 it normally arrives by redeeming an invitation rather than through a hand-provisioned RBAC entry (both still work). Confers no read, no write, no invoke, and no decision | `POST /v1/support-requests`, `GET /v1/support-requests/{id}` |
 | `support:administer` | **Decide** who may act on this tenant: list, approve, reject, revoke, and the standing-consent setting (ADR-0017). The tenant's own authority | `GET /v1/support-requests`, `POST .../{id}/approve`, `POST .../{id}/reject`, `GET/POST/DELETE /v1/support-requests/standing-consent`, `GET /v1/support-grants`, `DELETE /v1/support-grants/{id}` |
+| `support:administer` (enrolment, ADR-0024 §10) | **Decide who the provider is at all**: issue and withdraw invitations, list every enrolment with its `last_used_at`, revoke one, and read this tenant's own catalog configuration. Same scope as deciding on a support request, deliberately — both are administering this tenant's relationship with its provider, and an admin who could approve a request but not see who is enrolled would hold half a control | `POST/GET /v1/enrolment-invitations`, `DELETE /v1/enrolment-invitations/{code_hash}`, `GET /v1/enrolments`, `DELETE /v1/enrolments/{id}`, `GET /v1/enrolments/catalog-configuration` |
+| *(none — the invitation is the credential)* | **Redeem** an invitation, once. Outside the RBAC machinery because the caller has no gateway credential yet; obtaining one is what the call does (ADR-0024 §10) | `POST /v1/enrolments/redeem` |
 | `notifications:read` | Read the durable tenant-facing notification list — a break-glass activation, a frequently self-issued support grant (ADR-0017 slice 5) | `GET /v1/notifications` |
 
 > **`backup:read` is not a read-only grant in the ordinary sense.** An archive contains
@@ -76,6 +78,25 @@ for the role/scope model; the *decision* behind it is
 > watcher — just not the instant the revoke lands elsewhere. See `support_grant_inflight.py`'s
 > module docstring and `docs/adr/README.md` item 7 for the full reasoning.
 >
+> **An enrolment credential is a FOURTH path, and it is where a provider's
+> `support-requester` identity now comes from (ADR-0024 §10).** The role bundle above still
+> exists and still works — an operator can mint a static key with it — but provisioning one by
+> hand was step 5 of the nine manual steps §10 measured. Redeeming an invitation mints an
+> `enr_`-prefixed credential instead, resolved by `enrolments.EnrolmentStore.check` on the same
+> last-resort path as `sgr_` and by the same shape test, and it resolves to exactly
+> `{support:request}` — written literally rather than read from `ROLE_SCOPES["support-requester"]`,
+> so anything later added to that role does not silently become something every enrolled
+> provider holds.
+>
+> **It never expires, and that is deliberate** (§10): an enrolment carries no capability beyond
+> asking, so an expiry would be "a scheduled outage with a security-shaped name" rather than a
+> control. Revocation is therefore the ONLY control, which is why `check` is a live lookup on
+> every request with no caching and no fallback — a Redis outage refuses rather than admitting
+> a credential this replica cannot confirm is still live. What replaces expiry's one virtue is
+> visibility: every enrolment is listed with who approved it, when, and a `last_used_at` taken
+> from real requests, so a dormant supplier relationship is found by looking rather than by
+> remembering.
+>
 > **`notifications:read` is a separate scope from `support:administer`, deliberately.**
 > `GET /v1/notifications` is a durable, tenant-facing surface (ADR-0017 slice 5) for signals
 > that must not only be logged — a break-glass activation (closing a confirmed ADR-0023 gap:
@@ -93,6 +114,7 @@ for the role/scope model; the *decision* behind it is
 > `GET /v1/auth/me` requires authentication but **no specific scope** — it returns the
 > caller's own `subject`, effective `scopes`, and `auth_method`. A UI/BFF reads it to gate
 > views on the gateway's scopes (so the two never drift); see "Where roles come from" below.
+
 
 ## Roles (scope bundles)
 

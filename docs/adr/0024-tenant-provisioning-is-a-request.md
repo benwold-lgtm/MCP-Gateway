@@ -184,8 +184,19 @@ design; who executes the middle step is not.
 
 ### 10. Connecting the tenant to the provider is an enrolment, and an enrolment does not expire (amendment, 2026-08-28)
 
-> **Not built.** This section records a decision. Today the connection is made by editing
-> config on both sides by hand; nothing here is implemented.
+> **PARTIALLY BUILT (2026-08-29) — the tenant gateway's half.** Invitations and enrolments
+> (`device_mcp_gateway/enrolments.py`, `api/enrolments.py`): a tenant admin issues a one-time
+> invitation, the provider redeems it once, and redemption mints the provider's standing
+> `support:request` credential and records the catalog address plus this tenant's own
+> credential for it — replacing steps 5 and 9 of the nine. Revocation refuses the provider's
+> very next request and closes the tenant's catalog access, both proven.
+>
+> **Not built:** the provider console's side (redeeming, and adding the tenant to its own
+> registry), the catalog minting the per-tenant credential rather than being handed one
+> (ADR-0020 §7a's `CATALOG_TENANT_TOKENS` is still static config), and the tenant console's
+> UI for issuing invitations and listing enrolments. Until those land, redemption is a call an
+> operator makes with a tool rather than a button, and §10's property — that no step remains
+> something a human does separately — holds for the gateway's half only.
 
 **Found by standing up the estate's second tenant** — the first time this record's subject
 matter was executed rather than described.

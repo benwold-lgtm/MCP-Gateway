@@ -10,6 +10,45 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **Enrolment: a tenant invites its provider, and the relationship is revocable**
+  ([ADR-0024](docs/adr/0024-tenant-provisioning-is-a-request.md) §10). Connecting a tenant to
+  its provider was nine manual steps across two clusters and an identity provider, three of
+  which failed silently. A tenant admin now issues a one-time, short-lived invitation
+  (`POST /v1/enrolment-invitations`), hands it over out of band, and the provider redeems it
+  once (`POST /v1/enrolments/redeem`). Redemption mints the provider's standing credential —
+  carrying `support:request` and nothing else — and records the catalog address plus this
+  tenant's own credential for it, replacing steps 5 and 9 of the nine.
+
+  **The invitation expires; the enrolment it produces does not.** An enrolment carries no
+  capability beyond *asking*, so an expiry would not be a security control but a scheduled
+  outage with a security-shaped name — on a timer nobody watches, the provider silently loses
+  the ability to be asked for help, and the first symptom is a support request that cannot be
+  raised during the incident that prompted it. The control is revocation
+  (`DELETE /v1/enrolments/{id}`), which refuses the provider's very next request and closes
+  the tenant's catalog access. What replaces expiry's one virtue is visibility: `GET
+  /v1/enrolments` lists every relationship with who approved it, when, and a `last_used_at`
+  taken from real requests rather than self-reported, so a dormant supplier relationship is
+  found by looking rather than by remembering.
+
+  Redemption is authenticated by the invitation itself and sits outside the RBAC machinery,
+  because the caller has no gateway credential yet — obtaining one is what the call does. It
+  is **not** an unauthenticated endpoint: §10 rejects that for the reason ADR-0017 §7a
+  rejected an unauthenticated raise route.
+
+  *Partially built* — the provider console's side, the catalog minting its own per-tenant
+  credential, and the tenant console's UI are not in this change. See §10's status banner.
+
+### Fixed
+
+- **`audit_request(..., subject=...)` raised `TypeError` instead of honouring the caller.**
+  Its own comment promised that extra fields win on a key collision, "and an audit emitter
+  must never be the thing that 500s a route it is only observing" — but `subject` and `rid`
+  were passed both explicitly and via `**extra`, so supplying either did exactly that. Found
+  by ADR-0024 §10's redemption route, which is authenticated by an invitation rather than a
+  Principal and so has a subject to record that `subject_of` cannot know.
+
 ### Changed
 
 - **`POST /v1/admin/restore` is now two routes, split by scope, and the apply must

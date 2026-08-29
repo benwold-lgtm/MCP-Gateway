@@ -926,6 +926,56 @@ async def _support_grant_principal(request: Request, token: str) -> Optional[Pri
     )
 
 
+async def _enrolment_principal(request: Request, token: str) -> Optional[Principal]:
+    """ADR-0024 §10: resolve an enrolment credential to a Principal.
+
+    The enrolment is what replaces step 5 of §10's nine manual steps — minting the provider's
+    `support-requester` token by hand. It resolves to exactly the scopes that role carried and
+    nothing more: **the provider's side of an enrolment permits one verb, `ask`.** It reads no
+    device, writes nothing, invokes nothing and decides nothing, which is precisely why §10 can
+    justify giving it no expiry.
+
+    `check` is a live lookup on every request, deliberately, and for a stronger reason than the
+    support-grant path above: a grant also expires, so a stale cached view of one eventually
+    stops mattering. An enrolment never expires, so **revocation is the only control there is**,
+    and it has to take effect on the next request rather than at the next refresh of something
+    remembered.
+    """
+    from device_mcp_gateway.enrolments import enrolment_store
+
+    store = enrolment_store(request.app.state)
+    result = await store.check(token)
+    if not result.ok or result.enrolment is None:
+        return None
+    enrolment = result.enrolment
+
+    # §10's replacement for expiry: "last-used, sourced from the audit rather than
+    # self-reported, so a dormant relationship is discoverable by looking rather than by
+    # remembering." Recorded here because this is the only place that sees the enrolment
+    # actually being exercised, and best-effort by contract — a usage timestamp that could not
+    # be written must never be the reason a provider's request fails.
+    await store.note_used(enrolment.enrolment_id)
+
+    audit_event(
+        "enrolment.use",
+        subject=enrolment.provider_subject,
+        outcome=AUDIT_OUTCOME_SUCCESS,
+        rid=_audit_rid(request),
+        target=_audit_target(request),
+        enrolment_id=enrolment.enrolment_id,
+    )
+
+    return Principal(
+        subject=enrolment.provider_subject,
+        # NOT ROLE_SCOPES["support-requester"], though it is the same set today. Reading the
+        # role bundle here would mean anything later added to that role silently becomes
+        # something every enrolled provider holds — the standing, un-reviewed authority §10
+        # can only justify because the set is exactly one verb.
+        scopes=frozenset({SCOPE_SUPPORT_REQUEST}),
+        auth_method="enrolment",
+    )
+
+
 async def authenticate_request(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
@@ -945,12 +995,20 @@ async def authenticate_request(
             # path already refused it, never a shortcut ahead of it.
             if exc.status_code != 401 or credentials is None:
                 raise
+            from device_mcp_gateway.enrolments import is_enrolment_token
             from device_mcp_gateway.support_grants import is_support_grant_token
 
             token = credentials.credentials
-            if not is_support_grant_token(token):
+            # Two prefixed credential kinds, checked by shape before either costs a store
+            # round-trip. They are separate paths rather than one because they mean different
+            # things: a support grant is a time-boxed capability a human approved for one
+            # engagement, an enrolment is a standing permission to ASK and nothing else.
+            if is_support_grant_token(token):
+                resolved = await _support_grant_principal(request, token)
+            elif is_enrolment_token(token):
+                resolved = await _enrolment_principal(request, token)
+            else:
                 raise
-            resolved = await _support_grant_principal(request, token)
             if resolved is None:
                 raise
             principal = resolved
