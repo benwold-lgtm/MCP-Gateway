@@ -37,8 +37,24 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   is **not** an unauthenticated endpoint: §10 rejects that for the reason ADR-0017 §7a
   rejected an unauthenticated raise route.
 
-  *Partially built* — the provider console's side, the catalog minting its own per-tenant
-  credential, and the tenant console's UI are not in this change. See §10's status banner.
+- **The catalog mints per-tenant credentials, instead of only reading them from config**
+  ([ADR-0024](docs/adr/0024-tenant-provisioning-is-a-request.md) §10,
+  [ADR-0020](docs/adr/0020-the-device-catalog.md) §7a). §7a required a credential per tenant and
+  had nothing that could issue one, so the caller table was the static `CATALOG_TENANT_TOKENS`
+  map. `POST /tenants/{id}/credentials` (provider-only) issues one, `DELETE .../{cred_id}`
+  revokes it, and `DELETE /tenants/{id}/credentials` revokes every live one — which is what
+  ending an enrolment calls, as a single call rather than a client loop so it cannot
+  half-happen.
+
+  Config entries are **not** replaced and are checked first: they need no database, so an estate
+  that has not adopted enrolment is unaffected by the catalog's store being unavailable. Issued
+  credentials are stored as hashes, since this service only ever recognises a credential and
+  never presents one. An unreachable database refuses one with
+  `503 ERR_CATALOG_STORE_UNAVAILABLE`, never `401` — a 401 would have an operator diagnose an
+  outage as a bad credential and re-issue one that was fine.
+
+  *Partially built* — the provider console's side and the tenant console's UI are not in this
+  change. See §10's status banner.
 
 ### Fixed
 

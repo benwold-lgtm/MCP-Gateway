@@ -29,8 +29,24 @@ caller may do and, for a tenant, which tenant it is**:
 
 | Caller | Configured as | May |
 |---|---|---|
-| Provider console | `CATALOG_API_TOKEN` | curate, assign and revoke, read everything |
-| A tenant's console | one entry in `CATALOG_TENANT_TOKENS`, a JSON `{tenant_id: token}` map | read the types assigned **to it**, record claims **for itself** |
+| Provider console | `CATALOG_API_TOKEN` | curate, assign and revoke, read everything; issue and revoke tenant credentials |
+| A tenant's console | an **issued** credential (ADR-0024 §10), or one entry in `CATALOG_TENANT_TOKENS`, a JSON `{tenant_id: token}` map | read the types assigned **to it**, record claims **for itself** |
+
+**Two sources of tenant credential, checked in that order.** `CATALOG_TENANT_TOKENS` is static
+config and needs no database — it is how a tenant predating enrolment is bootstrapped, and it
+keeps working. Issued credentials live in the `tenant_credentials` table and are minted by
+`POST /tenants/{id}/credentials` (provider-only), which is what approving an enrolment calls:
+ADR-0024 §10 makes that "the moment a tenant first needs catalog access, and the moment both
+sides' identities are known". Config is checked first deliberately, because it is the path that
+still works while the store is down.
+
+Issued credentials are stored as SHA-256 hashes — this service only ever *recognises* a
+credential, never presents one — so a dump of that table is not a set of live secrets. The
+plaintext is returned once, from the issue call, and no route can re-show it.
+
+**An unreachable database refuses an issued credential with `503 ERR_CATALOG_STORE_UNAVAILABLE`,
+never `401`.** A 401 would tell an operator their credential is wrong, so an outage would be
+diagnosed as a misconfiguration and someone would re-issue a credential that was fine.
 
 Two rules follow, and the routes below are written assuming them:
 
@@ -127,3 +143,21 @@ so `tool_set` is exactly as trustworthy as the curator who entered it.
   no declared `tool_set` — a distinct condition from an empty (diffed, no changes) result.
   Accepting an offer is just re-calling `POST /device-types/{id}/claims` with the new
   version; there is no separate "apply" route.
+
+## API (tenant credentials, ADR-0024 §10)
+
+Provider-only. This is the caller table itself, and it is the provider's own — a tenant console
+minting its own credential would be the authorization model asking the applicant to fill in
+their own pass.
+
+- `POST /tenants/{tenant_id}/credentials` (`{label}`) — mint one. The plaintext is in the
+  response and nowhere else.
+- `GET /tenants/{tenant_id}/credentials` — what this tenant holds. No secrets and no hashes:
+  a hash in a listing is something to compare a candidate token against.
+- `DELETE /tenants/{tenant_id}/credentials/{id}` — revoke one. Takes effect on that tenant's
+  very next request, because an issued credential is resolved live rather than from a cache.
+  Idempotent.
+- `DELETE /tenants/{tenant_id}/credentials` — revoke every live one, returning the count.
+  What ending an enrolment calls (§10: "revoking an enrolment revokes that credential too").
+  One call rather than a client loop, so ending a relationship cannot half-happen because
+  something interrupted the caller between two revokes.

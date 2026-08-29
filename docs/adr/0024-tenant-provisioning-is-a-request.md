@@ -191,12 +191,16 @@ design; who executes the middle step is not.
 > credential for it — replacing steps 5 and 9 of the nine. Revocation refuses the provider's
 > very next request and closes the tenant's catalog access, both proven.
 >
-> **Not built:** the provider console's side (redeeming, and adding the tenant to its own
-> registry), the catalog minting the per-tenant credential rather than being handed one
-> (ADR-0020 §7a's `CATALOG_TENANT_TOKENS` is still static config), and the tenant console's
-> UI for issuing invitations and listing enrolments. Until those land, redemption is a call an
-> operator makes with a tool rather than a button, and §10's property — that no step remains
-> something a human does separately — holds for the gateway's half only.
+> **Also built: the catalog now mints per-tenant credentials** rather than only reading them
+> from `CATALOG_TENANT_TOKENS` (`device_mcp_catalog/app/tenant_credentials.py`). Config entries
+> keep working and are checked first — they need no database, so an estate that has not adopted
+> enrolment is unaffected by the catalog's own store being unavailable.
+>
+> **Not built:** the provider console's side (redeeming, calling the two halves above in order,
+> and adding the tenant to its own registry), and the tenant console's UI for issuing
+> invitations and listing enrolments. Until those land, redemption is a call an operator makes
+> with a tool rather than a button, and §10's property — that no step remains something a human
+> does separately — holds for the two server halves only.
 
 **Found by standing up the estate's second tenant** — the first time this record's subject
 matter was executed rather than described.

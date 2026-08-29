@@ -248,6 +248,91 @@ class AssignmentRepo:
         )
 
 
+class TenantCredentialRepo:
+    """ADR-0024 §10: the tenant caller table, once it stops being static config.
+
+    ADR-0020 §7a made the catalog authenticate two caller classes but had nothing that could
+    *mint* a tenant's credential, so the table lived in `CATALOG_TENANT_TOKENS`. Approving an
+    enrolment is the moment one should be issued, which needs an API, which needs a store.
+
+    Credentials are held as hashes. This service recognises them and never presents them, so
+    the one-way form costs nothing and means this table is not a set of live secrets.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def issue(self, tenant_id: str, *, credential_hash: str, label: str, issued_by: str) -> uuid.UUID:
+        credential_id = uuid.uuid4()
+        await self._db.pool.execute(
+            """
+            INSERT INTO tenant_credentials (id, tenant_id, credential_hash, label, issued_by)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            credential_id,
+            tenant_id,
+            credential_hash,
+            label,
+            issued_by,
+        )
+        return credential_id
+
+    async def tenant_for(self, credential_hash: str) -> Optional[str]:
+        """The tenant a live credential belongs to, or `None`.
+
+        `revoked_at IS NULL` is in the query rather than applied to the result: it matches the
+        partial index, and it means a revoked credential is not *found and then rejected* but
+        simply absent — the shortest path being the live one, because this runs on every
+        request an issued credential makes.
+        """
+        return await self._db.pool.fetchval(
+            "SELECT tenant_id FROM tenant_credentials WHERE credential_hash = $1 AND revoked_at IS NULL",
+            credential_hash,
+        )
+
+    async def list_for_tenant(self, tenant_id: str, *, include_revoked: bool = False) -> list[dict]:
+        """What was issued to a tenant. Never returns a hash: a listing exists to answer "how
+        many credentials does this tenant have and when were they issued", and a hash in it
+        would be a value to compare against for anyone who obtained a candidate token."""
+        rows = await self._db.pool.fetch(
+            """
+            SELECT id, tenant_id, label, issued_at, issued_by, revoked_at
+            FROM tenant_credentials
+            WHERE tenant_id = $1 AND ($2 OR revoked_at IS NULL)
+            ORDER BY issued_at
+            """,
+            tenant_id,
+            include_revoked,
+        )
+        return [dict(row) for row in rows]
+
+    async def revoke(self, credential_id: uuid.UUID) -> bool:
+        """Idempotent, like every other revoke in this estate: revoking an already-revoked
+        credential reports the same outcome rather than an error, because the person clicking
+        twice is usually doing so because something is wrong right now."""
+        row = await self._db.pool.fetchrow(
+            "UPDATE tenant_credentials SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING id",
+            credential_id,
+        )
+        if row is not None:
+            return True
+        exists = await self._db.pool.fetchval("SELECT 1 FROM tenant_credentials WHERE id = $1", credential_id)
+        return bool(exists)
+
+    async def revoke_all_for_tenant(self, tenant_id: str) -> int:
+        """Every live credential a tenant holds, at once — what ending an enrolment calls.
+
+        §10: "revoking an enrolment revokes that credential too." Expressed here rather than
+        left to the caller to loop, so that ending a relationship cannot half-happen because
+        something interrupted a client between two revokes.
+        """
+        rows = await self._db.pool.fetch(
+            "UPDATE tenant_credentials SET revoked_at = now() WHERE tenant_id = $1 AND revoked_at IS NULL RETURNING id",
+            tenant_id,
+        )
+        return len(rows)
+
+
 class ClaimRepo:
     """ADR-0020 §4: records which device-type version a tenant's claimed device came from —
     the baseline slice 5's upgrade-offer diff reads. Deliberately NOT the same table as

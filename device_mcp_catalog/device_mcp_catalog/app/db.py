@@ -133,6 +133,42 @@ _MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE device_type_versions ADD COLUMN IF NOT EXISTS tool_set JSONB
     """,
+    # ADR-0024 §10 / ADR-0020 §7a: the tenant caller table, moved from config into storage.
+    #
+    # §7a shipped that table as `CATALOG_TENANT_TOKENS`, a static env map, because nothing
+    # could mint one at the time. §10 is what mints them: approving an enrolment is "the
+    # moment a tenant first needs catalog access, and the moment both sides' identities are
+    # known". A credential provisioned by hand is step 9 of that record's nine steps, so it
+    # has to be issuable by an API call.
+    #
+    # Config entries are NOT replaced by this table — they keep working, and remain the way
+    # to bootstrap a tenant that predates enrolment. `auth.py` reads both.
+    #
+    # The token is stored as a SHA-256 HASH, never verbatim. This service only ever needs to
+    # RECOGNISE a presented credential, never to present one, so a one-way form costs it
+    # nothing — and a dump of this table is then not a set of live credentials. The env map
+    # cannot have that property, which is one more reason for issued credentials to become
+    # the normal path.
+    """
+    CREATE TABLE IF NOT EXISTS tenant_credentials (
+        id              UUID PRIMARY KEY,
+        tenant_id       TEXT NOT NULL,
+        credential_hash TEXT NOT NULL UNIQUE,
+        label           TEXT NOT NULL DEFAULT '',
+        issued_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+        issued_by       TEXT NOT NULL DEFAULT '',
+        revoked_at      TIMESTAMPTZ
+    )
+    """,
+    # The lookup `auth.py` performs for every request from an issued tenant credential: hash
+    # the bearer, find the live row. Partial on `revoked_at IS NULL` so a revoked credential
+    # leaves the index entirely rather than being filtered out after the fact — revocation is
+    # the only control an issued credential has, so the fast path must be the live one.
+    """
+    CREATE INDEX IF NOT EXISTS tenant_credentials_live
+        ON tenant_credentials (credential_hash)
+        WHERE revoked_at IS NULL
+    """,
 )
 
 
