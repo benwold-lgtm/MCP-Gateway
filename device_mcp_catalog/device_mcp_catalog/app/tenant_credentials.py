@@ -27,7 +27,8 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .auth import Caller, hash_credential, require_provider
-from .repo import TenantCredentialRepo
+from .crypto import codec_for
+from .repo import TenantCredentialRepo, TenantRegistryRepo
 from .schemas import IssuedCredential, TenantCredential, TenantCredentialListResponse
 
 router = APIRouter()
@@ -101,3 +102,92 @@ async def revoke_all_credentials(tenant_id: str, request: Request, _: Caller = D
     were actually live, which is the difference between "revoked" and "already gone".
     """
     return {"revoked": await _repo(request).revoke_all_for_tenant(tenant_id)}
+
+
+@router.post("/tenants", status_code=201)
+async def enrol_tenant(request: Request, caller: Caller = Depends(require_provider)):
+    """Record a tenant AND issue its catalog credential, in one transaction (ADR-0024 §11).
+
+    This replaces two separate calls — `POST /tenants/{id}/credentials` followed by an operator
+    editing `PROVIDER_TENANT_REGISTRY` — with one that cannot half-happen. The older credential
+    route stays for the bootstrap case (issuing a second credential to a tenant already enrolled,
+    or to one that predates enrolment); this is the path the enrolment handshake uses.
+    """
+    body = await request.json() if await request.body() else {}
+    tenant_id = str(body.get("tenant_id", "")).strip()
+    gateway_url = str(body.get("gateway_url", "")).strip()
+    if not tenant_id or not gateway_url:
+        raise HTTPException(status_code=400, detail="tenant_id and gateway_url are required")
+
+    credential = CREDENTIAL_PREFIX + secrets.token_urlsafe(32)
+    repo = TenantRegistryRepo(request.app.state.db, codec=codec_for(request.app.state))
+    credential_id = await repo.enrol(
+        tenant_id,
+        display_name=str(body.get("display_name", "")).strip() or tenant_id,
+        gateway_url=gateway_url,
+        gateway_credential=str(body.get("gateway_credential", "")).strip(),
+        enrolment_id=str(body.get("enrolment_id", "")).strip(),
+        enrolled_by=caller.kind,
+        credential_hash=hash_credential(credential),
+        credential_label=str(body.get("label", "")).strip() or "enrolment",
+    )
+    return {"tenant_id": tenant_id, "credential_id": credential_id, "credential": credential}
+
+
+@router.get("/tenants")
+async def list_tenants(request: Request, _: Caller = Depends(require_provider)):
+    """The estate. Carries no credentials — see `gateway-credential` below."""
+    repo = TenantRegistryRepo(request.app.state.db)
+    return {"tenants": await repo.list_tenants()}
+
+
+@router.get("/tenants/{tenant_id}/gateway-credential")
+async def tenant_gateway_credential(tenant_id: str, request: Request, _: Caller = Depends(require_provider)):
+    """The provider's own credential for one tenant's gateway, decrypted.
+
+    404 rather than an empty object for an unknown tenant: "not enrolled" and "enrolled with
+    nothing recorded" are different conditions, and a console that could not tell them apart
+    would show the same empty state for both.
+    """
+    repo = TenantRegistryRepo(request.app.state.db, codec=codec_for(request.app.state))
+    found = await repo.gateway_credential(tenant_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"tenant '{tenant_id}' is not enrolled")
+    return found
+
+
+@router.put("/tenants/{tenant_id}/gateway-credential", status_code=200)
+async def set_tenant_gateway_credential(tenant_id: str, request: Request, _: Caller = Depends(require_provider)):
+    """Fill in the provider's own credential for a tenant's gateway, once the handshake has one.
+
+    Separate from `POST /tenants` because the enrolment ordering leaves no choice: the tenant's
+    catalog credential must exist before the redemption (the redemption is what hands it over)
+    and the provider's credential only exists after it. Making this a second call is honest
+    about that; folding it into the enrol transaction would mean claiming an atomicity the
+    plane boundary does not allow, which is the over-reach §11 exists to avoid.
+
+    Not `POST /tenants` again: that would mint a *second* catalog credential for a tenant that
+    already has a live one, which is how caller tables acquire entries nobody can account for.
+    """
+    body = await request.json() if await request.body() else {}
+    credential = str(body.get("gateway_credential", "")).strip()
+    if not credential:
+        raise HTTPException(status_code=400, detail="gateway_credential is required")
+
+    repo = TenantRegistryRepo(request.app.state.db, codec=codec_for(request.app.state))
+    recorded = await repo.set_gateway_credential(
+        tenant_id,
+        gateway_credential=credential,
+        enrolment_id=str(body.get("enrolment_id", "")).strip(),
+    )
+    if not recorded:
+        raise HTTPException(status_code=404, detail=f"tenant '{tenant_id}' is not enrolled")
+    return {"tenant_id": tenant_id, "recorded": True}
+
+
+@router.delete("/tenants/{tenant_id}", status_code=200)
+async def withdraw_tenant(tenant_id: str, request: Request, _: Caller = Depends(require_provider)):
+    """End the relationship: remove the registry entry and revoke every live credential, in one
+    transaction — §11's property to test, with no operator step in between."""
+    repo = TenantRegistryRepo(request.app.state.db)
+    return await repo.withdraw(tenant_id)

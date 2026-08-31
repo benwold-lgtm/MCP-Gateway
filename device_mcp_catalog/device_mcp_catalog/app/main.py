@@ -32,6 +32,11 @@ from .db import Database
 async def _lifespan(app: FastAPI):
     settings = load_settings()
     app.state.settings = settings
+    # ADR-0024 §11. Built before the database so a malformed key fails at startup rather than
+    # at the first enrolment — the same posture the caller table takes.
+    from .crypto import CredentialCodec
+
+    app.state.codec = CredentialCodec(settings.secret_key)
     if settings.metrics_enabled:
         # Started before the database, deliberately: §7b's condition is a credential problem,
         # and a catalog that came up with an unreachable store still authenticates callers and

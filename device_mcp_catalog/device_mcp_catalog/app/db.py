@@ -169,6 +169,31 @@ _MIGRATIONS: tuple[str, ...] = (
         ON tenant_credentials (credential_hash)
         WHERE revoked_at IS NULL
     """,
+    # ADR-0024 §11: the provider's tenant registry — WHO A PROVIDER SERVES, deliberately apart
+    # from the device-type tables above, which describe what a provider curates.
+    #
+    # Moved out of `PROVIDER_TENANT_REGISTRY` (a JSON array in the console's environment)
+    # because config is the right tool for what is set at deploy time and changes rarely, and
+    # enrolment/revocation are the opposite shape: routine, in-band, and required to take effect
+    # without redeploying the console. §10 made revocation the ONLY control an enrolment has —
+    # it never expires — so a registry that could only be edited and redeployed would make that
+    # control unbuildable as anything but a manual out-of-band task.
+    #
+    # `gateway_credential_encrypted` is ENCRYPTED, not hashed, and is the one value in this
+    # service that must be: the provider PRESENTS it to the tenant's gateway on every support
+    # request. Everything else the catalog holds it only ever recognises. See `crypto.py` for
+    # what happens with no key configured.
+    """
+    CREATE TABLE IF NOT EXISTS tenants (
+        tenant_id                    TEXT PRIMARY KEY,
+        display_name                 TEXT NOT NULL DEFAULT '',
+        gateway_url                  TEXT NOT NULL DEFAULT '',
+        gateway_credential_encrypted TEXT NOT NULL DEFAULT '',
+        enrolment_id                 TEXT NOT NULL DEFAULT '',
+        enrolled_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        enrolled_by                  TEXT NOT NULL DEFAULT ''
+    )
+    """,
 )
 
 

@@ -19,6 +19,9 @@ dependencies = [
     "pydantic>=2.5.2,<3.0.0",
     "asyncpg>=0.29,<0.31",
     "loguru>=0.7.2",
+    # ADR-0024 §11 only — Fernet for the provider's per-tenant gateway credential, the one
+    # stored value this service must present rather than merely recognise.
+    "cryptography>=42,<50",
     # ADR-0020 §7b only — see app/metrics.py. This service had no metrics plane by design;
     # it has one now for a single should-never-happen condition that belongs on the alert
     # plane rather than in a log.
