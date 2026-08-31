@@ -9,7 +9,7 @@ import datetime
 import uuid
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 UpstreamKind = Literal["openapi", "mcp"]
 UpstreamTransport = Literal["http", "sse"]
@@ -61,6 +61,39 @@ class VersionFields(BaseModel):
     #: alongside it takes a different field name, so nothing inherits this premise by
     #: association. Versions carrying only `spec_path` keep this field exactly as described.
     tool_set: Optional[list[dict[str, Any]]] = None
+    #: WHERE the tenant's API key goes — a property of the appliance's API, not of anyone's
+    #: deployment of it. The credential VALUE remains the tenant's half and is never curated
+    #: here (ADR-0020 §2); only its position is. A tenant guessing wrong gets a 401 at first
+    #: contact, which reads like a bad key rather than a misplaced one.
+    #:
+    #: Meaningful only when `auth_kind == "api_key"`; supplying either alongside a different
+    #: auth_kind is refused rather than ignored, for the reason §4a gave for mutual
+    #: exclusivity — a curated field that silently does nothing is one a curator believes is
+    #: in effect.
+    #:
+    #: `None` means the curator has not said, which is NOT the same as "no header": versions
+    #: curated before these fields existed have no answer, and the claim flow falls back to
+    #: asking the tenant rather than defaulting to something plausible.
+    api_key_location: Optional[Literal["header", "query", "cookie"]] = None
+    api_key_name: Optional[str] = None
+    #: What the provider knows the appliance tolerates. A **recommendation**, and named as
+    #: one: it pre-fills the claim form and constrains nothing.
+    #:
+    #: Deliberately not a ceiling. A tenant may legitimately want to be more conservative,
+    #: and a provider enforcing a rate limit on the tenant's OWN gateway would reach across
+    #: the plane boundary ADR-0020 §2 keeps — the catalog offers a device type, it does not
+    #: operate the tenant's registry.
+    recommended_rate_limit_rps: Optional[float] = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _api_key_fields_need_api_key_auth(self) -> "VersionFields":
+        if self.auth_kind != "api_key" and (self.api_key_location or self.api_key_name):
+            raise ValueError(
+                "api_key_location/api_key_name are only meaningful when auth_kind is 'api_key' — "
+                "refused rather than ignored, so a curator cannot believe a field is in effect "
+                "when nothing reads it (ADR-0020 §2)"
+            )
+        return self
 
 
 class CreateDeviceType(VersionFields):

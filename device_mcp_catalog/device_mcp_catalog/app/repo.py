@@ -144,8 +144,9 @@ class DeviceTypeRepo:
             """
             INSERT INTO device_type_versions
                 (id, device_type_id, version, transport, upstream_kind, upstream_transport,
-                 spec_path, auth_kind, fingerprint_policy, changelog, tool_set)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 spec_path, auth_kind, fingerprint_policy, changelog, tool_set,
+                 api_key_location, api_key_name, recommended_rate_limit_rps)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING *
             """,
             version_id,
@@ -159,6 +160,9 @@ class DeviceTypeRepo:
             fields.fingerprint_policy,
             fields.changelog,
             fields.tool_set,
+            fields.api_key_location,
+            fields.api_key_name,
+            fields.recommended_rate_limit_rps,
         )
 
 
