@@ -156,6 +156,35 @@ async def tenant_gateway_credential(tenant_id: str, request: Request, _: Caller 
     return found
 
 
+@router.put("/tenants/{tenant_id}/gateway-credential", status_code=200)
+async def set_tenant_gateway_credential(tenant_id: str, request: Request, _: Caller = Depends(require_provider)):
+    """Fill in the provider's own credential for a tenant's gateway, once the handshake has one.
+
+    Separate from `POST /tenants` because the enrolment ordering leaves no choice: the tenant's
+    catalog credential must exist before the redemption (the redemption is what hands it over)
+    and the provider's credential only exists after it. Making this a second call is honest
+    about that; folding it into the enrol transaction would mean claiming an atomicity the
+    plane boundary does not allow, which is the over-reach §11 exists to avoid.
+
+    Not `POST /tenants` again: that would mint a *second* catalog credential for a tenant that
+    already has a live one, which is how caller tables acquire entries nobody can account for.
+    """
+    body = await request.json() if await request.body() else {}
+    credential = str(body.get("gateway_credential", "")).strip()
+    if not credential:
+        raise HTTPException(status_code=400, detail="gateway_credential is required")
+
+    repo = TenantRegistryRepo(request.app.state.db, codec=codec_for(request.app.state))
+    recorded = await repo.set_gateway_credential(
+        tenant_id,
+        gateway_credential=credential,
+        enrolment_id=str(body.get("enrolment_id", "")).strip(),
+    )
+    if not recorded:
+        raise HTTPException(status_code=404, detail=f"tenant '{tenant_id}' is not enrolled")
+    return {"tenant_id": tenant_id, "recorded": True}
+
+
 @router.delete("/tenants/{tenant_id}", status_code=200)
 async def withdraw_tenant(tenant_id: str, request: Request, _: Caller = Depends(require_provider)):
     """End the relationship: remove the registry entry and revoke every live credential, in one

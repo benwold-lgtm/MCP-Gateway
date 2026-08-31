@@ -79,6 +79,26 @@ def live(monkeypatch, database_url, _clean):
         yield client
 
 
+def _stored_credential(database_url: str, tenant_id: str = TENANT_A) -> str:
+    """What the column actually holds. Read directly rather than through the service, because
+    the claim under test is about storage — asking the app would only prove the codec is
+    symmetric, which it would be either way."""
+    import asyncio
+
+    import asyncpg
+
+    async def fetch():
+        conn = await asyncpg.connect(database_url)
+        try:
+            return await conn.fetchval(
+                "SELECT gateway_credential_encrypted FROM tenants WHERE tenant_id = $1", tenant_id
+            )
+        finally:
+            await conn.close()
+
+    return asyncio.get_event_loop().run_until_complete(fetch())
+
+
 def _enrol(client, tenant_id=TENANT_A, **over):
     body = {
         "tenant_id": tenant_id,
@@ -191,26 +211,13 @@ def test_the_gateway_credential_round_trips_and_is_encrypted_at_rest(live, datab
     """The one stored value this service must PRESENT rather than merely recognise, so it is
     encrypted and not hashed — verified against what the table actually holds, not against the
     fact that a codec was configured."""
-    import asyncio
-
-    import asyncpg
-
     _enrol(live)
     fetched = live.get(f"/tenants/{TENANT_A}/gateway-credential", headers=_provider())
     assert fetched.status_code == 200
     assert fetched.json()["gateway_credential"] == GATEWAY_CREDENTIAL
     assert fetched.json()["gateway_url"] == GATEWAY_URL
 
-    async def at_rest():
-        conn = await asyncpg.connect(database_url)
-        try:
-            return await conn.fetchval(
-                "SELECT gateway_credential_encrypted FROM tenants WHERE tenant_id = $1", TENANT_A
-            )
-        finally:
-            await conn.close()
-
-    stored = asyncio.get_event_loop().run_until_complete(at_rest())
+    stored = _stored_credential(database_url)
     assert stored != GATEWAY_CREDENTIAL and GATEWAY_CREDENTIAL not in stored
 
 
@@ -237,3 +244,71 @@ def test_the_registry_is_provider_only(live):
     assert live.post("/tenants", headers=tenant, json={}).status_code == 403
     assert live.delete(f"/tenants/{TENANT_A}", headers=tenant).status_code == 403
     assert live.get(f"/tenants/{TENANT_A}/gateway-credential", headers=tenant).status_code == 403
+
+
+# --- the ordering the handshake forces ------------------------------------------------------
+
+
+def test_the_gateway_credential_can_be_filled_in_after_enrolment(live, database_url):
+    """The enrolment ordering leaves no choice: the tenant's catalog credential must exist
+    before the redemption, because the redemption is what hands it over, and the provider's own
+    credential only exists after it. So the row is created empty and completed here."""
+    _enrol(live, gateway_credential="")
+    assert live.get(f"/tenants/{TENANT_A}/gateway-credential", headers=_provider()).json()["gateway_credential"] == ""
+
+    resp = live.put(
+        f"/tenants/{TENANT_A}/gateway-credential",
+        headers=_provider(),
+        json={"gateway_credential": GATEWAY_CREDENTIAL, "enrolment_id": "e-9"},
+    )
+    assert resp.status_code == 200
+
+    fetched = live.get(f"/tenants/{TENANT_A}/gateway-credential", headers=_provider()).json()
+    assert fetched["gateway_credential"] == GATEWAY_CREDENTIAL
+    assert live.get("/tenants", headers=_provider()).json()["tenants"][0]["enrolment_id"] == "e-9"
+
+    # Encrypted here too. Asserted separately from the enrol path above because they are two
+    # different writes, and a codec applied on one and forgotten on the other would round-trip
+    # perfectly while storing the credential in the clear.
+    assert GATEWAY_CREDENTIAL not in _stored_credential(database_url)
+
+
+def test_completing_an_enrolment_does_not_mint_a_second_credential(live):
+    """Why this is a PUT of its own and not `POST /tenants` again. Re-posting would upsert the
+    registry row and mint another catalog credential for a tenant that already holds a live one
+    — which is exactly how a caller table acquires entries nobody can account for."""
+    _enrol(live, gateway_credential="")
+    live.put(
+        f"/tenants/{TENANT_A}/gateway-credential",
+        headers=_provider(),
+        json={"gateway_credential": GATEWAY_CREDENTIAL},
+    )
+    listed = live.get(f"/tenants/{TENANT_A}/credentials", headers=_provider()).json()["credentials"]
+    assert len(listed) == 1, "completing an enrolment must not issue another credential"
+
+
+def test_recording_against_an_unenrolled_tenant_is_refused_not_silently_dropped(live):
+    """A write that lands nowhere and reports success is the shape of defect this repo has
+    corrected before — an UPDATE matching no rows is not an outcome a caller can act on."""
+    resp = live.put(
+        f"/tenants/{TENANT_B}/gateway-credential",
+        headers=_provider(),
+        json={"gateway_credential": GATEWAY_CREDENTIAL},
+    )
+    assert resp.status_code == 404
+
+
+def test_an_empty_gateway_credential_is_refused(live):
+    """Blanking the column would leave a tenant listed and unreachable while reading as a
+    successful write. Withdrawing is how a relationship ends; this route only completes one."""
+    _enrol(live)
+    resp = live.put(f"/tenants/{TENANT_A}/gateway-credential", headers=_provider(), json={"gateway_credential": ""})
+    assert resp.status_code == 400
+    assert live.get(f"/tenants/{TENANT_A}/gateway-credential", headers=_provider()).json()["gateway_credential"]
+
+
+def test_completing_an_enrolment_is_provider_only(live):
+    credential = _enrol(live).json()["credential"]
+    tenant = {"Authorization": f"Bearer {credential}", TENANT_HEADER: TENANT_A}
+    resp = live.put(f"/tenants/{TENANT_A}/gateway-credential", headers=tenant, json={"gateway_credential": "x"})
+    assert resp.status_code == 403

@@ -442,6 +442,36 @@ class TenantRegistryRepo:
             "gateway_credential": self._decrypt(row["gateway_credential_encrypted"]),
         }
 
+    async def set_gateway_credential(self, tenant_id: str, *, gateway_credential: str, enrolment_id: str = "") -> bool:
+        """Record the provider's own credential for an already-enrolled tenant's gateway.
+
+        The enrolment handshake cannot supply this to `enrol()`, and the ordering is forced
+        rather than chosen: the tenant's catalog credential has to exist *before* the redemption,
+        because the redemption is what hands it over, and the provider's credential only exists
+        *after* it. So the registry row is created with this column empty and filled in here.
+
+        That intermediate state is real, not a bookkeeping artefact — between those two calls the
+        provider genuinely cannot call the tenant back — and `list_tenants()` shows it, which is
+        why a redemption that dies at this last step is left visible and repairable by enrolling
+        again rather than silently withdrawn.
+
+        Returns False for a tenant with no registry entry: "not enrolled" is a different
+        condition from "enrolled with nothing recorded", and a caller that could not tell them
+        apart would report a successful write that landed nowhere.
+        """
+        result = await self._db.pool.execute(
+            """
+            UPDATE tenants
+            SET gateway_credential_encrypted = $2,
+                enrolment_id = COALESCE(NULLIF($3, ''), enrolment_id)
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+            self._encrypt(gateway_credential),
+            enrolment_id,
+        )
+        return result.rsplit(" ", 1)[-1] != "0"
+
     async def withdraw(self, tenant_id: str) -> dict:
         """End the relationship: remove the registry entry AND revoke every live credential, in
         one transaction (§11's property to test).

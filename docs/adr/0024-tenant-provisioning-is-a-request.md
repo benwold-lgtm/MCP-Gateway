@@ -393,6 +393,27 @@ revokes the credential and removes the registry entry before returning the error
 "approving an enrolment is one atomic act" without that qualification would be the kind of claim
 this record has twice had to correct in others.
 
+#### Why the enrolment is two calls and not one
+
+The provider's credential for the tenant's gateway cannot be part of the transaction above,
+because it does not exist yet when that transaction runs. The ordering is forced by the
+handshake: the tenant's catalog credential must exist **before** the redemption, since the
+redemption is what hands it over, and the provider's own credential is what the redemption
+**returns**. So the registry row is created with that column empty and completed by a second
+call once the handshake has an answer.
+
+The intermediate state is real rather than a bookkeeping artefact — between those two calls the
+provider genuinely cannot call the tenant back — so it is left **visible in the estate listing**
+rather than hidden. A redemption that dies at that last step therefore leaves a tenant that is
+listed and unreachable, which an operator can see and repair by enrolling again (the registry
+row upserts), instead of leaving nothing on the provider side while the tenant's gateway holds
+an enrolment nobody recorded.
+
+Completing an enrolment is deliberately **not** a second `POST /tenants`: that would upsert the
+row *and* mint another catalog credential for a tenant already holding a live one, which is how
+a caller table acquires entries nobody can account for — the orphan case §10's compensation
+exists to prevent, arriving by a different route.
+
 #### The consequence that has to be accepted: the catalog gains a key
 
 The registry has to hold the provider's own credential for each tenant's gateway, and unlike
