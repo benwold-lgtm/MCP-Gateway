@@ -9,10 +9,20 @@
 > **Settled by [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md) (Accepted,
 > 2026-08-11).** Single-tenant-per-stack is **permanent**, not a deferral: in-app tenancy is
 > rejected *on merit* rather than on cost — see [Why not in-app
-> multitenancy](#why-not-in-app-multitenancy). Above the stacks sits a **provider plane** for
-> the party operating many tenants; see [The provider
-> plane](#the-provider-plane-operating-many-tenants). The "future `tenant` claim on
-> `Principal`" seam this document used to describe has been **withdrawn**.
+> multitenancy](#why-not-in-app-multitenancy). The "future `tenant` claim on `Principal`" seam
+> this document used to describe has been **withdrawn**.
+>
+> Above the stacks sits a **provider plane** for the party operating many tenants — see [The
+> provider plane](#the-provider-plane-operating-many-tenants). ADR-0013 introduced it; what it
+> looks like today is set by four later records, and the provider-plane section below reflects
+> those rather than ADR-0013's original mechanism:
+>
+> | | |
+> |---|---|
+> | [ADR-0017](adr/0017-provider-authority-is-delegated.md) | The **tenant** issues the credential; the provider asks. Deleted act-on-tenant and the elevated grants entirely. |
+> | [ADR-0019](adr/0019-opaque-tenant-identity.md) | Tenant identifiers are opaque from birth and never reissued. |
+> | [ADR-0020](adr/0020-the-device-catalog.md) | The provider curates device **types** and offers them; the tenant claims. |
+> | [ADR-0024](adr/0024-tenant-provisioning-is-a-request.md) | The relationship itself is enrolled by a handshake, and revocable. |
 
 A "tenant" here means a distinct trust/ownership boundary: a customer, a team, or
 any set of devices and credentials that must not be visible or controllable across
@@ -146,44 +156,153 @@ See the [Security section of the README](../README.md#security) for the full lis
 ## The provider plane (operating many tenants)
 
 Running one stack per tenant raises an obvious question: who operates the estate, and how,
-without a god account that can reach every tenant at once? [ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md)
-answers it with a **second plane** rather than a hole in the first.
+without a god account that can reach every tenant at once?
 
-- **Two populations, two IdPs.** Tenant users authenticate to their tenant's IdP; provider
-  staff authenticate to the provider's. **Which IdP authenticated you fixes your plane**, and
-  the plane is immutable for the life of the session. There is no "switch to provider mode".
-- **Provider scopes live in the BFF, never in a tenant's gateway.** The gateway is the
-  per-tenant isolation unit; teaching it a cross-tenant concept would leak tenancy into the
-  one component whose job is not knowing other tenants exist.
-- **Cross-tenant power is exercised, not held.** Acting on a tenant is a discrete, audited,
-  time-boxed act against a *named* tenant — never ambient authority over the estate.
-- **`provider:admin` is not the gateway's `admin`.** Tool invocation (`provider:invoke`) and
-  credential access (`provider:credentials`) are carved out into separate **elevated** grants,
-  because routine debugging should not silently carry standing authority to actuate a
-  customer's hardware or walk off with their secrets.
+[ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md) answered it with a **second
+plane**. [ADR-0017](adr/0017-provider-authority-is-delegated.md) then inverted *who issues the
+credential*, which is the answer that stands today.
 
-**Grant lifetimes are absolute, never sliding** — a sliding window never expires for an
-attacker who keeps working:
+> **What changed, and why this section was rewritten.** ADR-0013's model had the provider
+> assert an identity the tenant's gateway was configured to believe, through an
+> *act-on-tenant* grant plus separate *elevated* grants for tool invocation and credential
+> access. ADR-0017 slice 6 **deleted all of it** — `provider:invoke`, `provider:credentials`
+> and act-on-tenant no longer exist in any form. If you have read an older copy of this
+> document describing them, that design is gone.
 
-| Grant | Window | Re-entry |
+### The invariant: the tenant issues, the provider presents
+
+A provider operator reaches a tenant's data plane **only while that tenant has delegated
+access to them**, and the credential is minted **on the tenant's side of the boundary** —
+never by the provider's.
+
+The direction is the invariant. It is what makes the rest of this section short: there is no
+cross-tenant credential to scope, route, intersect or revoke centrally, because the provider
+never holds one.
+
+### How access is obtained
+
+1. A provider operator **raises a support request** against a *named* tenant, with a
+   justification and the scopes they need.
+2. A tenant administrator **approves or rejects** it in their own console.
+3. On approval, the tenant's own stack **mints a support grant** — an absolute expiry, the
+   operator's identity for attribution only, and scopes drawn from *the tenant's* vocabulary
+   (`devices:read`, `tools:call`, …), never a provider vocabulary.
+4. The operator works in **the tenant's own console**, at the tenant's hostname, writing to
+   the tenant's audit — the same console that tenant's own staff use.
+5. The tenant **revokes** whenever they choose. Revocation is checked on every request, so it
+   takes effect on the next one rather than at the next refresh of a cache.
+
+A delegation the tenant cannot see is not delegation. It is listed in their console, lives in
+their audit chain, and is revocable there by anyone who could have created it.
+
+### Asking and deciding are different authorities
+
+This is the distinction ADR-0017 §7a and §7b add, and it only became visible once the two
+planes were first deployed as separate processes.
+
+| Scope | Plane | What it permits |
 |---|---|---|
-| act-on-tenant | 60 min | Re-authorize; **one tenant at a time** — acquiring another drops the first |
-| `provider:invoke` | 15 min | **Step-up** (re-prove identity) |
-| `provider:credentials` | Single use | **Step-up** |
+| `support:request` | held by the provider, on the tenant's gateway | Raise a request and poll **its own** outcome. Reads nothing, writes nothing, decides nothing. |
+| `support:administer` | the tenant's own admins | Approve, reject, list and revoke — and administer enrolment (below). |
 
-**Tenants see provider activity in their own audit.** Every act by a *human* provider
-principal is surfaced — including reads, because "has someone been looking at my system"
-is exactly the question being asked — with the actor **pseudonymized at write time** as a
-stable handle. Automated platform operations are not provider acts and are not surfaced.
+The narrowness of `support:request` is the point: a provider must be able to *ask* without
+that being a foothold. **Asking is not an authority over anything**, so a credential that can
+only ask is safe to hold permanently.
 
-**Offboarding uses per-tenant content keys.** A departed tenant's provider-side audit content
-is encrypted under a key unique to them; destroying that key at offboarding leaves the hash
-chain verifiable while making the content unrecoverable. ADR-0011 backups are inside the
-shred, and a per-tenant hostname is **never reissued** — a tombstone refuses the name forever
-so stale DNS or cached tokens cannot land on a new tenant's stack.
+On the provider's own side, `provider:admin` and `provider:monitor` decide who may ask:
 
-Cross-tenant *monitoring* aggregates from Prometheus, so the constant-use read path holds no
-tenant API credentials at all.
+- **`provider:admin`** is deliberately unconstrained in *what* it may request. What an admin
+  may ask for is already bounded by two stronger things — the tenant's own RBAC, and a human
+  reading the request and deciding.
+- **`provider:monitor`** may raise **read-only scopes only**, and this is enforced in the BFF
+  rather than in the console. A browser is not a gate: narrowing a checkbox list without a
+  server-side check would be decoration, and a hand-made request would carry whatever it
+  liked. (That exact drift shipped once and was caught by signing in as a read-only operator.)
+
+### Standing consent, for the 3am case
+
+A customer with nobody available to approve a session at 3am is a real operational problem,
+and refusing to solve it pushes the solution somewhere worse — a shared credential, a bypass,
+an undocumented key.
+
+So a tenant may enable **standing consent**: grants of a named scope may be self-issued by an
+identified provider operator without per-session approval. It is **not a different mechanism,
+only a different trigger** — still minted by the tenant's stack, still absolutely expiring,
+still naming the operator, still revocable mid-session, and still appearing in the tenant's
+audit exactly as an approved grant would. A provider cannot enable it, and cannot tell whether
+it is enabled except by trying.
+
+### Break-glass is the only unilateral path, and it is loud
+
+Some failures leave a tenant unable to delegate anything — a broken IdP, a wedged stack, an
+expired certificate on the console itself. Pretending otherwise produces an undocumented path
+rather than no path. So break-glass remains, with four properties that keep it a last resort:
+
+- credentials generated at deploy time and held in the provider's secret store, never in
+  configuration;
+- use emits a **high-severity event in the tenant's audit chain** plus a notification they
+  receive — not a log line they may one day read;
+- rate-limited and expiring, so it cannot become an operating mode;
+- it grants the tenant's **own** admin scopes. There is no larger provider capability to hold.
+
+### The relationship itself is established, and revocable
+
+Everything above assumes the provider and tenant are already related.
+[ADR-0024](adr/0024-tenant-provisioning-is-a-request.md) §10/§11 makes that relationship an
+object too, rather than a matter of configuration on both sides:
+
+- a tenant administrator **issues a one-time invitation** in their own console and hands it
+  over out of band, along with their gateway address and tenant id;
+- the provider **redeems** it, which in one act records the tenant, issues that tenant's
+  catalog credential, verifies the gateway reports the tenant the provider minted for, and
+  receives the provider's own standing `support:request` credential;
+- the tenant **revokes the enrolment** whenever they choose, which is the only control the
+  relationship has — §10 chose revocation over expiry, on the grounds that an expiring
+  supplier relationship fails closed at the worst possible moment.
+
+Because revocation is the only control, the tenant's console shows every live enrolment with
+**when it was last used**, sourced from real authenticated requests rather than self-reported.
+A dormant supplier relationship is discoverable by looking, and by nothing else.
+
+### What the provider sees without asking
+
+**Estate-wide observability stays on the metrics plane** ([ADR-0013](adr/0013-two-plane-tenancy-and-the-provider-plane.md)
+§7), and delegation makes that *more* important, not less: with the data plane requiring a
+tenant's involvement, the metrics plane is the only thing a provider sees unaided, so it has
+to be good enough to run an estate from.
+
+An estate-wide view is **never** built by querying N tenant APIs with a credential. If the
+metrics plane cannot serve a view someone wants, that gets its own ADR with the view named.
+
+The provider console is therefore an estate **overview and catalog** tool
+([ADR-0020](adr/0020-the-device-catalog.md)), not a remote control. The catalog is
+provider-plane storage: the provider curates device *types* and offers them to named tenants;
+a tenant **claims** one into their own registry. An assignment is an offer, never a write into
+anyone's registry.
+
+A curated type carries facts about the **product** — its transport, spec path, fingerprint
+policy, where its API key goes, what request rate it tolerates. It never carries the tenant's
+half: the address and the credential are the tenant's to supply, and the rate limit is a
+recommendation that constrains nothing, because a provider enforcing a limit on the tenant's
+own gateway would reach across the boundary this whole document is about.
+
+### Tenants see provider activity in their own audit
+
+Every act by a *human* provider principal is surfaced — **including reads**, because "has
+someone been looking at my system" is exactly the question being asked — with the actor
+pseudonymized at write time as a stable handle. Automated platform operations are not provider
+acts and are not surfaced.
+
+### Offboarding
+
+A departed tenant's provider-side audit content is encrypted under a key unique to them;
+destroying that key at offboarding leaves the hash chain verifiable while making the content
+unrecoverable. ADR-0011 backups are inside the shred.
+
+Tenant identifiers are **opaque from birth and never reissued**
+([ADR-0019](adr/0019-opaque-tenant-identity.md)) — not even after a tenant departs — so
+a stale bookmark or a cached token can never resolve onto a different tenant. A per-tenant
+hostname is likewise never reissued; a tombstone refuses the name forever.
 
 ## Why not in-app multitenancy
 
