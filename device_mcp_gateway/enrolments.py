@@ -387,7 +387,19 @@ class RedisInvitationStore:
                     "provider_label": provider_label,
                     "created_at": str(now),
                     "expires_at": str(inv.expires_at),
-                    "redeemed": "",
+                    # ⚠️ `redeemed` is deliberately NOT written here, and must never be.
+                    #
+                    # `redeem` claims the invitation with HSETNX, which tests whether the FIELD
+                    # EXISTS — not whether it holds a truthy value. Creating it as "" made it
+                    # exist, so HSETNX refused every caller and the FIRST redemption of a
+                    # brand-new invitation came back `already_redeemed`. ADR-0024 §10's
+                    # handshake could not complete at all on any Redis-backed deployment.
+                    #
+                    # The in-memory store next door sets `redeemed: False` and tests it for
+                    # truthiness, which is why it behaves correctly and why every test in
+                    # test_enrolment.py passed: they all run against that store. Absence is the
+                    # unredeemed state here; readers use `fields.get("redeemed")`, which is
+                    # falsy for a missing field.
                 },
             )
             # The TTL is the expiry. Unlike the enrolment this produces, an invitation is the

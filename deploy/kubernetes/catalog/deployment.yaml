@@ -61,6 +61,25 @@ spec:
                   name: catalog-secrets
                   key: tenant-tokens
                   optional: true
+            # ADR-0024 §11 — the Fernet key encrypting the provider's per-tenant
+            # gateway credential. That one value must be PRESENTED on every support
+            # request, not merely recognised, so it is encrypted rather than hashed and
+            # the key has to live somewhere.
+            #
+            # `optional: true` matches every other key here, but the consequence is not
+            # the same: an absent CATALOG_API_TOKEN closes a door, while an absent key
+            # stores those credentials as PLAINTEXT in Postgres. The service warns at
+            # startup and keeps running, deliberately, so a lab stays runnable without
+            # key management — but a log line nobody reads is the whole risk, so treat
+            # this as required for any deployment holding a real tenant credential.
+            #
+            #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+            - name: CATALOG_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-secrets
+                  key: secret-key
+                  optional: true
           resources:
             requests:
               cpu: "100m"

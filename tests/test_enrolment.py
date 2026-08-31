@@ -410,3 +410,112 @@ def test_the_catalog_credential_is_encrypted_at_rest_when_a_key_is_configured(mo
         client.get("/v1/enrolments/catalog-configuration", headers=_admin()).json()["catalog_credential"]
         == CATALOG_CREDENTIAL
     )
+
+
+# --- The Redis stores, against a real server ------------------------------------------------
+#
+# Everything above runs against the in-memory stores, and that is what let ADR-0024 §10 ship
+# unable to complete a single enrolment on any Redis-backed deployment.
+#
+# The two stores disagree about what "unredeemed" means. `InMemoryInvitationStore` sets
+# `redeemed: False` and tests it for TRUTHINESS; `RedisInvitationStore` claimed the invitation
+# with HSETNX, which tests whether the FIELD EXISTS — and `create` was writing `redeemed: ""`,
+# so the field always existed and the first redemption of a brand-new invitation came back
+# `already_redeemed`. `test_an_invitation_redeems_exactly_once` passes either way, because it
+# never touches the implementation that ships.
+#
+# Found by deploying it, not by testing it. These are the tests that would have caught it,
+# and they are marked `integration` so they run against a real server or skip — never a fake,
+# since a fake is the thing that was wrong.
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_brand_new_invitation_can_actually_be_redeemed_on_redis(real_redis):
+    """The regression, stated at its smallest: one create, one redeem, on the real store.
+
+    This is the whole of §10's handshake reduced to the step that was broken — a provider
+    holding a valid, live, never-used invitation being told it was already redeemed.
+    """
+    from device_mcp_gateway.enrolments import RedisEnrolmentStore, RedisInvitationStore
+
+    invitations = RedisInvitationStore(real_redis)
+    store = RedisEnrolmentStore(real_redis, invitations)
+
+    code, _ = await invitations.create(created_by="key:admin", provider_label="Acme", ttl_seconds=3600)
+    result = await store.redeem(
+        code=code,
+        provider_subject="oidc:provider-idp#op1",
+        catalog_url=CATALOG_URL,
+        catalog_credential=CATALOG_CREDENTIAL,
+    )
+
+    assert result.ok, f"a live, never-redeemed invitation was refused: {result.reason}"
+    assert result.credential and result.enrolment is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_single_use_still_holds_on_redis(real_redis):
+    """The fix must not buy a first redemption by giving up single-use — the property HSETNX
+    was chosen for. Asserted on the real store because atomicity is the one claim a
+    single-threaded fake cannot support."""
+    from device_mcp_gateway.enrolments import RedisEnrolmentStore, RedisInvitationStore
+
+    invitations = RedisInvitationStore(real_redis)
+    store = RedisEnrolmentStore(real_redis, invitations)
+    code, _ = await invitations.create(created_by="key:admin", provider_label="Acme", ttl_seconds=3600)
+
+    first = await store.redeem(
+        code=code, provider_subject="p1", catalog_url=CATALOG_URL, catalog_credential=CATALOG_CREDENTIAL
+    )
+    second = await store.redeem(
+        code=code, provider_subject="p2", catalog_url=CATALOG_URL, catalog_credential=CATALOG_CREDENTIAL
+    )
+
+    assert first.ok
+    assert not second.ok and second.reason == "already_redeemed"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_two_replicas_racing_one_code_produce_one_enrolment(real_redis):
+    """Two gateway replicas, one code, redeemed concurrently — the reason the claim is atomic
+    rather than a check-then-write. Two separate store instances, as two pods would be."""
+    import asyncio
+
+    from device_mcp_gateway.enrolments import RedisEnrolmentStore, RedisInvitationStore
+
+    invitations = RedisInvitationStore(real_redis)
+    code, _ = await invitations.create(created_by="key:admin", provider_label="Acme", ttl_seconds=3600)
+    replica_a = RedisEnrolmentStore(real_redis, RedisInvitationStore(real_redis))
+    replica_b = RedisEnrolmentStore(real_redis, RedisInvitationStore(real_redis))
+
+    results = await asyncio.gather(
+        *(
+            r.redeem(code=code, provider_subject=s, catalog_url=CATALOG_URL, catalog_credential=CATALOG_CREDENTIAL)
+            for r, s in ((replica_a, "p1"), (replica_b, "p2"))
+        )
+    )
+
+    assert sum(1 for r in results if r.ok) == 1, "an invitation was redeemed twice"
+    assert [r.reason for r in results if not r.ok] == ["already_redeemed"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_unredeemed_invitation_is_still_listed_on_redis(real_redis):
+    """The other side of dropping the field: `list_live` filters on `fields.get("redeemed")`,
+    so an invitation whose field is now ABSENT must still read as outstanding — and a redeemed
+    one must drop out. Asserted together, because a filter that is wrong in one direction and
+    right in the other is the shape a single-direction test misses."""
+    from device_mcp_gateway.enrolments import RedisEnrolmentStore, RedisInvitationStore
+
+    invitations = RedisInvitationStore(real_redis)
+    store = RedisEnrolmentStore(real_redis, invitations)
+    code, invitation = await invitations.create(created_by="key:admin", provider_label="Acme", ttl_seconds=3600)
+
+    assert [i.code_hash for i in await invitations.list_live()] == [invitation.code_hash]
+
+    await store.redeem(code=code, provider_subject="p1", catalog_url=CATALOG_URL, catalog_credential=CATALOG_CREDENTIAL)
+    assert await invitations.list_live() == []

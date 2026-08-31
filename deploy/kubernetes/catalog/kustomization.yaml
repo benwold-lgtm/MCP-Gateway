@@ -40,7 +40,16 @@ resources:
 #     --namespace=mcp-provider \
 #     --from-literal=postgres-password="$PG_PW" \
 #     --from-literal=database-url="postgresql://catalog:$PG_PW@catalog-postgres:5432/catalog" \
-#     --from-literal=api-token=$(openssl rand -hex 32)
+#     --from-literal=api-token=$(openssl rand -hex 32) \
+#     --from-literal=secret-key=$(python3 -c \
+#       'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')
+#
+# ⚠️ `secret-key` is ADR-0024 §11's encryption key, and omitting it is not the same kind of
+# omission as the others. Every other value here is a credential the catalog *recognises*;
+# this one encrypts the provider's per-tenant gateway credential, which it must *present*.
+# With no key the catalog starts, warns once, and writes those credentials to Postgres in
+# PLAINTEXT. Set it before enrolling a real tenant — after the fact it is a re-enrolment,
+# because there is no route that re-reads and rewrites what is already stored.
 #
 # Add one credential per tenant console that reads the catalog directly (ADR-0020 §7a).
 # Each value is that tenant's own, and none of them is `api-token`:
