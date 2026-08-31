@@ -343,6 +343,77 @@ arise. **The second instance is what makes a relationship visible as a thing nee
 design**, which is the same lesson ADR-0017 §7a and ADR-0020 §7a each learned on the same day,
 in different components.
 
+### 11. The provider's tenant registry lives in the catalog store, not in config (amendment, 2026-08-31)
+
+> **Decided 2026-08-31.** §10 left this open by returning the registry entry for an operator to
+> add. It is closed here, and the reason is revocation rather than tidiness.
+
+#### Why config cannot hold this
+
+`PROVIDER_TENANT_REGISTRY` is a JSON array in the provider console's environment, and §10 called
+adding to it the last manual step. That framing understated the problem.
+
+**Config is the right tool for what is set at deploy time and changes rarely. Enrolment and
+revocation are the opposite shape** — routine, in-band, and required to take effect without
+redeploying the console. A tenant relationship that ends because something is wrong right now
+cannot wait for a config edit and a rollout, and §10 already committed to revocation as *the
+only control* an enrolment has, precisely because it never expires. Leaving the registry in
+config would not merely leave §10's atomicity gap open; it would make that revocation model
+unbuildable as anything other than a manual, out-of-band operator task.
+
+It is also the failure shape this project has removed everywhere it had the choice. *"The route
+returns the entry for an operator to add"* is a step that must be remembered — the same class as
+an absent `MCP_SECRET_KEY` before it was refused at startup, or custody verification as a
+checklist line rather than a check. Each of those was fixed by making the correct behaviour
+**structural rather than procedural**. This is that fix, here.
+
+#### Decision: a schema in the catalog-plane store
+
+The registry becomes tables in the **existing** catalog Postgres — not a new component. ADR-0020
+§7 already argued that provider-plane storage is its own failure domain and already paid for
+one; a second store would be that argument's cost incurred twice for no new isolation. The
+tables sit apart from the device-type tables, which describe *what a provider curates*, where
+these describe *who a provider serves*.
+
+The console keeps reading `PROVIDER_TENANT_REGISTRY` when the catalog is unreachable or holds no
+entries, so a provider that has not adopted enrolment is unaffected and an outage does not erase
+the estate — the same "config first, still works when the store is down" arrangement §7a's
+caller table already uses.
+
+#### What is atomic, and what is not — stated because the difference matters
+
+Two writes now happen in **one transaction in the catalog**: minting a tenant's catalog
+credential (ADR-0020 §7a) and recording that tenant in the registry. Those are the two the
+provider owns, and either both land or neither does.
+
+**The tenant gateway's own enrolment record is a different system and cannot join that
+transaction.** Redemption crosses a plane boundary by design — that is the whole point of §10's
+handshake — so it stays a distributed operation with compensation: a failure after minting
+revokes the credential and removes the registry entry before returning the error. Saying
+"approving an enrolment is one atomic act" without that qualification would be the kind of claim
+this record has twice had to correct in others.
+
+#### The consequence that has to be accepted: the catalog gains a key
+
+The registry has to hold the provider's own credential for each tenant's gateway, and unlike
+every other secret the catalog stores, that one must be **presented**, not merely recognised —
+so it is encrypted, not hashed, exactly as ADR-0020 §4b reasoned about a curated spec and §10
+about the tenant's catalog credential.
+
+That gives the catalog its first encryption key (`CATALOG_SECRET_KEY`), which is real new
+operational surface in a service whose simplicity has been defended twice. It is taken because
+the alternative keeps §4's `gateway_token_file` convention — a path to a file someone must place
+out of band — which relocates the manual step rather than removing it, and would leave this
+section's whole argument unsatisfied. With no key configured the value is stored in plaintext
+and the service says so at startup, matching the gateway's own `CredentialCodec` behaviour
+rather than inventing a second convention.
+
+#### The property to test
+
+> **Revoking an enrolment removes the tenant from the registry and the credential from the
+> caller table, in one act, with no operator step in between** — and a failure anywhere in the
+> provider-side pair leaves neither behind.
+
 ## Consequences
 
 - **Positive:** the mechanism five Accepted ADRs depend on becomes a numbered record in the

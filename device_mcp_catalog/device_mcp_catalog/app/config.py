@@ -135,6 +135,12 @@ class Settings:
     metrics_port: int = 9100
     metrics_token: str = ""
 
+    # ADR-0024 §11 — encrypts the provider's own per-tenant gateway credential, the one value
+    # this service must be able to PRESENT rather than merely recognise. Unset stores it as
+    # plaintext and says so at startup, matching the gateway's CredentialCodec rather than
+    # inventing a second "encryption is off" convention.
+    secret_key: str = ""
+
 
 def load_settings() -> Settings:
     provider_token = _secret("CATALOG_API_TOKEN", "CATALOG_API_TOKEN_FILE")
@@ -152,4 +158,5 @@ def load_settings() -> Settings:
         metrics_enabled=os.getenv("CATALOG_METRICS_ENABLED", "true").strip().lower() not in ("false", "0", "no"),
         metrics_port=int(os.getenv("CATALOG_METRICS_PORT", "9100")),
         metrics_token=_secret("CATALOG_METRICS_TOKEN", "CATALOG_METRICS_TOKEN_FILE"),
+        secret_key=_secret("CATALOG_SECRET_KEY", "CATALOG_SECRET_KEY_FILE"),
     )

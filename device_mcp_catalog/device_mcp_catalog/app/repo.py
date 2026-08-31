@@ -9,7 +9,7 @@ four operations in this slice.
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 import asyncpg
 
@@ -331,6 +331,135 @@ class TenantCredentialRepo:
             tenant_id,
         )
         return len(rows)
+
+
+class TenantRegistryRepo:
+    """ADR-0024 §11: who this provider serves.
+
+    Deliberately a separate repo class from `TenantCredentialRepo` even though both are keyed by
+    `tenant_id` and both are written by the same enrolment: they answer different questions, and
+    one class doing both would make "list the estate" and "authenticate a caller" share a code
+    path that has no reason to stay together.
+    """
+
+    def __init__(self, db: Database, codec: Any = None) -> None:
+        self._db = db
+        self._codec = codec
+
+    def _decrypt(self, stored: str) -> str:
+        return self._codec.decrypt(stored) if self._codec is not None else stored
+
+    def _encrypt(self, plaintext: str) -> str:
+        return self._codec.encrypt(plaintext) if self._codec is not None else plaintext
+
+    async def enrol(
+        self,
+        tenant_id: str,
+        *,
+        display_name: str,
+        gateway_url: str,
+        gateway_credential: str,
+        enrolment_id: str,
+        enrolled_by: str,
+        credential_hash: str,
+        credential_label: str,
+    ) -> uuid.UUID:
+        """Record the tenant AND issue its catalog credential, in ONE transaction (§11).
+
+        These are the two writes the provider owns, and the point of the section is that they
+        cannot half-happen: a registry entry with no credential is a tenant the console lists
+        and cannot serve, and a credential with no registry entry is the orphan the provider
+        console's compensation logic exists to clean up.
+
+        **The tenant gateway's own enrolment record is NOT in here and cannot be** — it is a
+        different system across a plane boundary, which is the whole point of §10's handshake.
+        That step stays distributed with compensation, and §11 says so rather than letting
+        "approving an enrolment is atomic" over-reach.
+
+        Upserts the registry row: re-enrolling a tenant after a revoke replaces the entry rather
+        than failing, since the ordinary way to repair a relationship is to enrol again.
+        """
+        credential_id = uuid.uuid4()
+        async with self._db.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO tenant_credentials (id, tenant_id, credential_hash, label, issued_by)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    credential_id,
+                    tenant_id,
+                    credential_hash,
+                    credential_label,
+                    enrolled_by,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO tenants (tenant_id, display_name, gateway_url,
+                                         gateway_credential_encrypted, enrolment_id, enrolled_by)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (tenant_id) DO UPDATE SET
+                        display_name = EXCLUDED.display_name,
+                        gateway_url = EXCLUDED.gateway_url,
+                        gateway_credential_encrypted = EXCLUDED.gateway_credential_encrypted,
+                        enrolment_id = EXCLUDED.enrolment_id,
+                        enrolled_at = now(),
+                        enrolled_by = EXCLUDED.enrolled_by
+                    """,
+                    tenant_id,
+                    display_name,
+                    gateway_url,
+                    self._encrypt(gateway_credential),
+                    enrolment_id,
+                    enrolled_by,
+                )
+        return credential_id
+
+    async def list_tenants(self) -> list[dict]:
+        """The estate, without secrets. What the provider console's tenant picker reads."""
+        rows = await self._db.pool.fetch("""
+            SELECT tenant_id, display_name, gateway_url, enrolment_id, enrolled_at, enrolled_by
+            FROM tenants ORDER BY enrolled_at
+            """)
+        return [dict(row) for row in rows]
+
+    async def gateway_credential(self, tenant_id: str) -> Optional[dict]:
+        """One tenant's gateway URL and the provider's credential for it, decrypted.
+
+        The only route to a usable secret here, and its own method rather than a field on the
+        listing above — a listing is a screen left open, and a credential should be fetched by
+        the component that needs it, when it needs it.
+        """
+        row = await self._db.pool.fetchrow(
+            "SELECT tenant_id, gateway_url, gateway_credential_encrypted FROM tenants WHERE tenant_id = $1",
+            tenant_id,
+        )
+        if row is None:
+            return None
+        return {
+            "tenant_id": row["tenant_id"],
+            "gateway_url": row["gateway_url"],
+            "gateway_credential": self._decrypt(row["gateway_credential_encrypted"]),
+        }
+
+    async def withdraw(self, tenant_id: str) -> dict:
+        """End the relationship: remove the registry entry AND revoke every live credential, in
+        one transaction (§11's property to test).
+
+        Returns what was actually removed, so a caller can tell "ended a live relationship" from
+        "there was nothing there" — the same distinction the bulk credential revoke draws.
+        """
+        async with self._db.pool.acquire() as conn:
+            async with conn.transaction():
+                revoked = await conn.fetch(
+                    """
+                    UPDATE tenant_credentials SET revoked_at = now()
+                    WHERE tenant_id = $1 AND revoked_at IS NULL RETURNING id
+                    """,
+                    tenant_id,
+                )
+                removed = await conn.fetchrow("DELETE FROM tenants WHERE tenant_id = $1 RETURNING tenant_id", tenant_id)
+        return {"tenant_id": tenant_id, "removed": removed is not None, "credentials_revoked": len(revoked)}
 
 
 class ClaimRepo:

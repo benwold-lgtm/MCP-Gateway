@@ -14,8 +14,12 @@ anyio==4.14.2
     #   watchfiles
 asyncpg==0.30.0
     # via device-mcp-catalog (pyproject.toml)
+cffi==2.1.1
+    # via cryptography
 click==8.4.2
     # via uvicorn
+cryptography==49.0.0
+    # via device-mcp-catalog (pyproject.toml)
 fastapi==0.137.2
     # via device-mcp-catalog (pyproject.toml)
 h11==0.16.0
@@ -28,6 +32,8 @@ loguru==0.7.3
     # via device-mcp-catalog (pyproject.toml)
 prometheus-client==0.26.0
     # via device-mcp-catalog (pyproject.toml)
+pycparser==3.0
+    # via cffi
 pydantic==2.13.4
     # via
     #   device-mcp-catalog (pyproject.toml)
