@@ -133,6 +133,60 @@ _MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE device_type_versions ADD COLUMN IF NOT EXISTS tool_set JSONB
     """,
+    # ADR-0020 §2: three more facts about the PRODUCT, which the provider knows and the
+    # tenant was being asked to guess.
+    #
+    # `api_key_location` / `api_key_name` are where the credential goes — `X-API-Key` in a
+    # header, say. That is a property of the appliance's API, not of anyone's deployment of
+    # it, and a tenant who guesses wrong gets a 401 at first contact that reads like a bad
+    # key. The credential VALUE stays firmly the tenant's half; only its position is curated.
+    #
+    # `recommended_rate_limit_rps` is a recommendation and named as one. The provider knows
+    # what the appliance tolerates; the tenant may legitimately want to be more conservative,
+    # and a provider-imposed ceiling on a tenant's own gateway would cross the plane boundary
+    # §2 keeps. So it pre-fills the claim form and constrains nothing.
+    #
+    # All three nullable: versions curated before these columns existed have no answer, which
+    # is a different condition from "the curator said none" and is why the claim flow falls
+    # back to asking rather than defaulting.
+    """
+    ALTER TABLE device_type_versions ADD COLUMN IF NOT EXISTS api_key_location TEXT
+    """,
+    """
+    ALTER TABLE device_type_versions ADD COLUMN IF NOT EXISTS api_key_name TEXT
+    """,
+    """
+    ALTER TABLE device_type_versions
+        ADD COLUMN IF NOT EXISTS recommended_rate_limit_rps DOUBLE PRECISION
+    """,
+    # Added as a separate statement rather than inline above: ADD COLUMN IF NOT EXISTS is
+    # idempotent, ADD CONSTRAINT is not, so the check is applied only when absent. Without
+    # the guard a second startup fails on an already-migrated database, which presents as a
+    # service that will not start rather than as a migration that ran twice.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'device_type_versions_api_key_location'
+        ) THEN
+            ALTER TABLE device_type_versions
+                ADD CONSTRAINT device_type_versions_api_key_location
+                CHECK (api_key_location IS NULL OR api_key_location IN ('header', 'query', 'cookie'));
+        END IF;
+    END $$
+    """,
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'device_type_versions_rate_limit_positive'
+        ) THEN
+            ALTER TABLE device_type_versions
+                ADD CONSTRAINT device_type_versions_rate_limit_positive
+                CHECK (recommended_rate_limit_rps IS NULL OR recommended_rate_limit_rps > 0);
+        END IF;
+    END $$
+    """,
     # ADR-0024 §10 / ADR-0020 §7a: the tenant caller table, moved from config into storage.
     #
     # §7a shipped that table as `CATALOG_TENANT_TOKENS`, a static env map, because nothing

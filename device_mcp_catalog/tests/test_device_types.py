@@ -184,3 +184,74 @@ def test_list_device_types_reports_latest_version_per_type(monkeypatch, database
     assert resp.status_code == 200
     by_slug = {d["slug"]: d["latest_version"] for d in resp.json()["device_types"]}
     assert by_slug == {"acme-sensor-x1": 2, "other-device": 1}
+
+
+# --- product facts the tenant was being asked to guess (ADR-0020 §2) ------------------------
+#
+# Where the API key goes and what the appliance tolerates are properties of the PRODUCT. The
+# tenant was typing them into the claim form from a vendor PDF, and getting `api_key_name`
+# wrong yields a 401 at first contact that reads like a bad key rather than a misplaced one.
+#
+# The credential VALUE stays the tenant's half throughout — only its position is curated.
+
+
+def test_a_version_carries_where_the_api_key_goes_and_what_the_appliance_tolerates(monkeypatch, database_url):
+    plan = {
+        **REGISTER_PLAN,
+        "auth_kind": "api_key",
+        "api_key_location": "header",
+        "api_key_name": "X-API-Key",
+        "recommended_rate_limit_rps": 10.5,
+    }
+    with _client(monkeypatch, database_url) as client:
+        resp = client.post("/device-types", headers=_auth(), json=plan)
+        assert resp.status_code == 201, resp.text
+        # Read back through the route a claim actually uses, not the create response — the
+        # column has to survive the round trip, which is what a migration can get wrong.
+        detail = client.get(f"/device-types/{resp.json()['id']}", headers=_auth()).json()
+
+    version = detail["versions"][0]
+    assert version["api_key_location"] == "header"
+    assert version["api_key_name"] == "X-API-Key"
+    assert version["recommended_rate_limit_rps"] == 10.5
+
+
+def test_api_key_fields_are_refused_when_the_type_uses_a_different_auth_kind(monkeypatch, database_url):
+    """Refused rather than ignored, for the reason §4a gave for mutual exclusivity: a curated
+    field that silently does nothing is one a curator believes is in effect."""
+    plan = {**REGISTER_PLAN, "auth_kind": "oauth2", "api_key_name": "X-API-Key"}
+    with _client(monkeypatch, database_url) as client:
+        resp = client.post("/device-types", headers=_auth(), json=plan)
+    assert resp.status_code == 422
+
+
+def test_a_nonsense_api_key_location_is_refused(monkeypatch, database_url):
+    plan = {**REGISTER_PLAN, "auth_kind": "api_key", "api_key_location": "body"}
+    with _client(monkeypatch, database_url) as client:
+        resp = client.post("/device-types", headers=_auth(), json=plan)
+    assert resp.status_code == 422
+
+
+def test_a_recommended_rate_limit_must_be_positive(monkeypatch, database_url):
+    """Zero is not "no limit" — it is a device that may make no requests at all. Absent is how
+    "no recommendation" is said, and the two must not collapse."""
+    with _client(monkeypatch, database_url) as client:
+        zero = client.post("/device-types", headers=_auth(), json={**REGISTER_PLAN, "recommended_rate_limit_rps": 0})
+        negative = client.post(
+            "/device-types", headers=_auth(), json={**REGISTER_PLAN, "recommended_rate_limit_rps": -1}
+        )
+    assert zero.status_code == 422
+    assert negative.status_code == 422
+
+
+def test_a_version_curated_before_these_fields_existed_reads_as_no_answer(monkeypatch, database_url):
+    """`None` means "the curator has not said", which the claim flow must distinguish from a
+    curated value — it falls back to asking the tenant rather than defaulting to something
+    plausible. A version created without them must therefore read as null, not as a default."""
+    with _client(monkeypatch, database_url) as client:
+        resp = client.post("/device-types", headers=_auth(), json=REGISTER_PLAN)
+        version = resp.json()["versions"][0]
+
+    assert version["api_key_location"] is None
+    assert version["api_key_name"] is None
+    assert version["recommended_rate_limit_rps"] is None
