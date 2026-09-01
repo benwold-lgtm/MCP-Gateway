@@ -38,6 +38,7 @@ from device_mcp_gateway.security import fingerprint as fp
 from device_mcp_gateway.security.url_policy import build_guarded_client, observation_from_client
 from device_mcp_gateway.shared.registry_backend import AbstractRegistryBackend
 from device_mcp_gateway.shared.keys import KEYS
+from device_mcp_gateway.shared.spec_source import CuratedSpecInvalid, resolve_spec_source
 from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest, canonical_tools_hash
 
 # One pool + atexit reap for the whole worker process, shared with the spawn
@@ -519,6 +520,17 @@ class WorkerHealthLoop:
             )
 
     async def _fetch_spec(self, cfg: Any) -> dict | None:
+        # ADR-0020 §4b / LR-46: ask the one choke point first. A device carrying a curated
+        # snapshot is never fetched from — not at registration and not on any later cycle,
+        # which is what makes §4's version pinning hold. Without this the health loop would
+        # replace the snapshot with whatever the live endpoint serves on its next pass.
+        curated = resolve_spec_source(cfg)
+        if curated is not None:
+            try:
+                return curated.parsed()
+            except CuratedSpecInvalid as exc:
+                logger.error(f"Curated spec unusable for {cfg.hostname}: {exc}")
+                return None
         if getattr(cfg, "upstream_kind", "openapi") == "mcp":
             upstream = self._upstream_for(cfg)
             try:

@@ -249,12 +249,16 @@ derive anything from, which is exactly what the docstring says.
 
 #### Correction (2026-09-01): "one path" was wrong, and the fix is one choke point
 
-> **Not built.** Until it is, **three of the five spec-acquisition sites will silently re-fetch
-> and overwrite a curated snapshot** on their next poll, spawn or health-check, converting a
-> pinned curated version back into a live-fetched one — the drift §4a exists to prevent — and
-> firing a pod replace on the strength of it. §4a's storage and §4b's write-time validation
-> shipped without this; a curated document can therefore be *stored* today and must not yet be
-> *claimed*.
+> **Built 2026-09-01 — the choke point, not the whole path.** All five sites now ask
+> `shared/spec_source.py::resolve_spec_source`, so a device carrying a snapshot is never
+> fetched from at any of them, and LR-47's `pod_supervisor` bypass is closed on the way past.
+> `DeviceConfig.curated_spec` carries the document and round-trips through Redis and SQLite.
+>
+> **What remains is the registration input.** Nothing can yet *set* that field: the gateway's
+> register/update body has no `curated_spec`, and the BFF's claim path does not send one. So a
+> curated document can be stored in the catalog and still cannot reach a device. The
+> consumption machinery is in place and inert, which is the safe order — the sites were taught
+> to respect a snapshot before anything could create one.
 
 This section says a claimed device is built by "an internal construction path". Counted in the
 code, spec acquisition happens at **five call sites**, and registration is only the first:

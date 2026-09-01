@@ -61,6 +61,7 @@ from device_mcp_gateway.upstream.mcp_client import StreamableHttpClient
 from device_mcp_gateway.upstream.mcp_discovery import build_proxy_manifest
 from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.shared.keys import KEYS
+from device_mcp_gateway.shared.spec_source import CuratedSpecInvalid, resolve_spec_source
 from device_mcp_gateway.security.url_policy import (
     build_guarded_client,
     resolve_allow_private,
@@ -835,6 +836,17 @@ class DeviceWorker:
         # fails only on the path that was missed. This one is the *cold* path: a device
         # registered while no manifest is cached reaches its pod through here, so an MCP
         # upstream that discovers fine in the health loop would still never spawn.
+        # ADR-0020 §4b / LR-46: ask the one choke point first. A device carrying a curated
+        # snapshot is never fetched from — not at registration and not on any later cycle,
+        # which is what makes §4's version pinning hold. Without this the cold path would
+        # replace the snapshot with whatever the live endpoint serves on its next pass.
+        curated = resolve_spec_source(cfg)
+        if curated is not None:
+            try:
+                return curated.parsed()
+            except CuratedSpecInvalid as exc:
+                logger.error(f"Curated spec unusable for {cfg.hostname}: {exc}")
+                return None
         discovery = self._config.get("discovery", {})
         # SSRF-guarded client: the worker validates every fetched URL (incl. redirects)
         # against the policy, closing the gap where workers never consulted it (F-02).
