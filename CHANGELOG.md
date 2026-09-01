@@ -12,6 +12,37 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Added
 
+- **A curated device type may now carry the provider's own spec, and may fix the address
+  without minting the credential** ([ADR-0020](docs/adr/0020-the-device-catalog.md) §4a/§4b
+  write path, and the new §4c). Two facts a provider knows about a *product* that the tenant
+  was previously made to supply or guess.
+
+  `curated_document` snapshots the provider's OpenAPI document into the version, as **text**
+  rather than JSONB: §4b has the gateway recompute a hash from those exact bytes at claim time
+  and refuse to trust the one stored beside them, and JSONB would normalise key order and
+  whitespace until every recompute disagreed with every assertion. A version carries a curated
+  document or a `spec_path`, never both, and never a curator-declared `tool_set` beside a
+  document — refused at write time rather than resolved by a precedence rule, because a row
+  that can hold a contradictory pair is a state a future bug reaches accidentally and then
+  fails quietly inside.
+
+  `host_source: provider_fixed` with `fixed_base_url` covers the case §6's table could not
+  express: the provider knows where the endpoint is and the tenant still authenticates with
+  **their own** credential. This is not a §6 provider-operated service — the provider mints
+  nothing, holds nothing per tenant, and the catalog still carries no secrets. The claim form
+  stops asking for an address on such a type, and the BFF **refuses** one sent anyway rather
+  than overriding it: a guessed key position is noise a curator can correct, but a different
+  address is a disagreement about where the device is.
+
+  There is deliberately no curated TLS pin. §4c permits one only as a one-time bootstrap seed
+  with no ongoing write path from the catalog, because a pin the provider could keep updating
+  would deliver the very key-change event the tenant's pin exists to catch as ordinary
+  configuration sync. Until that seeding exists, a host-fixed type pins on first contact like
+  any other device.
+
+  Not built: §4b's consumption path. The gateway still has no registration input that takes
+  spec *content*, so a claim against a curated version cannot yet be registered.
+
 - **A device call now carries the request id, and the identity model it compensates for is
   written down** ([ADR-0026](docs/adr/0026-service-identity-per-device.md)). A device
   authenticates *the gateway*, not the person behind the call: one service account per device,
