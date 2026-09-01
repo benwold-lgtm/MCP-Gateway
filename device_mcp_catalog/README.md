@@ -96,9 +96,27 @@ Provider-only (see Callers above).
 - `GET /device-types` — list types with each one's latest version number.
 - `GET /device-types/{id}` — one type's full version history.
 
-A device type is a **template only**: no host, no credential, no tenant. `spec_path` (openapi
-devices only) is relative to whatever `base_url` a tenant supplies at claim time — the type
-names the appliance model, never an instance's address.
+A device type is a **template**: no credential, no tenant, and by default no host. `spec_path`
+(openapi devices only) is relative to whatever `base_url` a tenant supplies at claim time — the
+type names the appliance model, never an instance's address.
+
+Two curated fields narrow that default, both of them provider knowledge about the *product*
+rather than about anyone's deployment of it:
+
+| Field | ADR | What it changes |
+|---|---|---|
+| `curated_document` | §4a/§4b | The provider's own spec, snapshotted as **text** into the version. Mutually exclusive with `spec_path` and refused alongside a declared `tool_set` — not resolved by precedence, refused at write time. `curated_document_sha256` is computed here and never accepted from a caller; the gateway recomputes its own at claim time rather than trusting it. |
+| `host_source` + `fixed_base_url` | §4c | `provider_fixed` says the address is the provider's to supply — a provider-hosted appliance image, a normalised front end. **The credential stays the tenant's**: this is not a §6 provider-operated service, the provider mints nothing and holds nothing per tenant, and §5 (the catalog carries no secrets) is untouched. |
+
+Both are refused rather than ignored when they do not apply: a `fixed_base_url` under
+`host_source: tenant` would be a curated field nothing reads, and a curator who filled one in
+believes it is in effect.
+
+There is deliberately **no curated TLS pin.** §4c permits one only as a one-time bootstrap seed
+with no ongoing write path from here, because a pin the catalog could keep updating would let a
+provider deliver the very key-change event the tenant's pin exists to catch as ordinary
+configuration sync. Until that seeding exists, a `provider_fixed` type pins on first contact
+like any other device.
 
 ## API (assignment, ADR-0020 §2)
 
