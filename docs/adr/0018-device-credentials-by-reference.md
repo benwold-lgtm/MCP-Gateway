@@ -176,6 +176,99 @@ where the gateway's identity can create a secret it cannot subsequently read. Th
 capability from "the backend supports writes", and it would have to be demonstrated rather than
 assumed for a specific backend before any of the above changes.
 
+#### Amendment (2026-09-01): the tenant's claim path, gated on a backend that can prove create-without-read
+
+> **Not applicable today, and deliberately written that way.** Everything below is contingent
+> on a `NETWORKED` resolver existing with a demonstrated create-without-read policy behind it.
+> The only implemented resolver kind is `MOUNTED_FILES` (`credentials/resolver.py`), which has
+> no write API at all — see "Why this ships nothing today" below. This section exists so the
+> argument is settled and recorded now, not so anything changes now.
+
+ADR-0020's catalog claim flow makes the credential **the tenant's half, supplied at claim
+time** (§2 there). This section, read as written, forbids the mechanism that would let that
+work on a deployment where §1's gate is on: the console cannot put the tenant's submitted value
+into the store, so the console must send it inline, and the gate refuses it. Measured live on
+2026-09-01: every credential-bearing device type is unclaimable on a `require_references: true`
+stack — which is the posture this record recommends. Only `auth_kind: none` types can be
+claimed there. That is the recommended posture and the primary onboarding path being mutually
+exclusive, which is not a state either record intended.
+
+**What is not being proposed.** Relaxing §1's gate for the claim flow. That is the shape this
+project refuses everywhere it has had the chance — no loopback exemption for the plaintext-IdP
+flag, no "this caller is trusted enough" carve-out for the SSRF guard (§4a of ADR-0020 restates
+the reasoning). A hole in the gate at the entry point most tenants use most often would mean
+the posture is not enforced where it matters most. Not viable, and not the ask.
+
+**What is proposed** is the mechanism §2a's own reopening condition describes. §2a does not
+refuse console writes absolutely; it names what would change its mind:
+
+> a backend that offers a genuinely write-only credential path — one where the gateway's
+> identity can create a secret it cannot subsequently read. That is a different capability from
+> "the backend supports writes", and it would have to be **demonstrated rather than assumed**
+> for a specific backend before any of the above changes.
+
+So the claim is **not** that this is a different question from §2a's — it plainly is the same
+question, and any write-up saying otherwise would be wrong. The claim is that it **meets the
+condition §2a already agreed to be bound by**, and inherits that condition's obligation:
+demonstrate it for a named backend.
+
+**The flow.** The tenant's claim submission carries the raw value exactly as it does today, so
+ADR-0020 §2 is honoured as written and needs no amendment of its own. The **tenant's own console
+backend** then writes it into the **tenant's own store** as a new secret, mints the `secret://`
+reference to what it just created, and forwards *that* to registration. Nothing inline ever
+reaches the gateway, so the gateway needs no code change — it is already enforcing the gate
+correctly, and simply never sees a value to refuse.
+
+**Which identity holds create-without-read, precisely.** §2a's condition says "the gateway's
+identity", because when it was written the gateway was the only candidate writer. Here the
+writer is the **console backend**, a separate process with a separate identity, and the
+distinction is load-bearing rather than pedantic:
+
+- the **gateway's** identity stays read-only, exactly as §1 sells it. *The provider holds a
+  reader, not a holder* is not weakened — it is untouched;
+- the **console backend's** identity gains `create`, scoped as narrowly as the rest of this
+  record demands: **create-only, under a path namespaced to the specific claim being
+  processed, and never read, list or delete of anything already in the tenant's store.**
+
+This is also why 18.5's resolution is not being contradicted on its own terms. What that
+refused was standing write access reaching **across** a boundary — the provider's console into a
+tenant's store, the escalation ADR-0017 exists to prevent. Here the tenant's backend writes a
+credential the tenant themselves just submitted into the tenant's own store. The tenant remains
+the sole author of their secret's lifecycle either way; the only thing that changes is whether
+they type it into a form or run a CLI command first. **But that distinction is an argument for
+why the condition may be met, not a reason the condition does not apply.** §2a's sentence "and
+the console does not either" is general, and it is this section that amends it.
+
+**The named target: Vault.** §2a asks for a demonstration, not an assurance, so the target is
+concrete. Vault's ACL model expresses this directly — a policy may grant `create` on a path
+while explicitly denying `read` on that same path — which is a real write-only capability
+rather than an approximation of one. That is the backend against which this must be shown
+working before any of it is built. A backend that cannot express the deny is not a backend this
+amendment covers.
+
+**Why this ships nothing today, stated bluntly.** The only implemented `ResolverKind` is
+`MOUNTED_FILES` — a Kubernetes Secret or CSI volume mounted into the pod. `NETWORKED` is
+declared and explicitly *"not yet implemented"*. There is therefore no write API to write to:
+the only way to place a value is to create the underlying Kubernetes Secret object and wait for
+the gateway's mount to pick it up, which fails in two documented ways:
+
+- kubelet's volume sync runs on an interval close to **60 seconds**, so claim → register →
+  resolve races propagation;
+- a **`subPath`** mount never receives updates to its source Secret at all without a pod
+  restart.
+
+The symptom of both is a device whose credential does not resolve shortly after a successful
+claim — which reads as a broken secret store rather than as a race, the same
+diagnose-in-the-wrong-place shape as an in-cluster address handed to an outside party. So even
+a fully correct amendment to this section ships nothing usable until `NETWORKED` lands. This
+thread is **blocked on that implementation**, not open as a decision.
+
+**Until then**, the honest state is the one measured: on a `require_references: true`
+deployment, catalog claim works for `auth_kind: none` types and for nothing else, and the
+two-system onboarding §2a describes remains the only path for the rest — put the secret in the
+store, then claim. The console should say so rather than failing with a gateway error a tenant
+cannot act on.
+
 ### 3. Backup becomes configuration backup
 
 An archive contains device definitions, tool-change history and credential *references*. It
@@ -1117,7 +1210,7 @@ required otherwise would not describe the actual estate.
   a grant is minted against it. [ADR-0022](0022-agent-initiated-device-writes-are-plan-bound.md)'s
   repeatable reconciliation approvals keep their own, separately-decided term — that follow-up is
   unaffected.
-- ~~**Whether the console should write to the secret store.**~~ **Resolved: no** — refused on
+- ~~**Whether the console should write to the secret store.**~~ **Resolved: no** — and see §2a's 2026-09-01 amendment, which does not overturn that but takes up §2a's own stated reopening condition for the tenant claim path, blocked on a `NETWORKED` backend that can demonstrate create-without-read. Refused on
   principle, see §2a. Registration and rotation stay two-system operations, and `MCP_SECRET_KEY`
   remains a permanent named exception for rotating tokens (§1a) rather than something to
   engineer away.
