@@ -1,5 +1,26 @@
 # Multitenancy — deployment models & best practices
 
+> ## ⛔ The provider tier is FROZEN (2026-09-01)
+>
+> **Supported editions are lite and single-tenant.** The provider plane — the device catalog,
+> tenant enrolment, the provider console and delegated support grants — is frozen: no new work,
+> and **its image is no longer published**. `release-image.yml` still contains the
+> `device-mcp-catalog` job, gated behind a manual `publish_catalog` input, so a tag build does
+> not push it.
+>
+> **Frozen, not withdrawn.** Nothing is deleted, `ci.yml` still builds and tests the catalog on
+> every PR, and `deploy/kubernetes/catalog/` is untouched. The reason is sequencing, not a
+> reversal of ADR-0013: the foundation gets finished before multi-tenancy is layered back onto
+> it. Everything below remains accurate about how the tier works, and D-1 below —
+> single-tenant-per-stack — is unaffected, because it was always the model the *supported*
+> editions use.
+>
+> A tenant stack has never needed the catalog: the base kustomization excludes it deliberately
+> (see its own comment), and a device is registered directly through `POST /devices`. The
+> console now hides "Claim from catalog" where no catalog estate exists, rather than offering a
+> button that answers `TENANT_ID not configured on this BFF`.
+
+
 > **Decision D-1.** The Device MCP Gateway is **single-tenant per stack**. It does
 > not implement in-application tenant isolation. Isolation between tenants is
 > achieved by running a **separate gateway stack per tenant**, not by partitioning
