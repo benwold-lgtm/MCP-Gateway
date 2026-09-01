@@ -255,3 +255,32 @@ def test_a_version_curated_before_these_fields_existed_reads_as_no_answer(monkey
     assert version["api_key_location"] is None
     assert version["api_key_name"] is None
     assert version["recommended_rate_limit_rps"] is None
+
+
+# --- the value space the gateway will actually accept -------------------------------------
+
+
+def test_a_transport_the_gateway_cannot_serve_is_refused_at_curation(monkeypatch, database_url):
+    """`transport` was the one curated field with no constraint on either side of it.
+
+    The gateway's `_validate_transport` accepts exactly `"sse"`. An unconstrained value here
+    was accepted at curation, appeared in every assigned tenant's console, and then failed
+    each claim individually with a message naming a field the tenant never supplied and
+    cannot change — the curator, the only party who can fix it, was never told.
+
+    Same shape as LR-48 (`upstream_transport` sent unconditionally to an OpenAPI device), one
+    column over: `upstream_transport` has had both a Literal and a DB CHECK since the first
+    release, and sits directly below the column that had neither.
+    """
+    with _client(monkeypatch, database_url) as client:
+        resp = client.post("/device-types", headers=_auth(), json={**REGISTER_PLAN, "transport": "http"})
+    assert resp.status_code == 422
+    assert "transport" in resp.text
+
+
+def test_a_version_still_defaults_to_the_transport_the_gateway_serves(monkeypatch, database_url):
+    """The constraint must not have narrowed the default out from under existing curation."""
+    with _client(monkeypatch, database_url) as client:
+        resp = client.post("/device-types", headers=_auth(), json=REGISTER_PLAN)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["versions"][0]["transport"] == "sse"

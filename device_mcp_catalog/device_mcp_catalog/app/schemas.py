@@ -12,6 +12,22 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 UpstreamKind = Literal["openapi", "mcp"]
+#: How the GATEWAY fronts the device, not how the gateway reaches it (that is
+#: `UpstreamTransport`). One value, because `registry/validation.py::_validate_transport`
+#: accepts exactly one — anything else is refused at claim time with a message naming a
+#: field the tenant never supplied and cannot change.
+#:
+#: Typed here rather than left as `str` because the curator is the only party who can fix
+#: it: an unconstrained value is accepted at curation, shows up in every assigned tenant's
+#: console, and fails for each of them individually. Same reasoning as `upstream_transport`
+#: below, which has had both a Literal and a DB CHECK since the first release; this column
+#: had neither, sitting directly above one that had both.
+#:
+#: **No matching DB CHECK, deliberately.** Every other CHECK in `db.py` was added alongside
+#: the column it constrains, so no row could already violate it. This column predates the
+#: constraint, so `ADD CONSTRAINT` could fail against legacy data — and a catalog that will
+#: not start is a worse outcome than the one unclaimable device type it would prevent.
+Transport = Literal["sse"]
 UpstreamTransport = Literal["http", "sse"]
 AuthKind = Literal["none", "api_key", "oauth2"]
 FingerprintPolicy = Literal["warn", "enforce"]
@@ -43,7 +59,7 @@ class VersionFields(BaseModel):
     record's own precedent for a written precondition that quietly became false.
     """
 
-    transport: str = "sse"
+    transport: Transport = "sse"
     upstream_kind: UpstreamKind = "openapi"
     upstream_transport: UpstreamTransport = "http"
     #: Relative to the tenant's base_url at claim time (openapi only) — never an absolute
