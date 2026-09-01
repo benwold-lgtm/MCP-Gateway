@@ -63,6 +63,30 @@ Three consequences that catch people out:
 - **The audit subject is `oidc:{issuer}#{sub}`.** `sub` is unique within an issuer, not
   globally, which matters as soon as there is more than one.
 
+### Where per-user identity stops
+
+At the device. The chain above is per-user from the browser to the gateway; the call the
+gateway then makes to an appliance uses **that device's own credential** — one service
+account per device, the same one for every user of the tenant.
+
+```
+BSmith --token--> BFF --the same token--> Gateway --one device credential--> appliance
+       \_____________ per-user identity ___________/       \_ one service identity _/
+```
+
+This is the accepted, permanent model, not a gap awaiting a fix
+([ADR-0026](adr/0026-service-identity-per-device.md)). It is worth being concrete about what
+it does and does not buy, because the expectation it disappoints is a reasonable one:
+
+- **Worth doing anyway:** point the appliance's *own* console at the same IdP. One identity,
+  one lifecycle, one MFA and offboarding path for a person across both consoles.
+- **Not achievable:** "the gateway creates this VM *as BSmith*". Human-at-a-console and
+  machine-calling-an-API are different paths, and the second one is the gateway's.
+- **How the question is actually answered:** the gateway's audit record names BSmith; the
+  appliance's log names the service account; both carry the same `X-Request-Id`, which the
+  gateway is required to send on every device call. Join on it — see
+  [audit-logging.md](audit-logging.md#attribution-across-the-device-hop-adr-0026).
+
 ---
 
 ## What the gateway needs from your IdP

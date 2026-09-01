@@ -65,6 +65,15 @@ _RESERVED_HEADERS = frozenset(
         "x-forwarded-host",
         "x-forwarded-proto",
         "x-real-ip",
+        # ADR-0026: the correlation id is evidence — it is what joins this gateway's
+        # audit record to the device's own log — so a tool argument must not be able to
+        # choose it. Deliberately overlapping: the egress hook in core/correlation.py
+        # already assigns (not setdefaults) the header after this dict is built, so a
+        # smuggled value would lose anyway. The overlap is kept because this check names
+        # the cause at the point of the attempt ("dropping reserved header param"), and
+        # an outbound path that one day bypasses the guarded client would otherwise lose
+        # both defences at once.
+        "x-request-id",
     }
 )
 

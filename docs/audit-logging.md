@@ -79,6 +79,51 @@ Every request's access-log line is bound to the resolved principal: `subject` an
 `auth_method` (plus `rid`). Public routes (`/health`, `/ready`) log `subject="-"`.
 This lets you attribute *any* API access to an actor, not just tool dispatch.
 
+## Attribution across the device hop (ADR-0026)
+
+The audit record above names the **person or agent** that made the request. The device's own
+log names the **service account** the gateway used to reach it — one account per device, the
+same one for every user of the tenant. [ADR-0026](adr/0026-service-identity-per-device.md)
+accepts that permanently, so answering "which person caused this change on the appliance?"
+means joining the two logs.
+
+The join key is the request id. The gateway puts it in three places for one call:
+
+| Where | Field |
+|---|---|
+| The caller's response | `X-Request-Id` header |
+| The gateway's access log and audit record | `rid` |
+| **The outbound call to the device** | `X-Request-Id` header |
+
+The third row is the one that makes the join possible, and it is a **requirement**, not a
+diagnostic nicety — it is the compensating control for the device seeing one identity. It is
+stamped at the guarded-egress seam, so it covers tool calls, resource reads and MCP-passthrough
+hops alike; it cannot be chosen by a tool argument; and it is omitted rather than invented when
+there is no request in scope (an id minted at the wire would join to nothing).
+
+To trace one call end to end:
+
+```
+# 1. the gateway's side — who asked, and was it allowed
+jq 'select(.record.extra.rid == "<id>")' logs/audit.log
+
+# 2. the device's side — what actually happened there
+#    (however that appliance exposes its log; match on the same <id>)
+```
+
+### Device-onboarding check
+
+Whether a device **records** inbound headers is a property of that device, not something the
+gateway can promise. Before a device is trusted with writes, verify it:
+
+1. Invoke any tool on the device through the gateway and note the `X-Request-Id` from the
+   response.
+2. Find that same value in the device's own request/audit log.
+
+If it is absent, the device discards the header and the join falls back to timestamp plus
+service account — weaker, and worth recording as a known property of that device rather than
+discovering during an investigation.
+
 ## Credential redaction in logs
 
 A device `base_url` / `spec_url` may embed credentials (`https://user:pass@host`).

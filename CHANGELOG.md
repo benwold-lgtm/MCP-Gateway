@@ -12,6 +12,26 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Added
 
+- **A device call now carries the request id, and the identity model it compensates for is
+  written down** ([ADR-0026](docs/adr/0026-service-identity-per-device.md)). A device
+  authenticates *the gateway*, not the person behind the call: one service account per device,
+  the same one for every user of the tenant. That is now the accepted, permanent model rather
+  than an unstated limitation — accepted categorically, for every device kind, with §4 recording
+  why a per-device answer and a per-capability credential split were both rejected.
+
+  The compensating control is the join between the gateway's audit record (which names the
+  person) and the device's own log (which names the service account), and that join needs one
+  value on both sides. **It was not built.** The request id reached the access log, the audit
+  record, the response header and the worker's execution audit, and stopped there — nothing put
+  it on the wire to the device. Every outbound hop now carries `X-Request-Id` holding the id the
+  caller was given, stamped at the same seam that installs the SSRF guard, so tool calls,
+  resource reads and MCP-passthrough hops inherit it by construction. A tool argument cannot
+  choose it, and no id is invented at egress when none is in scope — one that joins to nothing
+  would be worse than a visible gap.
+
+  Whether a device *records* the header is a property of that device, so verifying it is now a
+  documented onboarding step rather than an assumption.
+
 - **Enrolment: a tenant invites its provider, and the relationship is revocable**
   ([ADR-0024](docs/adr/0024-tenant-provisioning-is-a-request.md) §10). Connecting a tenant to
   its provider was nine manual steps across two clusters and an identity provider, three of
