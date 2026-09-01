@@ -34,7 +34,7 @@ from device_mcp_gateway.audit import AUDIT_OUTCOME_DENIED, AUDIT_OUTCOME_SUCCESS
 from device_mcp_gateway.backup.envelope import ARCHIVE_KINDS, BackupError, KIND_CIPHERTEXT, KIND_PORTABLE
 from device_mcp_gateway.backup.export import build_archive
 from device_mcp_gateway.backup.restore import ON_CONFLICT_SKIP, restore_archive
-from device_mcp_gateway.cfg import plan_digest_validity_seconds
+from device_mcp_gateway.cfg import plan_digest_validity_seconds, resolve_mode
 from device_mcp_gateway.ratelimit import rate_limit, rate_limit_principal
 from device_mcp_gateway.rbac import (
     Principal,
@@ -237,18 +237,46 @@ _RESTORE_APPLY_LIMITS = [
 
 #: Process-local fallback HMAC key, used only when no MCP_SECRET_KEY is configured at all
 #: (embedded/dev mode — CredentialCodec.from_config's own docstring calls this "convenient
-#: for local/embedded development"; distributed/production mode refuses to start without a
-#: key, so this path is unreachable there). A plan_token minted under it does not survive a
+#: for local/embedded development"). A plan_token minted under it does not survive a
 #: restart, which only means "preview again" in that mode — the same cost a keyless
 #: deployment already accepts for credential storage, never a security regression, since no
 #: key existed to bind to either way.
+#:
+#: **This used to claim distributed mode could not reach it, because that mode "refuses to
+#: start without a key". It does not.** `main.py`'s refusal is gated on
+#: `and not allow_plaintext_credentials` — an override its own error message advertises. A
+#: distributed stack under that override reached this fallback, and the key is *per process*,
+#: so on more than one replica the preview minted a token the apply's replica could not
+#: verify: `ERR_PLAN_STALE`, saying "preview again and submit the plan_token from that
+#: preview", advice that fails identically forever. A restore that cannot be completed by any
+#: correct operator behaviour, and nothing named the reason.
 _EPHEMERAL_PLAN_TOKEN_KEY = secrets.token_bytes(32)
 
 
 def _plan_token_keys(config: dict) -> list[bytes]:
+    """The HMAC keys a plan_token is minted and verified under.
+
+    Refuses rather than falling back when the fallback cannot work. In distributed mode the
+    process-local key is not merely weaker, it is *wrong*: whichever replica serves the apply
+    is not the one that minted the token. Failing here — at preview, before an operator has
+    an archive pasted and a plan on screen — names the cause at the point of the mistake,
+    which an `ERR_PLAN_STALE` at apply can never do (see `_plan_stale`: it is a legitimate,
+    expected verdict, so it cannot also carry "your stack is misconfigured").
+    """
     secret_keys = secret_keys_from_config(config)
     if secret_keys:
         return derive_plan_token_keys(secret_keys)
+    if resolve_mode(config) == "distributed":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "This stack cannot mint a restore plan token: no MCP_SECRET_KEY is configured, "
+                "so the token would be signed with a per-process key and any other replica "
+                "would reject the apply as stale. Set MCP_SECRET_KEY (the same value on every "
+                "replica) and retry. Restore is the one operation gateway.allow_plaintext_"
+                "credentials cannot paper over."
+            ),
+        )
     return [_EPHEMERAL_PLAN_TOKEN_KEY]
 
 
