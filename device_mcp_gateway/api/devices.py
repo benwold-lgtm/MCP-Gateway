@@ -156,6 +156,44 @@ def _parse_auth(
     raise HTTPException(status_code=400, detail=f"Unsupported auth_type: {auth_type}")
 
 
+def _parse_expected_spki(data: dict) -> str | None:
+    """ADR-0015 §8's out-of-band pre-pin, normalized and checked, or None if not supplied.
+
+    Pre-pinning is written as the pinned key rather than as a check, so the ordinary
+    comparison path handles everything from there — the first probe seeing a different key
+    classifies as key_changed and quarantines, with no separate code path to get wrong and
+    no TOFU window at all. Which is exactly why a bad digest must not be allowed to register
+    the device anyway: that would open the window this field exists to close.
+    """
+    raw = data.get("expected_tls_spki_sha256")
+    if not raw:
+        return None
+    value = str(raw).strip().lower()
+    if not _SPKI_RE.fullmatch(value):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "expected_tls_spki_sha256 must be a 64-character hex SHA-256 digest "
+                "(no colons and no 'sha256:' prefix — strip them from an openssl fingerprint)"
+            ),
+        )
+    return value
+
+
+def _parse_fingerprint_policy(data: dict) -> str | None:
+    """The requested fingerprint policy, lower-cased, or None if not supplied."""
+    raw = data.get("fingerprint_policy")
+    if not raw:
+        return None
+    value = str(raw).lower()
+    if value not in (fp.POLICY_WARN, fp.POLICY_ENFORCE):
+        raise HTTPException(
+            status_code=400,
+            detail=f"fingerprint_policy must be '{fp.POLICY_WARN}' or '{fp.POLICY_ENFORCE}'",
+        )
+    return value
+
+
 @router.post(
     "/devices",
     response_model=DeviceMutationResult,
@@ -214,6 +252,14 @@ async def _apply_register(data: dict, request: Request) -> DeviceMutationResult:
         require_references=require_references(cfg),
     )
     rate_limit_rps = _parse_rate_limit(data)
+    # Parsed HERE, above the write, with every other gate — not beside the code that
+    # applies them further down. Validating after `register_device` meant a refusal the
+    # gateway had already carried out: the device was live and unpinned, the create was
+    # never audited (the audit call sits below these raises), and the corrected retry came
+    # back 409 against a device the operator had been told was not created. `_apply_update`
+    # was always the right shape; these two fields are what made this path drift from it.
+    expected_spki = _parse_expected_spki(data)
+    fingerprint_policy = _parse_fingerprint_policy(data)
 
     existing = await reg.get_device(hostname)
     if existing:
@@ -230,20 +276,7 @@ async def _apply_register(data: dict, request: Request) -> DeviceMutationResult:
         upstream_transport=upstream_transport,
     )
 
-    # ADR-0015 §8: an operator may supply the SPKI they verified out of band, which turns
-    # trust-on-first-use into real verification for the devices where it is worth the
-    # effort. Implemented as PRE-PINNING rather than as a check: writing it as the pinned
-    # key means the ordinary comparison path handles everything from there — the first
-    # probe that sees a different key classifies as key_changed and quarantines, with no
-    # separate code path to get wrong and no TOFU window at all.
-    expected_spki = data.get("expected_tls_spki_sha256")
     if expected_spki:
-        expected_spki = str(expected_spki).strip().lower()
-        if not _SPKI_RE.fullmatch(expected_spki):
-            raise HTTPException(
-                status_code=400,
-                detail="expected_tls_spki_sha256 must be a 64-character hex SHA-256 digest",
-            )
         await reg._backend.update_device_fields(
             hostname,
             tls_spki_sha256=expected_spki,
@@ -255,14 +288,8 @@ async def _apply_register(data: dict, request: Request) -> DeviceMutationResult:
         # reason to fail the registration that just succeeded.
         device_cfg = await reg.get_device(hostname) or device_cfg
 
-    fingerprint_policy = data.get("fingerprint_policy")
     if fingerprint_policy:
-        if str(fingerprint_policy).lower() not in (fp.POLICY_WARN, fp.POLICY_ENFORCE):
-            raise HTTPException(
-                status_code=400,
-                detail=f"fingerprint_policy must be '{fp.POLICY_WARN}' or '{fp.POLICY_ENFORCE}'",
-            )
-        await reg._backend.update_device_fields(hostname, fingerprint_policy=str(fingerprint_policy).lower())
+        await reg._backend.update_device_fields(hostname, fingerprint_policy=fingerprint_policy)
         device_cfg = await reg.get_device(hostname) or device_cfg
 
     audit_request(request, "device.create", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
