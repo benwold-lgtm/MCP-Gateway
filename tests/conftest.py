@@ -54,6 +54,21 @@ async def real_redis():
 # --- Mock Target API ---
 mock_target_app = FastAPI(title="Mock IoT Sensor API", version="1.0.0")
 
+# Headers the mock device last saw, so a test can assert what the gateway actually put on
+# the wire (ADR-0026's correlation id above all). Recorded here rather than by patching
+# httpx inside the gateway: a patch at `AsyncClient.request` runs *before* the request
+# event hook that stamps the id, so it cannot see it — the only honest place to look is
+# the far end.
+last_device_request_headers: dict[str, str] = {}
+
+
+@mock_target_app.middleware("http")
+async def _record_request_headers(request: Request, call_next):
+    last_device_request_headers.clear()
+    last_device_request_headers.update({k.lower(): v for k, v in request.headers.items()})
+    return await call_next(request)
+
+
 MOCK_OPENAPI_SPEC = {
     "openapi": "3.0.3",
     "info": {"title": "Mock IoT Sensor", "version": "1.0.0"},

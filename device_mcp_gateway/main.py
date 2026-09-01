@@ -57,6 +57,7 @@ from device_mcp_gateway.cfg import (
     tenant_notifications_max_retained,
     warn_unsafe_settings,
 )
+from device_mcp_gateway.core.correlation import use_request_id
 from device_mcp_gateway.lifecycle import (  # noqa: F401  (re-exported, see above)
     _LOOP_HEARTBEAT_INTERVAL,
     _acquire_gauge_leadership,
@@ -516,7 +517,12 @@ def create_app(override_config: dict | None = None) -> FastAPI:
         request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
         request.state.request_id = request_id
         start = time.perf_counter()
-        response = await call_next(request)
+        # ADR-0026: bind the id for the whole downstream call so every outbound hop the
+        # request causes — a device tool call above all — leaves carrying it. Embedded
+        # mode dispatches to the pod inside this block; the worker binds its own (see
+        # worker/dispatch.py) because there is no HTTP request there to bind from.
+        with use_request_id(request_id):
+            response = await call_next(request)
         elapsed = (time.perf_counter() - start) * 1000
         # Attribute the access log to the resolved principal (F-56). The auth dependency
         # runs during call_next, so request.state.principal is set by now for protected

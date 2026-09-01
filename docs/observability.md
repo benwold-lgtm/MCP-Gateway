@@ -348,7 +348,7 @@ All structured fields added via `logger.bind()` appear under `record.extra`.
 | `method` | `record.extra.method` | MCP JSON-RPC method (e.g. `"tools/call"`, `"tools/list"`) |
 | `status` | `record.extra.status` | `"ok"`, `"error"`, or `"dispatched"` (distributed mode) |
 | `duration_ms` | `record.extra.duration_ms` | Tool call round-trip time in milliseconds (embedded mode only) |
-| `rid` | `record.extra.rid` | Correlation ID — matches `X-Request-Id` response header |
+| `rid` | `record.extra.rid` | Correlation ID — matches the `X-Request-Id` response header **and** the `X-Request-Id` the gateway sent to the device ([ADR-0026](adr/0026-service-identity-per-device.md)) |
 | `level` | `record.level.name` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"` |
 | `message` | `record.message` | Log message string |
 | `time` | `record.time.timestamp` | Unix epoch timestamp (float) |

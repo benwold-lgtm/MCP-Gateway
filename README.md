@@ -736,7 +736,9 @@ Each DevicePod wraps its downstream HTTP calls in a per-device circuit breaker (
 
 ### Correlation IDs
 
-Every request receives an `X-Request-Id` header (taken from the incoming request or generated as a UUID4). The ID appears in all log lines for that request chain (`rid=<id>`) and is echoed in the response `X-Request-Id` header.
+Every request receives an `X-Request-Id` header (taken from the incoming request or generated as a UUID4). The ID appears in all log lines for that request chain (`rid=<id>`), is echoed in the response `X-Request-Id` header, and is **sent onward to the device** on every outbound call.
+
+That last hop is a requirement rather than a convenience. A device authenticates the gateway, not the person behind the call — one service identity per device, permanently ([ADR-0026](docs/adr/0026-service-identity-per-device.md)) — so the only way to answer "who caused this change on the appliance?" is to join the gateway's audit record to the device's own log, and the request id is the key that join uses. See [docs/audit-logging.md](docs/audit-logging.md#attribution-across-the-device-hop-adr-0026).
 
 ### TLS
 

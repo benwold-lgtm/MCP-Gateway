@@ -30,6 +30,7 @@ from device_mcp_gateway import metrics
 from device_mcp_gateway.security import fingerprint as fp
 from device_mcp_gateway.audit import audit_log
 from device_mcp_gateway.core.backoff import jittered
+from device_mcp_gateway.core.correlation import use_request_id
 from device_mcp_gateway.core.errors import RPC_DUPLICATE, RPC_INTERNAL_ERROR, RPC_NO_WORKER, rpc_error
 from device_mcp_gateway.observability import tracing
 from device_mcp_gateway.pods.pod_base import BasePod
@@ -258,6 +259,18 @@ class CallDispatcher:
     # ------------------------------------------------------------------
 
     async def dispatch_call(self, hostname: str, stream: str, group: str, msg_id: str, fields: dict) -> None:
+        """Bind the gateway's correlation id, then run the pipeline (ADR-0026).
+
+        A wrapper rather than a `with` inside the pipeline so the binding covers *every*
+        outbound hop the dispatch causes — the tool call itself, but also a lazily
+        fetched spec or a token refresh — and so the id is reset when this entry returns.
+        The worker consumes many calls in one task; leaving the previous call's id bound
+        would attach it to an unrelated later one.
+        """
+        with use_request_id(fields.get("rid", "")):
+            await self._dispatch_call_bound(hostname, stream, group, msg_id, fields)
+
+    async def _dispatch_call_bound(self, hostname: str, stream: str, group: str, msg_id: str, fields: dict) -> None:
         w = self._w
         session_id = fields.get("session_id", "")
         request_id = fields.get("request_id", "")

@@ -31,6 +31,9 @@ from urllib.parse import urlparse
 import httpx
 from loguru import logger
 
+# ADR-0026. correlation.py depends on nothing here either.
+from device_mcp_gateway.core.correlation import with_correlation_hook
+
 # ADR-0015. fingerprint.py depends on nothing here, so this direction is cycle-free.
 from device_mcp_gateway.security.fingerprint import Observation, observe_tls
 
@@ -370,6 +373,11 @@ def build_guarded_client(
         allowed_ports=allowed_ports,
         capture_fingerprint=capture_fingerprint,
     )
+    # ADR-0026: the egress guard is also where the correlation id is stamped. Same seam,
+    # same reason — every server-side fetch of an operator-supplied URL passes through
+    # here, so a new outbound path inherits both the SSRF check and the X-Request-Id
+    # without its author having to remember either.
+    kwargs["event_hooks"] = with_correlation_hook(kwargs.pop("event_hooks", None))
     return httpx.AsyncClient(transport=transport, follow_redirects=follow_redirects, **kwargs)
 
 

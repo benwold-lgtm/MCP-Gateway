@@ -493,7 +493,7 @@ Sites that previously only logged a failure now also increment a counter, so req
 
 ### End-to-end tracing (SRE O2)
 
-The gateway assigns each request an `X-Request-Id` (generated if absent) and logs it as `rid`. That `rid` is now propagated as a field on the tool-call stream and bound into the **worker's** audit log lines, so a single id traces a call across the gateway→worker hop. Filter logs in both pods by `rid=<value>` to follow one invocation end to end.
+The gateway assigns each request an `X-Request-Id` (generated if absent) and logs it as `rid`. That `rid` is now propagated as a field on the tool-call stream and bound into the **worker's** audit log lines, so a single id traces a call across the gateway→worker hop. Filter logs in both pods by `rid=<value>` to follow one invocation end to end. The same id also leaves the cluster: every outbound call to a device carries it as `X-Request-Id`, which is how the gateway's audit record is joined to the device's own log — required, not optional, because the device sees one service identity rather than the caller ([ADR-0026](adr/0026-service-identity-per-device.md)).
 
 ### Per-call latency: Prometheus, not logs (SRE O3)
 
