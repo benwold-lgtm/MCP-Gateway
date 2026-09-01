@@ -126,6 +126,20 @@ class DeviceConfig:
     # operator scans a list for after a restore, so this one ships on the list projection.
     credential_state: str = "ok"
 
+    # --- Curated spec (ADR-0020 §4a/§4b) -----------------------------------------------
+    # The provider's own OpenAPI document, snapshotted onto the device at claim time instead
+    # of a `spec_url` to fetch. Text, not a parsed object: §4b recomputes a hash over exactly
+    # these bytes, and a parse/re-serialise round trip would change them.
+    #
+    # Mutually exclusive with `spec_url` — a device has one spec source, and which one is
+    # decided in `shared/spec_source.py::resolve_spec_source`, the single place that answers
+    # "curated or live" for all five acquisition sites (LR-46).
+    #
+    # A device carrying this is never fetched from, at registration or on any later cycle.
+    # That is the point: §4 pins a claimed device to the version it claimed, and a spec the
+    # health loop could refresh would not be pinned to anything.
+    curated_spec: str | None = None
+
     # --- serialisation helpers ---
 
     def to_redis_hash(self) -> dict[str, str]:
@@ -190,6 +204,7 @@ class DeviceConfig:
             # credential_state would match neither branch of the comparison and the device
             # would read as neither healthy nor needing a human.
             credential_state=h.get("credential_state", "") or "ok",
+            curated_spec=_opt_str(h.get("curated_spec", "")),
         )
 
 

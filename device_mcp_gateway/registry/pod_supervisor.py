@@ -72,6 +72,7 @@ class PodSupervisor:
         spec_service: SpecService,
         profiles: dict[str, DeviceProfile],
         credential_writeback: Callable[[str], CredentialsChangedHook] | None = None,
+        discovery_for: Callable[[DeviceProfile], Any] | None = None,
     ) -> None:
         self._backend = backend
         self._config = config
@@ -82,6 +83,16 @@ class PodSupervisor:
         self._tls = tls_profiles
         self._retry_policy = retry_policy
         self._spec_service = spec_service
+        # LR-47 / ADR-0020 §4b. `spawn` used to call `self._spec_service.fetch_spec` directly
+        # while both Registry call sites went through `_discovery_for`, so this was the one
+        # embedded site that branched on nothing: an `upstream_kind == "mcp"` device with no
+        # cached spec got the OPENAPI service, and a curated device would have been fetched
+        # from rather than served its snapshot. Reachable — `_health_check_one` calls `spawn`
+        # guarded on `reachable and not pod_active`, never on `spec_data`.
+        #
+        # Optional so a supervisor built without one (tests) still runs, falling back to the
+        # previous behaviour rather than crashing; the Registry always supplies it.
+        self._discovery_for = discovery_for
         # Builds the per-device hook that re-persists credentials an auth handler rotated
         # at runtime. Optional so a supervisor constructed without one (tests) still runs;
         # the Registry always supplies it.
@@ -97,7 +108,8 @@ class PodSupervisor:
             logger.warning("Max pods reached, skipping spawn")
             return
         if not profile.spec_data:
-            await self._spec_service.fetch_spec(profile)
+            source = self._discovery_for(profile) if self._discovery_for else self._spec_service
+            await source.fetch_spec(profile)
         spec = profile.spec_data
         if not spec:
             msg = f"No spec available for {profile.hostname}, cannot spawn pod"

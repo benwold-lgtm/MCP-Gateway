@@ -31,11 +31,13 @@ from device_mcp_gateway.auth.base import AbstractAuth, CredentialsChangedHook
 from device_mcp_gateway.core.backoff import RetryPolicy, jittered, send_with_retry
 from device_mcp_gateway.core.manifest_diff import record_tool_change
 from device_mcp_gateway.registry.models import DeviceProfile
+from device_mcp_gateway.registry.curated_spec_source import CuratedSpecSource
 from device_mcp_gateway.registry.pod_supervisor import PodSupervisor
 from device_mcp_gateway.registry.spec_service import SpecService
 from device_mcp_gateway.security import fingerprint as fp
 from device_mcp_gateway.security.mtls import TlsProfiles
 from device_mcp_gateway.shared.crypto import CredentialCodec
+from device_mcp_gateway.shared.spec_source import resolve_spec_source
 from device_mcp_gateway.shared.registry_backend import (
     AbstractRegistryBackend,
     DeviceConfig,
@@ -113,6 +115,9 @@ class Registry:
         self._mcp_discovery = McpDiscoveryService(
             backend=self._backend, config=config, client_factory=self._spec_service.client
         )
+        # ADR-0020 §4b: the third spec source `_discovery_for` can return. Holds the backend
+        # because applying a snapshot persists the recomputed hash, exactly as a fetch does.
+        self._curated_specs = CuratedSpecSource(backend=self._backend)
         self._pod_supervisor = PodSupervisor(
             backend=self._backend,
             config=config,
@@ -121,6 +126,11 @@ class Registry:
             spec_service=self._spec_service,
             profiles=self._profiles,
             credential_writeback=self._credential_writeback,
+            # LR-47: spawn used to reach for `self._spec_service` directly, bypassing the
+            # dispatcher above — so an mcp device with no cached spec got the OPENAPI service,
+            # and a curated one would have been fetched from. It asks the same question every
+            # other site asks now.
+            discovery_for=self._discovery_for,
         )
 
     # ------------------------------------------------------------------
@@ -539,11 +549,17 @@ class Registry:
         return self._tls.describe(hostname)
 
     def _discovery_for(self, profile: DeviceProfile) -> Any:
-        """The discovery implementation for this device's upstream kind (ADR-0009).
+        """The spec source for this device (ADR-0009 for the kind, ADR-0020 §4b for curation).
 
-        Both expose ``fetch_spec(profile) -> bool`` ("did the tool set change"), so
-        provisioning and the health loop pick one here rather than branching inline.
+        All three expose ``fetch_spec(profile) -> bool`` ("did the tool set change"), so
+        provisioning, the health loop and pod spawn pick one here rather than branching
+        inline. Adding curation as a *third* implementation behind the existing seam rather
+        than as an `if` at each caller is LR-46's choke point on the embedded side: a device
+        carrying a snapshot is never fetched from, at registration or on any later cycle, and
+        no caller has to remember that.
         """
+        if resolve_spec_source(profile.config) is not None:
+            return self._curated_specs
         if profile.config.upstream_kind == "mcp":
             return self._mcp_discovery
         return self._spec_service
