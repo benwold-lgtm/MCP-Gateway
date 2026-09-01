@@ -37,7 +37,7 @@ def _client(monkeypatch, tmp_path):
     monkeypatch.setenv("MCP_ADMIN_KEY", ADMIN_KEY)
     from device_mcp_gateway.main import create_app
 
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_write_planned=True))
     client.app.state.authenticator._keys[CALLER_KEY] = Principal(
         subject="key:agent1", scopes=scopes_for_role("caller"), auth_method="api_key"
     )
