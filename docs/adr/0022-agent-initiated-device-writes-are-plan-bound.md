@@ -9,6 +9,52 @@
   the SSRF guard (`device_mcp_gateway/security/url_policy.py`) — the human-review checkpoint
   this ADR's whole reasoning depends on
 
+> ## ⛔ Unmounted 2026-09-01 — the design stands, the surface came down
+>
+> `create_app` no longer mounts these routes. **Unmounted, not deleted**: the decision below is
+> unchanged, `ci.yml` still builds and tests the implementation, and the route tests exercise
+> the real wiring through `create_app(enable_write_planned=True)`. What was wrong was the
+> shipping, not the principle — this went live before it was finished, the same root cause as
+> LR-48/49/50.
+>
+> **Why:**
+> * **LR-58.** `RedisPendingProposalStore` writes the plan as plain JSON, so a register plan
+>   puts `auth.api_key`/`client_secret` into Redis in the clear — precisely what the gateway
+>   refuses to start rather than let `register_device` do.
+> * **No consumer at either end.** Nothing calls these routes: no proposer, no reviewer.
+>   Unmounting removed no capability from anyone.
+> * **Review cannot happen through this interface.** There is no list route — a reviewer has no
+>   way to *discover* a proposal, and the store has no index — and no reject route, so step 2
+>   below can only ever mean "approve".
+> * Lite and single-tenant are the supported editions; this was pure surface on both.
+>
+> **What is NOT the reason:** none of this is a retreat from plan-binding. §4's repeatable grant
+> already carries routine autonomous operation — verified in *both* store implementations, not
+> just the in-memory double: a repeatable grant is returned `ok` before the consumed check and
+> is never consumed, so a reconciliation loop re-asserting a byte-identical digest runs
+> unattended, indefinitely, by design. The irreducible human step is registering something
+> **genuinely new**, and that is the point: the moment an agent can decide a never-before-seen
+> target is trustworthy, "autonomous device management" and "an LLM trusting an attacker-supplied
+> address" are the same event. If that step chafes, the fixes are lower review latency and cheap
+> batch review — never pre-approved patterns, which the Alternatives below already reject.
+>
+> ### Re-entry conditions — all four, before the mount comes back
+>
+> Remounting first and fixing after is the sequencing that produced LR-58.
+>
+> 1. A plan never persists a raw credential value **anywhere**, proposal store included — it
+>    holds a reference (ADR-0018 §1a) or nothing at all.
+> 2. A list route exists, with a store index behind it. ⚠️ **`GET /v1/devices/plans` will not
+>    work**: it sits inside `/devices/{hostname}`'s path space and `api_devices.router` is
+>    mounted first, so the device route matches and answers "no such device 'plans'". Proven in
+>    `tests/test_write_planned_is_not_mounted.py`. Pick a non-colliding path, or exclude it
+>    explicitly on the device route.
+> 3. A reject route exists.
+> 4. A real reviewer surface exists in the console (BFF routes + a component). See LR-54.
+>
+> Gated by a `create_app` argument rather than config or an environment variable, deliberately:
+> a deployment must not be able to expose this by setting a variable while (1) is still true.
+
 ## Context
 
 Today's RBAC model deliberately splits two capabilities across two different principals:

@@ -179,7 +179,7 @@ class _BodySizeLimitMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
-def create_app(override_config: dict | None = None) -> FastAPI:
+def create_app(override_config: dict | None = None, *, enable_write_planned: bool = False) -> FastAPI:
     """Application factory. Pass override_config to skip file I/O (useful in tests)."""
     cfg = override_config if override_config is not None else load_config()
     _mode = resolve_mode(cfg)
@@ -349,8 +349,9 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     # Same in-memory-then-Redis shape as the two trackers above. Two stores, not one: a
     # PendingProposal is short-lived and read once by the reviewer; a Grant is scoped to a
     # plan digest and may outlive many proposals when a reviewer marks it repeatable (§4).
-    _app.state.write_planned_proposals = InMemoryPendingProposalStore()
-    _app.state.write_planned_grants = InMemoryWritePlannedGrantStore()
+    if enable_write_planned:
+        _app.state.write_planned_proposals = InMemoryPendingProposalStore()
+        _app.state.write_planned_grants = InMemoryWritePlannedGrantStore()
 
     # --- Support requests/grants (ADR-0017) ---
     # Same in-memory-then-Redis shape as the two stores above. A PendingSupportRequest is
@@ -452,8 +453,12 @@ def create_app(override_config: dict | None = None) -> FastAPI:
             app.state.rate_limiter = RedisRateLimiter(redis_client)
             logger.info("Rate limiter using shared Redis storage")
             app.state.break_glass_activity = RedisBreakGlassActivity(redis_client)
-            app.state.write_planned_proposals = RedisPendingProposalStore(redis_client)
-            app.state.write_planned_grants = RedisWritePlannedGrantStore(redis_client)
+            if enable_write_planned:
+                # Gated with the routes. The proposal store is where LR-58 lives — it writes
+                # the plan, credential values and all, to Redis as plain JSON — so it must not
+                # exist on a stack whose routes cannot fill it.
+                app.state.write_planned_proposals = RedisPendingProposalStore(redis_client)
+                app.state.write_planned_grants = RedisWritePlannedGrantStore(redis_client)
             app.state.support_requests = RedisPendingSupportRequestStore(redis_client)
             app.state.support_grants = RedisSupportGrantStore(redis_client)
             app.state.support_standing_consent = RedisStandingConsentStore(redis_client)
@@ -557,7 +562,35 @@ def create_app(override_config: dict | None = None) -> FastAPI:
     protected.include_router(api_streamable_fleet.router)
     protected.include_router(api_admin.router)
     protected.include_router(api_backup.router)
-    protected.include_router(api_write_planned.router)
+    # ── ADR-0022 (propose/review/apply) is NOT mounted — 2026-09-01 ───────────────────
+    # Unmounted, not deleted. The design stands and `ci.yml` still builds and tests it; what
+    # was wrong was the shipping, not the principle — it went live before it was finished, the
+    # same root cause as LR-48/49/50.
+    #
+    # Why it came down:
+    #   * **LR-58.** `RedisPendingProposalStore` writes the plan as plain JSON, so a register
+    #     plan puts `auth.api_key`/`client_secret` in Redis in the clear — the exact thing this
+    #     gateway refuses to start rather than let `register_device` do.
+    #   * **No consumer at either end.** Nothing anywhere calls these routes: no proposer, no
+    #     reviewer. Unmounting takes no capability away from anyone.
+    #   * **Review cannot happen through this interface.** There is no list route (a reviewer
+    #     cannot discover a proposal; the store has no index) and no reject route, so "review"
+    #     can only ever mean "approve".
+    #   * Lite and single-tenant are the supported editions, and this was pure surface on both.
+    #
+    # ⚠️ **Re-entry conditions — all four, before this line comes back.** Remounting first and
+    # fixing after is the sequencing that produced LR-58 in the first place:
+    #   1. A plan never persists a raw credential value, anywhere, proposal store included —
+    #      it holds a reference (ADR-0018 §1a) or nothing at all.
+    #   2. A list route exists, with the store index behind it.
+    #   3. A reject route exists.
+    #   4. A real reviewer surface exists in the console.
+    #
+    # Deliberately a code change rather than a config flag: a stack must not be able to expose
+    # this by setting an environment variable while (1) is still true. `enable_write_planned`
+    # is a `create_app` argument so the route tests exercise the real wiring, auth included.
+    if enable_write_planned:
+        protected.include_router(api_write_planned.router)
     protected.include_router(api_support_requests.router)
     protected.include_router(api_notifications.router)
     protected.include_router(api_enrolments.router)

@@ -45,7 +45,7 @@ def _client(monkeypatch, tmp_path, *, allow_private=True):
         monkeypatch.delenv("MCP_ALLOW_PRIVATE_TARGETS", raising=False)
     from device_mcp_gateway.main import create_app
 
-    client = TestClient(create_app())
+    client = TestClient(create_app(enable_write_planned=True))
     client.app.state.authenticator._keys[CALLER_KEY] = Principal(
         subject="key:agent1", scopes=scopes_for_role("caller"), auth_method="api_key"
     )
