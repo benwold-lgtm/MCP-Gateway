@@ -15,13 +15,33 @@ UpstreamKind = Literal["openapi", "mcp"]
 UpstreamTransport = Literal["http", "sse"]
 AuthKind = Literal["none", "api_key", "oauth2"]
 FingerprintPolicy = Literal["warn", "enforce"]
+#: ADR-0020 §4c — who supplies the device's address. See `VersionFields.host_source`.
+HostSource = Literal["tenant", "provider_fixed"]
 
 
 class VersionFields(BaseModel):
     """The template fields a version carries — everything the claim flow (slice 4) will
-    combine with a tenant's `hostname`/`base_url`/credential to register a real device.
-    Deliberately excludes `hostname`/`base_url`/credential: those are the tenant's half
-    (ADR-0020 §2), never the provider's to supply here."""
+    combine with a tenant's `hostname`/credential to register a real device.
+
+    This docstring used to end: *"Deliberately excludes `hostname`/`base_url`/credential:
+    those are the tenant's half (ADR-0020 §2), never the provider's to supply here."*
+    **ADR-0020 §4c narrows that**, and the rule is restated rather than deleted because the
+    exception is narrow and the reason for the original is still live:
+
+    * `hostname` and the credential **value** remain the tenant's half, without exception.
+      §5 — the catalog carries no secrets — is untouched.
+    * `base_url` is the tenant's half *by default* (`host_source == "tenant"`). A type may
+      declare `host_source == "provider_fixed"` and supply `fixed_base_url` when the address
+      is genuinely provider knowledge — a provider-hosted appliance image, a normalised front
+      end the tenant authenticates to with their own key. That is **not** a §6
+      provider-operated service: the provider mints nothing and holds nothing per tenant.
+
+    Why the sentence had to be revised in the same commit that added the field: it was a
+    *stated rule*, not an omission, so leaving it would not have made this docstring
+    incomplete — it would have made it **wrong**, from the moment the field shipped, with
+    nothing to tell a reader which of two contradicting sources was current. §7a is this
+    record's own precedent for a written precondition that quietly became false.
+    """
 
     transport: str = "sse"
     upstream_kind: UpstreamKind = "openapi"
@@ -84,6 +104,45 @@ class VersionFields(BaseModel):
     #: the plane boundary ADR-0020 §2 keeps — the catalog offers a device type, it does not
     #: operate the tenant's registry.
     recommended_rate_limit_rps: Optional[float] = Field(default=None, gt=0)
+    #: ADR-0020 §4a — the provider's own curated OpenAPI document, **snapshotted as text**.
+    #:
+    #: Text, not JSONB, and this is load-bearing rather than a storage preference. §4b has
+    #: the gateway recompute a hash from these bytes at claim time and refuse to trust the
+    #: one stored beside them. JSONB normalises key order and whitespace on the way in, so a
+    #: document round-tripped through it comes back as different bytes than were curated and
+    #: every recomputed hash would disagree with every asserted one — a verification step
+    #: that fails constantly is one that gets removed.
+    #:
+    #: Mutually exclusive with `spec_path`, enforced in `repo.py` (see
+    #: `_check_curated_document`). Not "the curated document wins if both are set": a silent
+    #: precedence rule is a state a future bug reaches accidentally and which then fails
+    #: quietly, which is why `devices:write-planned` is in no role bundle and an unnamed
+    #: break-glass entry refuses to start.
+    curated_document: Optional[str] = None
+    #: ADR-0020 §4c — **who supplies the address**, declared per version and independent of
+    #: who supplies the credential. §6's table had only two rows and both of its columns
+    #: moved together, so "the provider knows the address, the tenant still brings their own
+    #: key" could not be expressed at all.
+    #:
+    #: `tenant` (the default, and what every existing version is) means the claim flow asks
+    #: for `base_url` as it always has. `provider_fixed` means `fixed_base_url` is curated
+    #: and the claim flow does not ask.
+    #:
+    #: Deliberately says nothing about the credential. A `provider_fixed` type whose
+    #: `auth_kind` is `api_key` still takes the tenant's own key.
+    host_source: HostSource = "tenant"
+    #: Populated only when `host_source == "provider_fixed"`, and required then — enforced in
+    #: `repo.py` (`_check_host_source`) beside the table's own CHECK, because a declaration
+    #: with nothing behind it is a curated field that silently does nothing.
+    #:
+    #: There is deliberately **no `fixed_spki_pin` here yet.** §4c allows a curated pin only
+    #: as a one-time bootstrap seed with no ongoing catalog write path, because a pin the
+    #: catalog can keep updating hands the provider the exact laundering path
+    #: `device_mcp_gateway.security.fingerprint.decide` exists to prevent ("a changed key does
+    #: not re-pin"). Until that seeding is built, a `provider_fixed` type pins on first
+    #: contact like any other device — which is correct, just less convenient. Shipping the
+    #: field unused would be the very thing the api-key validator below refuses.
+    fixed_base_url: Optional[str] = None
 
     @model_validator(mode="after")
     def _api_key_fields_need_api_key_auth(self) -> "VersionFields":
@@ -107,6 +166,18 @@ class DeviceTypeVersion(VersionFields):
     device_type_id: uuid.UUID
     version: int
     created_at: datetime.datetime
+    #: ADR-0020 §4b — sha256 of `curated_document`'s UTF-8 bytes, computed by the repo at
+    #: write time and **never accepted from a caller**: a curator who could assert a hash
+    #: that disagreed with the content they supplied would make the check meaningless on
+    #: arrival. What §4b's claim-time recompute catches is therefore the case nothing else
+    #: covers — the two drifting apart *later*, through a bug, a migration or a compromised
+    #: curation path.
+    #:
+    #: NOT the gateway's `spec_hash`, which is a different value computed a different way
+    #: (`sha256(str(parsed))[:16]` in `registry/spec_service.py`) for a different purpose.
+    #: §4b's rule is that the gateway computes its own from the content and never copies
+    #: this one; naming them the same thing is how that rule gets quietly dropped.
+    curated_document_sha256: Optional[str] = None
 
 
 class DeviceType(BaseModel):

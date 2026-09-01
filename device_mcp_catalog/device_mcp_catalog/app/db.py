@@ -187,6 +187,74 @@ _MIGRATIONS: tuple[str, ...] = (
         END IF;
     END $$
     """,
+    # ADR-0020 §4a — the provider's own curated spec document, snapshotted into the version.
+    #
+    # TEXT, not JSONB, and the choice is load-bearing. §4b has the gateway recompute a hash
+    # from these bytes at claim time and refuse to trust the one stored beside them. JSONB
+    # normalises key order and whitespace, so a document round-tripped through it comes back
+    # as different bytes than were curated, every recomputed hash would disagree with every
+    # asserted one, and a verification that fails constantly is one that gets removed.
+    #
+    # The hash column is what curation ASSERTED. It is computed by the repo, never accepted
+    # from a caller, and it is not the gateway's `spec_hash` (a different value, computed a
+    # different way, for a different purpose) — §4b's rule is that the gateway derives its
+    # own from the content and never copies this one.
+    """
+    ALTER TABLE device_type_versions ADD COLUMN IF NOT EXISTS curated_document TEXT
+    """,
+    """
+    ALTER TABLE device_type_versions ADD COLUMN IF NOT EXISTS curated_document_sha256 TEXT
+    """,
+    # ADR-0020 §4c — who supplies the address, independent of who supplies the credential.
+    # §6's table had two rows whose columns moved together, so "provider knows the address,
+    # tenant still brings their own key" was unrepresentable. Defaults to 'tenant', which is
+    # what every version curated before this column existed is.
+    """
+    ALTER TABLE device_type_versions
+        ADD COLUMN IF NOT EXISTS host_source TEXT NOT NULL DEFAULT 'tenant'
+    """,
+    """
+    ALTER TABLE device_type_versions ADD COLUMN IF NOT EXISTS fixed_base_url TEXT
+    """,
+    # Guarded for the same reason as the two above it: ADD COLUMN IF NOT EXISTS is idempotent,
+    # ADD CONSTRAINT is not, and an unguarded second startup fails as a service that will not
+    # start rather than as a migration that ran twice.
+    #
+    # Both directions are constrained deliberately. 'provider_fixed' with no address is a
+    # claim flow with nothing to claim against; an address under 'tenant' is a curated field
+    # that silently does nothing. `repo.py::_check_host_source` raises on both first, with a
+    # message naming the cause — the overlap is the point, since a CHECK violation surfaces as
+    # an asyncpg error a curator cannot act on.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'device_type_versions_host_source'
+        ) THEN
+            ALTER TABLE device_type_versions
+                ADD CONSTRAINT device_type_versions_host_source
+                CHECK (
+                    (host_source = 'tenant' AND fixed_base_url IS NULL)
+                    OR (host_source = 'provider_fixed' AND fixed_base_url IS NOT NULL)
+                );
+        END IF;
+    END $$
+    """,
+    # ADR-0020 §4b: a version carries a curated document or a spec_path, never both. Not a
+    # precedence rule — a row that can hold both is a state a future bug reaches accidentally
+    # and then fails quietly inside.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'device_type_versions_one_spec_source'
+        ) THEN
+            ALTER TABLE device_type_versions
+                ADD CONSTRAINT device_type_versions_one_spec_source
+                CHECK (curated_document IS NULL OR spec_path IS NULL);
+        END IF;
+    END $$
+    """,
     # ADR-0024 §10 / ADR-0020 §7a: the tenant caller table, moved from config into storage.
     #
     # §7a shipped that table as `CATALOG_TENANT_TOKENS`, a static env map, because nothing

@@ -8,6 +8,7 @@ four operations in this slice.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from typing import Any, Optional
 
@@ -51,6 +52,85 @@ class DeviceTypeVersionNotFound(Exception):
     pass
 
 
+def _document_sha256(document: Optional[str]) -> Optional[str]:
+    """The hash curation asserts about the bytes it stored (ADR-0020 §4b).
+
+    Computed here rather than accepted from the caller: a curator able to assert a hash that
+    disagreed with the content they supplied would make the whole check meaningless on
+    arrival. What the claim-time recompute catches is the two drifting apart *later*.
+
+    Full-length hex of the raw UTF-8 bytes, and deliberately not the gateway's `spec_hash`
+    (`sha256(str(parsed))[:16]`). Two values, two purposes; §4b's rule is that the gateway
+    computes its own and never copies this one, and giving them the same shape is how that
+    rule quietly stops being followed.
+    """
+    if document is None:
+        return None
+    return hashlib.sha256(document.encode("utf-8")).hexdigest()
+
+
+def _check_curated_document(fields: VersionFields) -> None:
+    """ADR-0020 §4b: a version carries a curated document or a `spec_path`, never both — and
+    a curated document is not accompanied by a curator-declared `tool_set`.
+
+    Explicitly **not** "the curated document wins if both are set". A silent precedence rule
+    is a state a future bug reaches accidentally and then fails quietly inside, which is why
+    `devices:write-planned` is a member of no role bundle and an unnamed `break_glass: true`
+    entry refuses to start rather than falling back. The ambiguity is resolved by the curator
+    at write time or not at all.
+
+    The `tool_set` half is §4b's "its stated premise expires" rule, enforced at the only
+    moment it can be. `VersionFields.tool_set` justifies being unverified by *"the catalog has
+    no tenant base_url to fetch a live spec against"*, which stops being true the moment
+    content sits in the row. Deriving the tool set from that content is a separate slice — it
+    needs an OpenAPI translator this service deliberately does not have (see `tool_diff.py`
+    on why the catalog does not import the gateway package). Until then the honest position is
+    to refuse the combination rather than to store a curator assertion beside content that
+    contradicts it, which is the expired-premise bug rather than a smaller version of it.
+    """
+    if fields.curated_document is None:
+        return
+    if fields.spec_path is not None:
+        raise ValueError(
+            "a version carries a curated document or a spec_path, never both (ADR-0020 §4b) — "
+            "resolve which one this version uses rather than relying on a precedence rule"
+        )
+    if fields.tool_set is not None:
+        raise ValueError(
+            "tool_set must not be set on a version carrying a curated document (ADR-0020 §4b): "
+            "the declaration's premise — that the catalog has no content to measure — is false "
+            "once the content is in the row, and a derived tool set is not built yet"
+        )
+
+
+def _check_host_source(fields: VersionFields) -> None:
+    """ADR-0020 §4c: `fixed_base_url` is populated exactly when `host_source` says it is.
+
+    Both directions are errors, and neither is pedantry. A `provider_fixed` type with no
+    address is a claim flow with nothing to claim against, discovered by the tenant rather
+    than the curator. A `fixed_base_url` sitting under `host_source == "tenant"` is a curated
+    field that silently does nothing — the condition
+    `_api_key_fields_need_api_key_auth` refuses for the same reason, because a curator who can
+    see a value they filled in believes it is in effect.
+
+    Here rather than as a pydantic validator in `schemas.py`, following `_check_spec_path`'s
+    stated rule: this one has to stay consistent with a table CHECK constraint, so it lives
+    next to the constraint it mirrors.
+    """
+    if fields.host_source == "provider_fixed":
+        if not fields.fixed_base_url:
+            raise ValueError(
+                "fixed_base_url is required when host_source is 'provider_fixed' (ADR-0020 §4c) — "
+                "a host-fixed type with no host is discovered by the tenant, not the curator"
+            )
+    elif fields.fixed_base_url is not None:
+        raise ValueError(
+            "fixed_base_url must not be set when host_source is 'tenant' (ADR-0020 §4c) — "
+            "refused rather than ignored, so a curator cannot believe a field is in effect "
+            "when nothing reads it"
+        )
+
+
 def _check_spec_path(fields: VersionFields) -> None:
     """`spec_path` is meaningless for an `mcp` device — the gateway's own
     `registry/validation.py::_validate_upstream` refuses `spec_url` on an mcp registration,
@@ -66,6 +146,8 @@ class DeviceTypeRepo:
 
     async def create_device_type(self, fields: CreateDeviceType) -> DeviceTypeDetail:
         _check_spec_path(fields)
+        _check_curated_document(fields)
+        _check_host_source(fields)
         type_id = uuid.uuid4()
         version_id = uuid.uuid4()
         try:
@@ -94,6 +176,8 @@ class DeviceTypeRepo:
 
     async def add_version(self, device_type_id: uuid.UUID, fields: VersionFields) -> DeviceTypeVersion:
         _check_spec_path(fields)
+        _check_curated_document(fields)
+        _check_host_source(fields)
         version_id = uuid.uuid4()
         async with self._db.pool.acquire() as conn:
             async with conn.transaction():
@@ -145,8 +229,9 @@ class DeviceTypeRepo:
             INSERT INTO device_type_versions
                 (id, device_type_id, version, transport, upstream_kind, upstream_transport,
                  spec_path, auth_kind, fingerprint_policy, changelog, tool_set,
-                 api_key_location, api_key_name, recommended_rate_limit_rps)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                 api_key_location, api_key_name, recommended_rate_limit_rps,
+                 curated_document, curated_document_sha256, host_source, fixed_base_url)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             RETURNING *
             """,
             version_id,
@@ -163,6 +248,10 @@ class DeviceTypeRepo:
             fields.api_key_location,
             fields.api_key_name,
             fields.recommended_rate_limit_rps,
+            fields.curated_document,
+            _document_sha256(fields.curated_document),
+            fields.host_source,
+            fields.fixed_base_url,
         )
 
 
