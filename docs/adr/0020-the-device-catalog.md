@@ -247,6 +247,112 @@ downstream inherits the current docstring's expired premise by association with 
 `spec_path` versions keep the declared `tool_set` unchanged: there is no content in the row to
 derive anything from, which is exactly what the docstring says.
 
+### 4c. A type may fix the host without minting the credential (amendment, 2026-09-01)
+
+> **Not built**, like §4a and §4b. Recorded because it sat as a three-line note in a local
+> plan file from 2026-08-31 to 2026-09-01 with no tracker row — the same "a decision nobody
+> wrote down gets worked around rather than resolved" shape §7a and ADR-0026 were both caught
+> by. Build it in the same pass as §4a/§4b; see the closing note on why.
+
+§6's table has two rows and both of its columns move together:
+
+| | Host | Credential | Claimed by |
+|---|---|---|---|
+| **Device type** (§1) | Tenant supplies | Tenant supplies | Tenant |
+| **Provider-operated service** (§6) | Provider supplies | Provider mints, **per tenant** | Tenant |
+
+The combination in between is unrepresentable: *the provider knows the address, the tenant
+still brings their own credential*. A provider-hosted appliance image, a normalised front end
+the tenant authenticates to with their own key, an endpoint whose location is provider
+knowledge but whose access is not — none of these are §6 services, and none of them fit §1
+either. `VersionFields` does not merely omit the case, it forbids it: *"Deliberately excludes
+`hostname`/`base_url`/credential: those are the tenant's half (ADR-0020 §2), never the
+provider's to supply here."*
+
+#### Decision: host-fixing is declared at type level, independently of the credential model
+
+A version carries `host_source: tenant | provider_fixed`. `fixed_base_url` (and, under the
+conditions below, a bootstrap `fixed_spki_pin`) may be populated **only** when it is
+`provider_fixed`, enforced as a write-time validation error by a `_check_host_source` beside
+`_check_spec_path` and `_check_curated_document` in `repo.py` — same shape, same file, same
+"raise, don't reconcile". `repo.py` rather than a pydantic validator in `schemas.py` for the
+reason `_check_spec_path` already gives: the check must stay consistent with a table
+constraint, and this one implies `host_source = 'provider_fixed' → fixed_base_url IS NOT NULL`.
+
+Nothing about the credential moves. A `provider_fixed` type whose `auth_kind` is `api_key`
+still takes the tenant's own key, and §5 is untouched — the catalog carries no secrets either
+way. §6 remains what it is: a *service the provider operates and mints per-tenant credentials
+for*, with all five of its obligations. §4c is the weaker, commoner thing §6 was being
+stretched to cover.
+
+**Why this is §4c and not §6a.** §4's governing sentence is that *a claimed device does not
+silently follow* its type. §4a earns its place under §4 because version pinning and a live
+reference are mutually exclusive; §4c is that same sentence applied to a different field — a
+claimed device must not silently follow the catalog's idea of where the endpoint is, or of
+what identity it presents. §6's table does need its third row, but that is a consequence of
+this section, not its home.
+
+#### The SPKI pin is bootstrap-only, and structurally so
+
+This is the half that inverts if it is got wrong, so it is stated separately.
+
+§6 gives tenant-held pinning a specific purpose: *"the tenant pins the provider's endpoint …
+which is a control the tenant holds **over the provider**"*. The pin's whole job is to turn a
+change of endpoint identity into an event requiring the tenant's attention. If the catalog
+retained a write path to that field, a provider rotating a key and updating the catalog would
+deliver the very event the pin exists to catch as ordinary configuration sync. That is **worse
+than not pinning at all**: it looks protected and is not — the same shape as accepting a
+`jwks_uri` from an unverified discovery document, a check quietly converted into a trusted
+input from the party being checked.
+
+So a curated pin is a **seed and nothing more**. It supplies the initial value so a tenant's
+first contact is not blind trust-on-first-use, and after that the pin is the tenant's own
+record with **no further catalog write path to it at all** — not "the catalog should not update
+it", but cannot. A field the catalog can still write and is asked not to touch is a weaker
+guarantee than one it cannot reach; the precedent is `SCOPE_DEVICES_WRITE_PLANNED`, which no
+principal holds as a bundle member, admin included, and which is reachable only through
+`write_planned.check_and_consume`.
+
+**No detection machinery has to be designed for this**, which is the payoff of framing it that
+way. Once the pin is tenant-owned, a provider changing keys is discovered exactly as any other
+device's change is, at real connection time, by `security/fingerprint.py::decide` — whose own
+docstring states the rule: *"a changed key **does not re-pin**. The approved `tls_spki_sha256`
+stays put and the new value lands in `pending_tls_spki_sha256` … so a silent substitution
+cannot launder itself into the baseline by being observed twice."* The device moves to
+`STATE_PENDING`; under `POLICY_ENFORCE`, `quarantine_reason` refuses dispatch. Note the
+converse, which is why the **SPKI** specifically is the field to lock: a certificate rotation
+on the *same key* is `VERDICT_CERT_ROTATED` — informational, refreshes context, deliberately
+does not interrupt. Ordinary renewal costs the tenant nothing; a key change is the event.
+
+An ongoing catalog write to that field would therefore be, precisely, the laundering path
+`decide()` was written to prevent, reached from a direction it does not defend.
+
+#### `fixed_base_url` may ship without the pin
+
+The two are independently valuable and the address half is much the simpler. If the seeding
+mechanics need longer, ship `host_source` + `fixed_base_url` and leave `fixed_spki_pin` unset
+and unimplemented; a `provider_fixed` type with no curated pin simply pins on first contact as
+every device does today.
+
+#### The `VersionFields` docstring is overridden in the same commit as the field
+
+Its exclusion is a **stated rule**, not an omission, so shipping the field without revising it
+does not leave the docstring incomplete — it leaves it **wrong**, from the moment the field
+exists, with nothing to tell a reader which of two contradicting sources is current. The
+docstring names what it used to forbid and why the exception now exists, in the commit that
+creates the exception. This is the §7a lesson applied before rather than after: a written
+precondition that quietly becomes false is the failure this record has already been corrected
+for twice.
+
+#### Build it with §4a/§4b
+
+`_check_host_source` and §4b's `_check_curated_document` are the same validator shape in the
+same file, and §4a's exclusivity does not exist yet either — so this is not a new check
+mirroring an established one, it is two new siblings. Two written in one pass by one author
+agree; two written months apart from the same reasoning rediscovered do not. All three are the
+same underlying capability — **curation declaring a provider-known fact about a type, distinct
+from what is left to the tenant** — surfacing on spec content and on host identity.
+
 ### 5. The catalog carries no secrets
 
 A device type names the *kind* of credential a device needs (`api_key` in a header,
@@ -275,6 +381,15 @@ So the catalog carries two kinds of entry:
 |---|---|---|---|
 | **Device type** (§1) | Tenant supplies | Tenant supplies | Tenant |
 | **Provider-operated service** | Provider supplies | Provider mints, **per tenant** | Tenant |
+| **Host-fixed type** ([§4c](#4c-a-type-may-fix-the-host-without-minting-the-credential-amendment-2026-09-01)) | Provider supplies | **Tenant supplies** | Tenant |
+
+> The third row is [§4c](#4c-a-type-may-fix-the-host-without-minting-the-credential-amendment-2026-09-01),
+> added 2026-09-01. As first written this table had two rows and both columns moved together,
+> which made *"the provider knows the address, the tenant still brings their own credential"*
+> unrepresentable and left §6 being stretched to cover it. A §4c type is **not** a
+> provider-operated service and carries none of the five obligations below: the provider
+> mints nothing, holds nothing per tenant, and the traffic is the tenant's own authenticated
+> call to a host whose address happened to be provider knowledge.
 
 Five properties make the second kind safe, and none of them is optional:
 
