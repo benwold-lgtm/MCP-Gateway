@@ -247,6 +247,72 @@ downstream inherits the current docstring's expired premise by association with 
 `spec_path` versions keep the declared `tool_set` unchanged: there is no content in the row to
 derive anything from, which is exactly what the docstring says.
 
+#### Correction (2026-09-01): "one path" was wrong, and the fix is one choke point
+
+> **Not built.** Until it is, **three of the five spec-acquisition sites will silently re-fetch
+> and overwrite a curated snapshot** on their next poll, spawn or health-check, converting a
+> pinned curated version back into a live-fetched one — the drift §4a exists to prevent — and
+> firing a pod replace on the strength of it. §4a's storage and §4b's write-time validation
+> shipped without this; a curated document can therefore be *stored* today and must not yet be
+> *claimed*.
+
+This section says a claimed device is built by "an internal construction path". Counted in the
+code, spec acquisition happens at **five call sites**, and registration is only the first:
+
+| Site | When it runs | Reaches the spec via |
+|---|---|---|
+| `registry/server.py:467` (`_provision_device`) | embedded, at registration | `_discovery_for(profile)` |
+| `registry/server.py:582` (`_health_check_one`) | embedded, **every health cycle** | `_discovery_for(profile)` |
+| `registry/pod_supervisor.py:100` (`spawn`) | embedded, on spawn and on `replace` | `self._spec_service` **directly** |
+| `worker/runner.py:828` (`_fetch_spec`) | distributed, **cold** path | its own implementation |
+| `worker/health.py:521` (`_fetch_spec`) | distributed, **health loop** | its own implementation |
+
+Two of those five already share a seam — `_discovery_for`, whose docstring says provisioning
+and the health loop "pick one here rather than branching inline" — so what a curated check
+would actually have to be remembered in is **four** places, not five. That is still four.
+
+**This project has already paid for the N-sites shape once, and says so in its own words.**
+`worker/runner.py::_fetch_spec` carries the warning:
+
+> Because there are two of them, an upstream kind added to one and not the other fails only on
+> the path that was missed. This one is the *cold* path: a device registered while no manifest
+> is cached reaches its pod through here, so an MCP upstream that discovers fine in the health
+> loop would still never spawn.
+
+That is this same failure with a different fact, and the count is now twice what it was when it
+went wrong. It is not a risk to weigh against consolidation; it is the documented outcome.
+
+**And there is a live instance of it in the table above.** `pod_supervisor.spawn` calls
+`self._spec_service.fetch_spec(profile)` directly rather than through `_discovery_for`, so a
+device whose `upstream_kind` is `mcp` and whose `spec_data` is empty gets the **OpenAPI** spec
+service. Reachable: `server.py:584` calls `spawn` guarded only on `reachable and not
+pod_active`, not on `spec_data`. The dispatcher exists, and one of the three embedded sites
+already forgot it. See LR-47.
+
+#### Decision: `resolve_spec_source(device)`, in `shared/`
+
+One function that every acquisition site calls instead of reaching for `fetch_spec` itself. It
+returns the curated snapshot when the device carries one — recomputing the hash from the
+snapshot's own bytes, never trusting the catalog's, exactly as this section already requires —
+and otherwise falls through to the existing live-fetch behaviour unchanged. The curated-vs-live
+decision is made **once**, and a sixth call site added later inherits it instead of having to
+remember it.
+
+It lives in `device_mcp_gateway/shared/`, beside `keys.py` and `session_owners.py`, because the
+sites span both `registry/` (embedded) and `worker/` (distributed) and both already import from
+there. Explicitly **not** copied into each: that collapses four opt-outs into two and leaves
+the identical failure at half the scale, which is the same trade this record's own history
+argues against.
+
+The distributed pair keep their deliberately different live-fetch implementations — concurrent
+probing on the cold path, serial polling in the health loop, for the reasons `runner.py` gives.
+What consolidates is the *decision*, not the fetch.
+
+This is the same instinct as [ADR-0026](0026-service-identity-per-device.md) §2: the correlation
+id is stamped at the guarded-egress builder rather than at each call site, so a new outbound
+path inherits it by construction. One seam, chosen because the alternative is N authors each
+remembering.
+
 ### 4c. A type may fix the host without minting the credential (amendment, 2026-09-01)
 
 > **Not built**, like §4a and §4b. Recorded because it sat as a three-line note in a local
