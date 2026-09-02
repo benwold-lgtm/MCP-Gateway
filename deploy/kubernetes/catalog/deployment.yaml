@@ -20,6 +20,17 @@ spec:
     spec:
       containers:
         - name: catalog
+          # ⚠️ NOT PUBLISHED. The provider tier is frozen (2026-09-01), so a version tag no
+          # longer pushes this image and no such tag exists in the registry — applying this
+          # kustomization as-is gives ImagePullBackOff, and that is the intended state rather
+          # than a defect to work around. Nothing here is deleted: ci.yml still builds and
+          # tests the catalog on every PR.
+          #
+          # To run it anyway: either build it locally
+          # (`docker build device_mcp_catalog -t <your-registry>/device-mcp-catalog:<tag>`) and
+          # point this line at your own registry, or publish the official one by running the
+          # gateway repo's "Release image" workflow by hand with `publish_catalog: true` — then
+          # pin the digest it produces, as the gateway manifests do.
           image: ghcr.io/benwold-lgtm/device-mcp-catalog:latest
           ports:
             - name: http
