@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the project is `0.x`, **minor releases may include breaking changes** — read
 the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.md).
 
-## [Unreleased]
+## [0.3.6] - 2026-09-02
 
 ### Added
 
@@ -109,6 +109,48 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Fixed
 
+- **A refused registration left the device behind.** `_apply_register` validated
+  `expected_tls_spki_sha256` and `fingerprint_policy` *after* `register_device` had written
+  the device and started its pod. Both raise 400, so the caller was told a registration had
+  failed that had in fact happened — with three consequences rather than one: the device was
+  live and **unpinned**, on the very request whose purpose was to close the
+  trust-on-first-use window; `audit_request("device.create", ...)` sits below both raises, so
+  the registration that succeeded was never audited; and the retry could not work, because
+  the corrected digest hit 409 and the PUT handled neither field. The only exit was to delete
+  and start over.
+
+  The trigger is a paste, not a typo: `openssl x509 -fingerprint -sha256` prints the
+  colon-separated upper-case form. Both fields now parse into locals above the write, beside
+  every other gate — which is what `_apply_update` always did. The two were split from one
+  path "without a second copy of the gates to drift from this one", and then drifted, in the
+  direction that writes.
+
+- **A curated device type could be published with a transport no gateway can serve.**
+  `transport` was the one curated field constrained on neither side: the catalog typed it
+  `str`, and the gateway's `_validate_transport` accepts exactly `"sse"`. So a curator could
+  publish a version with any value, it would appear in every assigned tenant's console, and
+  every claim of it would 400 — each tenant separately, naming a field they never supplied
+  and cannot change, while the curator, the only party who could fix it, was never told. Now
+  a `Literal` at the write path. No matching DB `CHECK`, deliberately: every other constraint
+  in `db.py` arrived with its column, so no row could already violate it, whereas this one
+  predates the constraint and `ADD CONSTRAINT` could fail against legacy data — a catalog
+  that will not start is worse than the one unclaimable type it prevents.
+
+- **A restore preview could mint a plan token no other replica could verify.**
+  `_plan_token_keys` fell back to a process-local HMAC key whenever `MCP_SECRET_KEY` was
+  unset, and its comment asserted distributed mode could not reach that fallback because it
+  "refuses to start without a key". It is reachable: that refusal is gated on
+  `and not allow_plaintext_credentials`, an override its own error text advertises. Under it
+  every replica mints tokens under a different key, so a preview on replica A and an apply
+  routed to replica B answers `ERR_PLAN_STALE` — and the remedy that error prints, "preview
+  again", fails again on (N-1)/N of attempts, forever.
+
+  The refusal moves to preview, where the cause can still be named: a 503 saying
+  `MCP_SECRET_KEY` is missing and must be identical on every replica. It had to *move* rather
+  than gain a better message — `ERR_PLAN_STALE` is a legitimate, expected verdict, so it can
+  never also mean "your stack is misconfigured". Embedded mode keeps the fallback: one
+  process, and "preview again" really is the whole cost of a restart.
+
 - **A device update accepted two fields and silently discarded them.** `POST /v1/devices`
   applies `expected_tls_spki_sha256` and `fingerprint_policy`; `PUT /v1/devices/{hostname}`
   parsed neither, so a request carrying either returned **200 with nothing changed**. Not a
@@ -147,6 +189,30 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
   Principal and so has a subject to record that `subject_of` cannot know.
 
 ### Changed
+
+- **The provider tier is frozen: a version tag no longer publishes the catalog image.**
+  Lite and single-tenant are the supported editions, and the foundation gets finished before
+  multi-tenancy is layered back onto it. The provider plane — catalog, enrolment, provider
+  console, delegated support grants — is not withdrawn and nothing is deleted: `ci.yml` still
+  builds and tests the catalog on every PR, and `deploy/kubernetes/catalog/` is untouched.
+  What changes is only whether a tag pushes `device-mcp-catalog` to a public registry. The
+  job stays runnable behind a manual `publish_catalog` input, because a job that cannot run
+  is a job that silently rots — which would defeat freezing rather than deleting.
+
+  **Not a reversal of [ADR-0013](docs/adr/0013-multi-tenancy.md).** D-1
+  (single-tenant-per-stack) is unaffected; it was always the model the supported editions
+  use, and a tenant stack has never needed the catalog — the base kustomization excludes it
+  deliberately.
+
+- **SyncGate Lite is its own product in its own repository.** The lite profile — its compose
+  file and its deployment guide — moved to
+  [SyncGate-Lite](https://github.com/benwold-lgtm/SyncGate-Lite) and is purged from this
+  repo. Nothing about the gateway changes: Lite runs the same published images in embedded
+  mode. The `:lite` image tag is unchanged this release, and is slated for retirement once
+  that repo pins a semver tag — a moving tag has the same problem as `:latest`.
+
+- **This repository is now `SyncGate`, and the console is `SyncGate-UI`.** URLs updated
+  throughout. GitHub redirects the old paths, so existing clones and pulls keep working.
 
 - **`POST /v1/admin/restore` is now two routes, split by scope, and the apply must
   reference the plan it was previewed from** ([ADR-0018](docs/adr/0018-device-credentials-by-reference.md)
@@ -216,31 +282,32 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Added
 
-- **An agent can propose a device registration or reconfiguration for a human to review,
-  without ever holding standing `devices:write`**
-  ([ADR-0022](docs/adr/0022-agent-initiated-device-writes-are-plan-bound.md)). Three new
-  routes: `POST /v1/devices/plans` (Propose, needs only `devices:read`, writes nothing and
-  never reaches the candidate target — deliberately, so it cannot become an unprivileged SSRF
-  probe dressed up as "building a plan"), `GET /v1/devices/plans/{id}` + `POST
-  /v1/devices/plans/{id}/approve` (Review, needs `devices:write` — approving a device-registry
-  change is squarely inside what that scope already means), and `POST
-  /v1/devices/plans/apply` (Apply, redeems the grant Review minted).
+- **The design for agent-initiated, plan-bound device writes is accepted; its HTTP surface
+  is deliberately not mounted**
+  ([ADR-0022](docs/adr/0022-agent-initiated-device-writes-are-plan-bound.md)). Propose,
+  Review and Apply were built (`POST /v1/devices/plans`, `GET /v1/devices/plans/{id}`,
+  `POST /v1/devices/plans/{id}/approve`, `POST /v1/devices/plans/apply`) and then taken back
+  down before any release carried them. **No version has ever served these routes**, and this
+  one does not either — they are reachable only from a test, via
+  `create_app(enable_write_planned=True)`.
 
-  Approval mints a `devices:write-planned` grant scoped to one caller and one exact plan
-  digest — bound to the *proposer's* subject, never the reviewer's, so an admin approving an
-  agent's plan cannot redeem it themselves. The scope is never in `ROLE_SCOPES`, `admin`
-  included: it is checked by an atomic store lookup at Apply, not by `require_scope`, and by
-  design cannot become standing access no matter who holds it. Apply recomputes the digest
-  from the resubmitted plan and only then runs `register_device`/`update_device`'s full
-  validation — the SSRF guard included — via the same internal functions those routes call
-  directly, so a valid grant is never a rubber stamp past them. A single-use grant (the
-  default) is spent by redemption itself, even if the write it gates then fails validation; a
-  reviewer can mark one repeatable instead, which is never consumed and tolerates both a
-  byte-identical reapplication and a retry after a failed one — bounded by a configurable
-  ceiling the reviewer can shorten but never lengthen.
+  Recorded here rather than dropped silently, because the reasons are the release's own
+  theme. Any one of them was sufficient:
 
-  Reuses ADR-0018 §6's canonicalization/digest utility as-is — no new digest mechanism, no
-  new canonicalization rules.
+  - The Redis proposal store writes the plan as plain JSON, so a register plan would put
+    `auth.api_key`/`client_secret` into Redis in the clear — exactly what the gateway refuses
+    to start rather than let `register_device` do.
+  - Review could not actually happen through the interface: no list route, so a reviewer
+    could not discover a proposal, and no reject route.
+  - Nothing calls them at either end. Unmounting removes no capability from anyone.
+  - Lite and single-tenant are the supported editions; this was pure surface on the plane
+    that is frozen.
+
+  **Not a retreat from plan-binding**, and not a change to the ADR. §4's repeatable grant
+  already carries routine autonomy, verified in both store implementations rather than only
+  the in-memory double. Gated by a `create_app` argument rather than by config or an
+  environment variable, deliberately: a deployment must not be able to expose this by setting
+  a variable. Re-mounting is one line, behind four conditions written at the mount site.
 
 - **A deployment can refuse inline device credentials** —
   `gateway.credentials.require_references` (or `MCP_REQUIRE_CREDENTIAL_REFS`), **off by
@@ -1846,6 +1913,7 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
+[0.3.6]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.6
 [0.3.5]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.5
 [0.3.4]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.4
 [0.3.3]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.3
