@@ -164,20 +164,12 @@ curl -X POST http://localhost:8000/v1/devices/my-sensor/mcp \
 
 ---
 
-## Lite / home deployment (Raspberry Pi, mini-PC)
+## Single-operator, one box?
 
-Want the whole stack — gateway **and** the management UI — on a low-power box for tinkering
-with home automation? [`docker-compose.lite.yml`](docker-compose.lite.yml) runs it in
-embedded mode (no Redis/worker), with local-only login and secrets generated on first boot.
-It pulls prebuilt multi-arch (amd64/arm64) images, so you only need the compose file:
-
-```bash
-curl -O https://raw.githubusercontent.com/benwold-lgtm/MCP-Gateway/main/docker-compose.lite.yml
-docker compose -f docker-compose.lite.yml up -d      # then open http://localhost:8080
-```
-
-See **[docs/lite-deploy.md](docs/lite-deploy.md)** for the full walkthrough (building from
-source, first-run credentials, connecting an MCP client, and securing it beyond localhost).
+That is a separate product: **[SyncGate Lite](https://github.com/benwold-lgtm/SyncGate-Lite)** —
+the whole stack in embedded mode on a Raspberry Pi or mini-PC, local login only, secrets
+generated on first boot. It runs these same images and has its own repo, README and release
+cadence, because single-operator is a design decision rather than a smaller configuration.
 
 ---
 
@@ -197,7 +189,7 @@ source, first-run credentials, connecting an MCP client, and securing it beyond 
 ### Claude Desktop
 
 Claude Desktop's native server config **cannot attach an `Authorization` header**, and
-every gateway deployment (including lite) requires the bearer key — so pointing it
+every gateway deployment requires the bearer key — so pointing it
 straight at the SSE URL will 401. Bridge through
 [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) instead: it runs locally
 (Node 18+), speaks stdio to Claude Desktop, and forwards the header upstream.
@@ -234,7 +226,7 @@ Two details that matter:
 
 - The token rides in `env` and is referenced as `${GATEWAY_TOKEN}` — keep **no space**
   after `Authorization:` (mcp-remote splits `args` on spaces).
-- `--allow-http` is required for a plain-HTTP gateway (a LAN/lite deploy). Drop it once
+- `--allow-http` is required for a plain-HTTP gateway (a LAN deploy). Drop it once
   the gateway is behind TLS.
 
 Restart Claude Desktop after saving. The device's tools will appear in the tool picker.
@@ -624,7 +616,7 @@ running the same product.
 |---|---|
 | **Exclusive with `api_key`** | sending both is a `400` at registration, naming the exclusivity — refused rather than resolved by precedence, because any precedence rule makes the losing value invisible |
 | **Malformed reference** | also a `400` at registration, not a device that looks fine until its first dispatch |
-| **Backends** | today: a mounted Kubernetes Secret / CSI volume, and a local file tree for Lite and embedded mode. Networked stores (Vault, cloud managers) share the same interface and are not yet implemented |
+| **Backends** | today: a mounted Kubernetes Secret / CSI volume, and a local file tree for embedded mode. Networked stores (Vault, cloud managers) share the same interface and are not yet implemented |
 | **Not for gateway-minted credentials** | an OAuth2 `refresh_token` is minted mid-exchange and stays encrypted under `MCP_SECRET_KEY` ([§1a](docs/adr/0018-device-credentials-by-reference.md)) |
 
 Two dispatch errors are deliberately distinct, because collapsing them makes a sealed store
@@ -714,7 +706,7 @@ gateway:
   trust_proxy_headers: true
 security:
   trusted_proxy_cidrs: ["10.244.0.0/16", "10.96.0.0/12"]   # k8s pod CIDR + LB range
-  # docker-compose / lite: ["172.16.0.0/12"] · host-local nginx: ["127.0.0.1/32", "::1/128"]
+  # docker-compose: ["172.16.0.0/12"] · host-local nginx: ["127.0.0.1/32", "::1/128"]
 ```
 
 Keep the list to infrastructure you control — every range you add is one more hop an attacker doesn't have to get past, and something as broad as `0.0.0.0/0` re-opens the spoofing hole completely. If the gateway isn't behind a proxy, leave `trust_proxy_headers: false` and the socket peer is used.
@@ -866,7 +858,7 @@ docker push <your-registry>/device-mcp-gateway:0.3.3
 > `newTag: dev`. Drop the digest when you do — a digest pin will not resolve against a
 > locally built image. `imagePullPolicy: IfNotPresent` then uses the loaded image.
 >
-> If you use a **moving** tag (`:latest`, `:lite`) anywhere, switch `imagePullPolicy` to
+> If you use a **moving** tag (`:latest`) anywhere, switch `imagePullPolicy` to
 > `Always` in both deployments — with `IfNotPresent` a node keeps running whatever it
 > cached, indefinitely.
 

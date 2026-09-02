@@ -50,7 +50,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/device-mcp-gateway
-          # `lite` is the friendly moving tag the home compose pins; semver + latest
+          # `lite` is the moving tag SyncGate Lite still pins (its own repo). Slated for
+          # retirement once that repo moves to a semver pin — a moving tag has the same
+          # problem as `:latest`. Until then removing it here breaks Lite's next pull.
+          # semver + latest
           # serve versioned/enterprise pulls. latest=auto tags a non-prerelease release.
           tags: |
             type=semver,pattern={{version}}
@@ -119,7 +122,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/device-mcp-catalog
-          # No `lite` tag: the lite/home profile is a single-tenant stack with no provider
+          # No `lite` tag: SyncGate Lite is a single-tenant stack with no provider
           # plane, and the catalog is a provider-plane object with no tenant reach
           # (ADR-0020 §1). Shipping it to that profile would invite exactly the bundling
           # this component was split out of.

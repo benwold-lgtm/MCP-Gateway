@@ -12,7 +12,7 @@ WORKDIR /app
 COPY --from=builder /deps /usr/local
 COPY device_mcp_gateway/ ./device_mcp_gateway/
 COPY config.yaml ./
-# /secrets is unused unless a deployment mounts a volume there (e.g. the lite compose's
+# /secrets is unused unless a deployment mounts a volume there (e.g. a compose deployment's
 # MCP_API_KEY_FILE). Pre-creating + chowning it here matters even though it's empty: when
 # Docker mounts a brand-new named volume over a path, it seeds the volume by copying
 # whatever the image has at that path (including ownership) — an image path that doesn't

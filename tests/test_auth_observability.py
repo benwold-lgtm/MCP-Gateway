@@ -209,7 +209,7 @@ def test_short_key_is_flagged(monkeypatch):
 
 
 def test_a_generated_strength_key_passes(monkeypatch):
-    """Everything the project itself generates or documents must pass: the LITE bootstrap
+    """Everything the project itself generates or documents must pass: the first-run bootstrap
     uses secrets.token_urlsafe(24) (32 chars) and the docs use openssl rand -hex 24/32."""
     import secrets
 

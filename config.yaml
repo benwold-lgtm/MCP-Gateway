@@ -518,7 +518,7 @@ security:
   # Examples:
   #   ingress-nginx / k8s — the pod CIDR the ingress controller runs in, plus the LB range:
   #     trusted_proxy_cidrs: ["10.244.0.0/16", "10.96.0.0/12"]
-  #   lite / docker-compose — the compose bridge network the proxy container sits on
+  #   docker-compose — the compose bridge network the proxy container sits on
   #   (default bridge pool is 172.16.0.0/12; check `docker network inspect <net>` if you
   #   overrode it in daemon.json or with an explicit `ipam` block):
   #     trusted_proxy_cidrs: ["172.16.0.0/12"]

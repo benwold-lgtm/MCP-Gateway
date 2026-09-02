@@ -59,7 +59,7 @@ spec:
           # via the `images:` block in kustomization.yaml). Read a digest with:
           #   docker buildx imagetools inspect ghcr.io/benwold-lgtm/device-mcp-gateway:<tag>
           #
-          # Using a MOVING tag instead (:latest, :lite) requires imagePullPolicy: Always —
+          # Using a MOVING tag instead (:latest) requires imagePullPolicy: Always —
           # with IfNotPresent a node keeps running whatever it cached, indefinitely.
           image: ghcr.io/benwold-lgtm/device-mcp-gateway:0.3.5@sha256:0682362c1e374fb4322d5e2fd43a2340b0fc1dd7e0cd56fd3511363cb6ce169a
           # Correct for a digest/immutable tag: the bits can't change under a fixed digest,
