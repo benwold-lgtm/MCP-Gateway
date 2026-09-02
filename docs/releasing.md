@@ -52,7 +52,7 @@ git command fails, `fetch` included — so a stale `origin/main` will claim you 
 commits" when you are not. Confirm against the remote without SSH:
 
 ```bash
-git ls-remote https://github.com/benwold-lgtm/MCP-Gateway.git refs/heads/main
+git ls-remote https://github.com/benwold-lgtm/SyncGate.git refs/heads/main
 ```
 
 and push over HTTPS instead. Never write a token into the remote URL — use a credential helper

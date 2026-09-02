@@ -1816,15 +1816,15 @@ This release is the output of a comprehensive security, reliability, and operabi
 - **Pull-only**: OpenAPI `webhooks` / `callbacks` are not translated, and there is no
   long-running-operation (202 / job-poll) support — calls are synchronous.
 
-[0.3.5]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.5
-[0.3.4]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.4
-[0.3.3]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.3
-[0.3.2]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.2
-[0.3.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.1
-[0.3.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.3.0
-[0.2.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.2.0
-[0.1.4]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.4
-[0.1.3]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.3
-[0.1.2]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.2
-[0.1.1]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.1
-[0.1.0]: https://github.com/benwold-lgtm/MCP-Gateway/releases/tag/v0.1.0
+[0.3.5]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.5
+[0.3.4]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.4
+[0.3.3]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.3
+[0.3.2]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.2
+[0.3.1]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.1
+[0.3.0]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.3.0
+[0.2.0]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.2.0
+[0.1.4]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.1.4
+[0.1.3]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.1.3
+[0.1.2]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.1.2
+[0.1.1]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.1.1
+[0.1.0]: https://github.com/benwold-lgtm/SyncGate/releases/tag/v0.1.0
