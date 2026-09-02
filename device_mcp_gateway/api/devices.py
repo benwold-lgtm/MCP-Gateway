@@ -194,6 +194,64 @@ def _parse_fingerprint_policy(data: dict) -> str | None:
     return value
 
 
+#: Sentinel distinguishing "clear this override" from "say nothing about it". Both arrive as
+#: ``None`` from ``_parse_fingerprint_policy``, and collapsing them is how a field becomes one
+#: you can set and never remove -- the operator who tried ``enforce`` is then stuck with it.
+_CLEAR = object()
+
+
+def _requested_fingerprint_policy(data: dict) -> str | object | None:
+    """What a PUT asks of the per-device policy: a value, ``_CLEAR``, or ``None`` for nothing.
+
+    Keyed on the PRESENCE of the key rather than its truthiness, for the same reason
+    ``_validate_upstream`` is: an absent field and a field explicitly set to null are
+    different requests, and only the caller knows which they made.
+    """
+    if "fingerprint_policy" not in data:
+        return None
+    if not data["fingerprint_policy"]:
+        return _CLEAR
+    return _parse_fingerprint_policy(data)
+
+
+def _refuse_pin_on_update(data: dict) -> None:
+    """A pin may be established at registration or re-established by approval -- never by an
+    ordinary edit.
+
+    Refused rather than honoured, and refused rather than ignored.
+
+    **Why not honoured.** Writing the pin here would be the laundering path
+    ``_carry_fingerprint`` already refuses to open. That method carries the trust record
+    across a rebuild *even when ``base_url`` changes*, on the reasoning that repointing a
+    device is a trust change and the designed way to accept one is the ``key_changed`` ->
+    approve flow (ADR-0015 Sec 6) -- loud and audited. A PUT-writable pin would hand anyone
+    holding ``devices:write`` a quieter version of exactly that: set the new key first, and
+    the probe that would have raised ``key_changed`` instead finds agreement and says
+    nothing. The alarm cannot fire, which is the same end state as the pin-clearing bug.
+
+    A conditional rule -- allow it only while the device is still unpinned -- was the other
+    candidate and is worse. It races the health check that pins on first sight, so whether
+    the write lands depends on timing, and a security rule whose outcome depends on timing is
+    one nobody can reason about at the point of use.
+
+    **Why not ignored, which is what it did.** The handler parsed neither key, so a PUT
+    carrying a digest returned 200 with the pin unchanged. An operator pinning a device that
+    way was told it worked, and the device stayed on trust-on-first-use -- the field's whole
+    purpose inverted, reported as success. A refusal that names both real paths costs one
+    request; a silent no-op costs whatever happens next.
+    """
+    if not data.get("expected_tls_spki_sha256"):
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "expected_tls_spki_sha256 cannot be set by an update. Supply it when registering the "
+            "device (it closes the trust-on-first-use window outright), or, to accept a key the "
+            "device is presenting now, use POST /v1/devices/{hostname}/fingerprint/approve."
+        ),
+    )
+
+
 @router.post(
     "/devices",
     response_model=DeviceMutationResult,
@@ -351,6 +409,10 @@ async def _apply_update(hostname: str, data: dict, request: Request) -> DeviceMu
     rate_limit_rps = _parse_rate_limit(data)
     upstream_kind, upstream_transport = _read_upstream(data, existing.upstream_kind, existing.upstream_transport)
     _validate_upstream(upstream_kind, upstream_transport, spec_url, declared=set(data.keys()))
+    # Both above the write, with every other gate — LR-51's rule. A refusal after
+    # `replace_device` is a refusal the gateway has already carried out.
+    _refuse_pin_on_update(data)
+    requested_policy = _requested_fingerprint_policy(data)
 
     device_cfg = await reg.replace_device(
         hostname=hostname,
@@ -363,6 +425,25 @@ async def _apply_update(hostname: str, data: dict, request: Request) -> DeviceMu
         upstream_kind=upstream_kind,
         upstream_transport=upstream_transport,
     )
+
+    # AFTER the write, necessarily. `replace_device` rebuilds from registration inputs and
+    # then carries the previous trust record forward wholesale (`_carry_fingerprint`), which
+    # includes the old policy — so a value applied before the write would be overwritten by
+    # the very mechanism that stops an unrelated edit from dropping it.
+    if requested_policy is not None:
+        value = None if requested_policy is _CLEAR else requested_policy
+        await reg._backend.update_device_fields(hostname, fingerprint_policy=value)
+        # Re-read for the stored truth, keeping the pre-update record if the device has
+        # vanished — a delete racing an update is not a reason to fail the update that
+        # just succeeded.
+        device_cfg = await reg.get_device(hostname) or device_cfg
+        audit_request(
+            request,
+            "device.fingerprint_policy",
+            outcome=AUDIT_OUTCOME_SUCCESS,
+            target=hostname,
+            policy=value or "inherit",
+        )
 
     audit_request(request, "device.update", outcome=AUDIT_OUTCOME_SUCCESS, target=hostname)
     return DeviceMutationResult(
