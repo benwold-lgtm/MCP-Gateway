@@ -12,7 +12,7 @@ as potentially breaking. The compatibility surfaces that matter for a live upgra
 
 | Surface | Stability | Notes |
 |---------|-----------|-------|
-| HTTP/MCP API (`/v1/devices…`, SSE) | stable within a minor | additive changes preferred; breaking changes called out in release notes |
+| HTTP/MCP API (`/v1/devices…`, SSE) | additive by preference, **not guaranteed within a minor** | while the project is `0.x` a patch release may move a route; every such change is called out in the release notes and listed under [breaking API changes](#breaking-api-changes) |
 | Redis data model (streams, registry keys, lease keys) | **mixed-version safe within a minor** — see below | the call-stream entry is forward/back-compatible by design |
 | Config schema (`config.yaml`) | additive; unknown keys **warn, don't fail** (F-50) | a new required gate is the exception — see [breaking gates](#breaking-configuration-gates) |
 | Encrypted-credential format (Fernet/MultiFernet) | stable | key rotation is orthogonal — see [secret-rotation.md](secret-rotation.md) |
@@ -98,6 +98,24 @@ on it; if a release's notes prescribe the opposite order, follow the notes.
   [replay them](runbook.md#work-the-dead-letter-queue) once the roll settles.
 - `MCPReconcilerReassignmentChurn` — brief churn during the roll is expected; sustained
   churn after it settles is a problem (see the runbook).
+
+---
+
+## Breaking API changes
+
+A gate refuses to *start*; these refuse a *call*, so nothing warns you at deploy time — a
+script keeps working right up until the first time it runs. Check this list against anything
+that talks to the management API directly.
+
+| Version | Change | What to do |
+|---------|--------|------------|
+| **0.3.6** | `POST /v1/admin/restore` is gone. It is now `POST /v1/admin/restore/preview` (needs `backup:read`, writes nothing, returns `plan_digest`/`plan_token`) and `POST /v1/admin/restore/apply` (needs `backup:write`, requires that `plan_token`). The `dry_run` body field no longer exists — which operation runs is which route you call, not a flag inside a body the caller controls. | Update any script or client posting to the old endpoint: preview first, then apply with the token it returned. A missing, mismatched, forged or expired (7-day) token is refused as `ERR_PLAN_STALE`. See [runbook.md](runbook.md#restore-from-a-backup). |
+| **0.3.6** | `PUT /v1/devices/{hostname}` now **refuses** `expected_tls_spki_sha256` with a 400. It previously accepted the field and silently discarded it, so this breaks nothing that was working — but a caller that was sending it will now see an error where it used to see a 200. | Supply the digest when *registering* the device, or accept the key the device is presenting with `POST /v1/devices/{hostname}/fingerprint/approve`. |
+
+**Distributed restore needs `MCP_SECRET_KEY` from 0.3.6.** `POST /v1/admin/restore/preview`
+answers 503 in distributed mode without it, because a plan token minted under a process-local
+key cannot be verified by the replica the apply is routed to. Set the same value on every
+replica. Embedded mode is unaffected.
 
 ---
 
