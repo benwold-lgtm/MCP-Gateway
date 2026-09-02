@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Ben Wold. All rights reserved.
 # Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE in the project root for details.
-"""First-run bootstrap for the LITE / home deployment.
+"""First-run bootstrap for a file-provisioned deployment.
 
 A home user shouldn't have to invent an API key before the gateway will require one.
-When ``MCP_API_KEY_FILE`` is set (the lite compose points it at a shared volume), this
+When ``MCP_API_KEY_FILE`` is set (a compose deployment points it at a shared volume), this
 self-provisions a single **admin** key on first boot: it generates the key, persists it
 to that path, uses it, and prints it once so the operator can point an MCP/LLM client at
 the gateway. The BFF reads the same file (``GATEWAY_TOKEN_FILE``) so the two agree without
@@ -67,7 +67,7 @@ def apply_gateway_bootstrap(cfg: dict) -> None:
 
     gateway["api_key"] = key
     if generated:
-        logger.info(f"Generated a gateway admin API key (lite first-run); saved to {path}")
+        logger.info(f"Generated a gateway admin API key (first run); saved to {path}")
         _announce_key(key, path)
 
 
@@ -84,7 +84,7 @@ def _announce_key(key: str, path: Path) -> None:
     banner = (
         "\n"
         "============================================================\n"
-        " Device MCP Gateway (lite) — admin API key generated\n"
+        " Device MCP Gateway — admin API key generated\n"
         "------------------------------------------------------------\n"
         " MCP / LLM clients must send it as a bearer token:\n"
         "   Authorization: Bearer <key>\n"

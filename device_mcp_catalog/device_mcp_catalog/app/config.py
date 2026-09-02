@@ -105,7 +105,7 @@ class Settings:
     port: int = 8100
 
     # Postgres per ADR-0020 20.1 ("resolved: PostgreSQL"). No embedded/SQLite mode: unlike
-    # the gateway, this service has no single-operator/Lite deployment target — a catalog
+    # the gateway, this service has no single-operator deployment target — a catalog
     # only exists where there is a provider plane to curate it, and ADR-0025 already
     # designs this store's durability story around Postgres specifically (WAL/PITR).
     database_url: str = ""

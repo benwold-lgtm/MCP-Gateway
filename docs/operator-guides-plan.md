@@ -162,7 +162,7 @@ discipline that keeps the ADR index current, applied to tunables. One location (
 | Parameter | Default | Source | Wired? |
 |---|---|---|---|
 | Credential resolver cache TTL (networked) | **300s** | ADR-0018 §7c | No — `read_cache_ttl` declared, unused |
-| Mounted-files / Lite resolver cache | 0, read-through | ADR-0018 §7c | Decided, not a tunable |
+| Mounted-files resolver cache | 0, read-through | ADR-0018 §7c | Decided, not a tunable |
 | Plan-digest validity | **7 days** | ADR-0018 §6 | No |
 | Break-glass credential expiry | 90 days | ADR-0023 §3 | No |
 | Break-glass reactivation-flag threshold | not picked — needs usage data | ADR-0023 §3 | No |

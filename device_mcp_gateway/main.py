@@ -196,7 +196,7 @@ def create_app(override_config: dict | None = None, *, enable_write_planned: boo
         audit_enabled=_log_cfg.get("audit_enabled", True),
     )
 
-    # LITE first-run bootstrap: when MCP_API_KEY_FILE is set, self-provision an admin key
+    # First-run bootstrap: when MCP_API_KEY_FILE is set, self-provision an admin key
     # (reading or generating + persisting it) before auth is built, so a home box requires a
     # token without hand-config. No-op otherwise, so enterprise key resolution is unchanged.
     apply_gateway_bootstrap(cfg)
@@ -328,7 +328,7 @@ def create_app(override_config: dict | None = None, *, enable_write_planned: boo
             "X-Forwarded-For and choose its own rate-limit bucket, bypassing per-IP limits "
             "entirely. List the ranges your proxies actually connect from — e.g. the cluster "
             "pod CIDR plus your ingress/LB range (ingress-nginx), or the Docker bridge network "
-            "(172.16.0.0/12) for the Compose/lite profile. Set trust_proxy_headers: false if "
+            "(172.16.0.0/12) for a docker-compose deployment. Set trust_proxy_headers: false if "
             "the gateway is not behind a proxy."
         )
     try:

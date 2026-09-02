@@ -777,7 +777,7 @@ _WEAK_KEY_VALUES = frozenset(
     }
 )
 
-# Comfortably below everything this project generates or documents: the LITE bootstrap
+# Comfortably below everything this project generates or documents: the first-run bootstrap
 # uses secrets.token_urlsafe(24) (32 chars) and the docs use `openssl rand -hex 24/32`
 # (48/64 chars). So this flags hand-typed keys without breaking a real deployment.
 _MIN_KEY_LENGTH = 16

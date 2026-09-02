@@ -337,7 +337,7 @@ who want it in-cluster.
 
 Only relevant if you configure a **networked** credential-resolver backend — Vault, a cloud
 secret manager. The default **mounted-files** backend (Kubernetes Secret/CSI volume, and
-Lite's local file tree) has no equivalent concern: per
+the local file tree) has no equivalent concern: per
 [ADR-0018 §7a](adr/0018-device-credentials-by-reference.md), it fails at **deploy time**
 (`FailedMount`, old pods keep serving), never at dispatch time, so there is no outage window
 for HA to shorten — and per §7c, the resolution cache is structurally absent for this

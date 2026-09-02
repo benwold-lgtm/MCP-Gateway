@@ -162,7 +162,7 @@ class ResolverKind(str, Enum):
     it is declared rather than inferred is not."*
     """
 
-    #: A Kubernetes Secret or CSI volume mounted into the pod, or a local file tree (Lite and
+    #: A Kubernetes Secret or CSI volume mounted into the pod, or a local file tree (
     #: embedded). §7a: the store is a dependency of *starting a pod*, not of serving a request.
     MOUNTED_FILES = "mounted_files"
 
@@ -229,7 +229,7 @@ class MountedFilesResolver:
 
     This single backend covers two of ADR-0018 §2's three rows, because they are the same
     thing at the filesystem: a **Kubernetes Secret or CSI volume mounted into the pod** is a
-    directory whose files are the keys, and a **local file tree** is what Lite and embedded
+    directory whose files are the keys, and a **local file tree** is what embedded
     mode already effectively have. Only the provisioning differs, and provisioning is not this
     module's business.
 

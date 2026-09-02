@@ -27,7 +27,7 @@ preference to config, so the secret need not live in the config file (mirrors th
 metrics-token resolution in F-36).
 
 ``verify`` can also be set via ``MCP_MTLS_VERIFY`` (env wins over the fleet
-config), so a compose/lite deployment talking to self-signed devices (UniFi
+config), so a compose deployment talking to self-signed devices (UniFi
 consoles, Home Assistant, ...) doesn't need a mounted config-file override just
 for this one flag — mirrors ``MCP_ALLOW_PRIVATE_TARGETS``. Same caveat applies:
 disable verification only on a trusted closed network.
@@ -133,7 +133,7 @@ def _resolve(mtls_cfg: dict | None, hostname: str | None = None) -> dict:
     }
 
     # MCP_MTLS_VERIFY overrides security.mtls.verify (mirrors MCP_ALLOW_PRIVATE_TARGETS):
-    # a lite/compose deployment shouldn't need a config-file mount just to talk to a
+    # a compose deployment shouldn't need a config-file mount just to talk to a
     # self-signed device on a trusted closed network. A per-device `verify` is applied
     # after this, so naming one device explicitly still beats the fleet-wide switch.
     env_verify = os.environ.get(ENV_VERIFY, "").strip()

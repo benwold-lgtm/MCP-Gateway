@@ -41,7 +41,7 @@ a UniFi console's sites/devices/clients behind the gateway.
    ```
 
    If the spec URL resolves to a private/LAN address, the gateway's SSRF guard must allow
-   it (`MCP_ALLOW_PRIVATE_TARGETS=true` — the lite stack already sets this).
+   it (`MCP_ALLOW_PRIVATE_TARGETS=true`).
 
 5. **Register with `spec_url`:**
 
@@ -70,7 +70,7 @@ set), **not** in the spec — the spec's `securitySchemes` block is documentatio
 - Self-hosted consoles serve a **self-signed certificate**, so spec fetch and tool calls
   will fail TLS verification out of the box. On a trusted home LAN, disable outbound
   verification with `MCP_MTLS_VERIFY=false` — scope and risk in
-  [docs/lite-deploy.md](../../docs/lite-deploy.md#self-signed-device-certificates).
+  [SyncGate Lite's deploy guide](https://github.com/benwold-lgtm/SyncGate-Lite/blob/main/docs/deploy.md#self-signed-device-certificates).
 - The example covers the read-only operations (sites, devices, clients). The Integration
   API also has write endpoints (port-forward rules, client blocking, ...) — add them to
   your copy the same way if you want the LLM to have them, and think twice before you do.

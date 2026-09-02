@@ -209,8 +209,10 @@ not Sentinel, so nothing about failover was exercised.
 
 ## TG-5 — The arm64 image on real arm64 hardware
 
-**What is unvalidated.** That the published `linux/arm64` image runs on an actual arm64 host
-— which is the whole point of the lite/home profile.
+**What is unvalidated.** That the published `linux/arm64` image runs on an actual arm64 host.
+The audience for arm64 is now largely [SyncGate Lite](https://github.com/benwold-lgtm/SyncGate-Lite),
+which is a separate repo — but the image is built *here*, so the gap stays here too. Splitting the
+product did not split the risk.
 
 **Why we cannot test it here.** No arm64 hardware; the image is cross-built on an amd64
 runner under QEMU emulation.
@@ -218,8 +220,8 @@ runner under QEMU emulation.
 **What exists instead.** A successful multi-arch build and push. A QEMU-built layer can
 build cleanly and still fault at runtime on real silicon, typically in a native dependency.
 
-**What would close it.** `docker compose -f docker-compose.lite.yml up` on a Pi or other
-arm64 box, through to a registered device and a successful tool call.
+**What would close it.** Bringing a stack up on a Pi or other arm64 box — SyncGate Lite's
+compose is the smallest way to do it — through to a registered device and a successful tool call.
 
 ## TG-6 — Hash-reading Redis paths in the unit tier — CLOSED
 
