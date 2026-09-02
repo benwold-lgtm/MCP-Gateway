@@ -109,6 +109,36 @@ the notes for each release before upgrading. See [docs/upgrade.md](docs/upgrade.
 
 ### Fixed
 
+- **A device update accepted two fields and silently discarded them.** `POST /v1/devices`
+  applies `expected_tls_spki_sha256` and `fingerprint_policy`; `PUT /v1/devices/{hostname}`
+  parsed neither, so a request carrying either returned **200 with nothing changed**. Not a
+  refusal — a success, reporting an outcome that had not happened. An operator tightening a
+  device to `enforce` was told it worked and the device stayed on the fleet default; an
+  operator pinning a key by hand was told it worked and the device stayed on
+  trust-on-first-use, the field's whole purpose inverted and reported as success.
+
+  The two now get **opposite** answers, and the asymmetry is the point.
+
+  `fingerprint_policy` is policy, not evidence, and is **honoured** — settable, clearable
+  with an explicit `null`, and audited as `device.fingerprint_policy`. Until now the only
+  way to move a device from `warn` to `enforce` was to delete it and register it again: a
+  cost paid to *tighten* a security control, which is the wrong direction for friction. It
+  is keyed on the **presence** of the key rather than its truthiness, so an absent field and
+  an explicit null stay different requests — collapsing them would make every unrelated edit
+  clear the override, reintroducing the ADR-0015 carry-forward bug through the door built to
+  fix its sibling.
+
+  `expected_tls_spki_sha256` is trust, and is **refused** with a 400 naming both real paths
+  (register with it, or approve the key the device is presenting now). Honouring it would be
+  a quieter version of the bypass `_carry_fingerprint` already refuses to open: write the new
+  key first and the probe that would have raised `key_changed` finds agreement instead — no
+  verdict, no quarantine, no record that a trust decision was made. Allowing it only while a
+  device is still unpinned was the other candidate and is worse: it races the health check
+  that pins on first sight, and a security rule whose outcome depends on timing is one nobody
+  can reason about at the point of use.
+
+  Both checks run **before** the write, so a refused update does not apply its other fields.
+
 - **`audit_request(..., subject=...)` raised `TypeError` instead of honouring the caller.**
   Its own comment promised that extra fields win on a key collision, "and an audit emitter
   must never be the thing that 500s a route it is only observing" — but `subject` and `rid`
